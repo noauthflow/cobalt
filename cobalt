@@ -205,6 +205,15 @@ def parse_config(path):
             # is a url, not a keyword — protects bookmarklets/urls containing '|'
             if len(parts) >= 3 and re.match(r"^[a-zA-Z][a-zA-Z0-9+.\-]*:", parts[1]):
                 parts = [parts[0], "|".join(parts[1:])]
+
+            # shorthand: `keyword = url` (no '|') -> omnibox engine named after its keyword
+            if len(parts) == 1 and "=" in stripped:
+                kw, url = (s.strip() for s in stripped.split("=", 1))
+                if not kw or not url:
+                    sys.exit(f"config error, line {n}: expected `keyword = url`, got:\n  {stripped}")
+                engines.append(make_engine(kw, kw, url, n))
+                continue
+
             if len(parts) == 2:
                 name, keyword, url = parts[0], None, parts[1]
             elif len(parts) >= 3:
@@ -218,17 +227,21 @@ def parse_config(path):
             if keyword:
                 if "|" in keyword:
                     sys.exit(f"config error, line {n}: keyword must not contain '|'")
-                if not re.search(r"%s|\{query\}", url, re.I):
-                    print(f"warning: line {n}: engine '{keyword}' has no %s in its url — "
-                          f"the query won't be inserted")
-                engines.append({"name": name, "keyword": keyword,
-                                "url": re.sub(r"\{query\}", "%s", url, flags=re.I),
-                                "favicon_url": favicon_for(url)})
+                engines.append(make_engine(name, keyword, url, n))
             else:
                 if "|" in name:
                     sys.exit(f"config error, line {n}: bookmark name contains '|' — rename it")
                 parent.append({"type": "url", "name": name, "url": url})
     return tree, engines
+
+
+def make_engine(name, keyword, url, line_no):
+    """Normalize an engine entry. %s / {query} = query placeholder (optional!);
+    a plain domain (yt = youtube.com) is a valid keyword-jump: it just navigates."""
+    url = re.sub(r"\{query\}", "%s", url, flags=re.I)
+    if "//" not in url:
+        url = "https://" + url
+    return {"name": name, "keyword": keyword, "url": url, "favicon_url": favicon_for(url)}
 
 
 def serialize(tree):
@@ -254,24 +267,26 @@ def webkit_now():
 
 
 def push_engines(profile, engines, prune, dry):
+    """Returns [(op, keyword, url)] with op in {+, ~, -} describing each change."""
     path = os.path.join(profile, "Web Data")
     try:
         con = sqlite3.connect(path)
     except sqlite3.OperationalError as e:
         sys.exit(f"error: cannot open {path} ({e}) — is the browser running? Close it and retry")
+    actions = []
     try:
         cols = {row[1] for row in con.execute("PRAGMA table_info(keywords)")}
         if "keyword" not in cols:
             sys.exit(f"error: {path} has no `keywords` table — open the browser once, then retry")
 
         now = webkit_now()
-        inserted = updated = 0
         for e in engines:
             values = {
                 "short_name": e["name"],
                 "keyword": e["keyword"],
                 "favicon_url": e["favicon_url"],
-                # Chromium's DB stores {searchTerms}; %s is just config shorthand
+                # Chromium's DB placeholder is {searchTerms}; %s is config shorthand.
+                # No placeholder at all = plain keyword-jump (yt -> youtube.com).
                 "url": e["url"].replace("%s", "{searchTerms}"),
                 "safe_for_autoreplace": 0,
                 "input_encodings": "UTF-8",
@@ -283,32 +298,34 @@ def push_engines(profile, engines, prune, dry):
                 "is_active": 1,
             }
             use = {k: v for k, v in values.items() if k in cols}
-            row = con.execute("SELECT id FROM keywords WHERE keyword = ?",
+            row = con.execute("SELECT short_name, url FROM keywords WHERE keyword = ?",
                               (e["keyword"],)).fetchone()
+            if row and row[0] == e["name"] and row[1] == use["url"]:
+                actions.append(("=", e["keyword"], e["url"]))   # already correct
+                continue
             if row:
                 sets = ", ".join(f"{k} = ?" for k in use if k != "keyword")
                 con.execute(f"UPDATE keywords SET {sets} WHERE id = ?",
                             [v for k, v in use.items() if k != "keyword"] + [row[0]])
-                updated += 1
+                actions.append(("~", e["keyword"], e["url"]))
             else:
                 keys, qs = ", ".join(use), ", ".join("?" for _ in use)
                 con.execute(f"INSERT INTO keywords ({keys}) VALUES ({qs})", list(use.values()))
-                inserted += 1
+                actions.append(("+", e["keyword"], e["url"]))
 
-        pruned = 0
         if prune:
             keep = {e["keyword"] for e in engines}
             for (kw,) in con.execute("SELECT keyword FROM keywords WHERE sync_guid LIKE ?",
                                      (GUID_PREFIX + "%",)).fetchall():
                 if kw not in keep:
                     con.execute("DELETE FROM keywords WHERE keyword = ?", (kw,))
-                    pruned += 1
+                    actions.append(("-", kw, ""))
 
         if dry:
             con.rollback()
         else:
             con.commit()
-        return inserted, updated, pruned
+        return actions
     except sqlite3.OperationalError as e:
         sys.exit(f"error: {path} is locked ({e}) — close the browser and retry")
     finally:
@@ -389,7 +406,7 @@ def push_bookmarks(profile, tree, dry):
     ids = []
     walk_ids(data, ids)
     counter = max(ids or [0]) + 1
-    created, removed = 0, []
+    created, renamed, removed = [], [], []
 
     def sync(existing, wanted):
         nonlocal counter, created
@@ -405,7 +422,7 @@ def push_bookmarks(profile, tree, dry):
                          "date_added": str(webkit_now()), "date_last_used": "0",
                          "date_modified": str(webkit_now())}
                     counter += 1
-                    created += 1
+                    created.append(m)
                 else:
                     available.remove(m)
                 m["children"] = sync(m.get("children") or [], w["children"])
@@ -417,10 +434,11 @@ def push_bookmarks(profile, tree, dry):
                          "guid": str(uuid.uuid4()), "id": str(counter),
                          "date_added": str(webkit_now()), "date_last_used": "0"}
                     counter += 1
-                    created += 1
+                    created.append(m)
                 else:
                     available.remove(m)
                 if m.get("name") != w["name"]:
+                    renamed.append((m.get("name", "?"), w["name"]))
                     m["name"] = w["name"]
             result.append(m)
         removed.extend(available)
@@ -431,7 +449,7 @@ def push_bookmarks(profile, tree, dry):
     if not dry:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=3, ensure_ascii=False)
-    return created, removed
+    return created, renamed, removed
 
 
 def pull_bookmarks(profile):
@@ -483,54 +501,93 @@ def cmd_list(args):
         print("no known browsers found — point me at one with --root /path/to/user-data-dir")
 
 
+def engine_line(e):
+    # `yt = youtube.com` when the name is the keyword, long form otherwise
+    if e["name"].lower() == e["keyword"].lower():
+        return f"{e['keyword']} = {e['url']}"
+    return f"{e['name']} | {e['keyword']} | {e['url']}"
+
+
 def cmd_pull(args):
     root, profiles = resolve_target(args)
     p = profiles[0]
     tree = pull_bookmarks(p)
     engines = pull_engines(p)
 
+    # keep engines that exist in the config but not (yet) in the browser,
+    # so pulling never silently deletes your manually added engines
+    kept = 0
+    if os.path.exists(args.out or DEFAULT_CONFIG) and not args.out:
+        _, cfg_engines = parse_config(args.out or DEFAULT_CONFIG)
+        have = {e["keyword"] for e in engines}
+        for e in cfg_engines:
+            if e["keyword"] not in have:
+                engines.append(e)
+                kept += 1
+        if kept:
+            print(f"kept {kept} engine(s) from existing config that the browser doesn't have")
+
     lines = [
         "# cobalt — generated by `cobalt pull`",
         "#   Name | url                  = bookmark (file order = bar order, strictly)",
-        "#   Name | keyword | url        = search engine (omnibox only, not a bookmark)",
+        "#   keyword = url               = omnibox engine (jump: `yt` -> youtube.com)",
+        "#   Name | keyword | url        = engine with a custom name",
+        "#   put %s in the url if you want the query inserted (yt = youtube.com/results?search_query=%s)",
         "#   [Folder]                    = folder; nesting via indentation",
         "",
     ]
     lines += serialize(tree)
     if engines:
         lines += ["", "# ── search engines (omnibox) ──"]
-        lines += [f"{e['name']} | {e['keyword']} | {e['url']}" for e in engines]
+        lines += [engine_line(e) for e in engines]
     out = args.out or DEFAULT_CONFIG
     os.makedirs(os.path.dirname(out), exist_ok=True)
     with open(out, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
-    print(f"pulled bookmarks bar ({len(tree)} top-level) + {len(engines)} engines -> {out}")
+    print(f"✓ wrote {out} ({os.path.getsize(out)} bytes): "
+          f"{len(tree)} top-level bar items, {len(engines)} engines")
 
 
 def cmd_push(args):
     tree, engines = parse_config(args.config)
     root, profiles = resolve_target(args)
     print(f"config: {args.config}  ({len(engines)} engines)")
-    if not args.dry:
-        print("NOTE: make sure the browser is closed — it rewrites these files on exit.\n")
     for p in profiles:
         label = f"{os.path.basename(root)} / {os.path.basename(p)}"
-        backup(os.path.join(p, "Bookmarks"), args.dry)
+        print(label + ":")
         if engines:
-            backup(os.path.join(p, "Web Data"), args.dry)
-            ins, upd, pruned = push_engines(p, engines, args.prune, args.dry)
-            print(f"{label}: engines +{ins} ~{upd}" + (f" pruned {pruned}" if args.prune else ""))
-        created, removed = push_bookmarks(p, tree, args.dry)
+            wd = os.path.join(p, "Web Data")
+            backup(wd, args.dry)
+            actions = push_engines(p, engines, args.prune, args.dry)
+            for op, kw, url in actions:
+                print(f"    {op} engine {kw:12} {url}")
+            if not actions:
+                print(f"    = engines: no changes")
+            if args.dry:
+                print(f"    · {wd} (dry run, not written)")
+            else:
+                print(f"    ✓ wrote {wd} ({os.path.getsize(wd)} bytes)")
+
+        bm = os.path.join(p, "Bookmarks")
+        backup(bm, args.dry)
+        created, renamed, removed = push_bookmarks(p, tree, args.dry)
         n_removed = sum(count_urls(r) for r in removed)
-        print(f"{label}: bookmarks bar matched to config "
-              f"(+{created} new, {n_removed} urls removed from the bar)")
-        if removed and args.dry:
-            for r in removed[:10]:
-                print(f"    would remove: {r.get('name', '?')} ({r.get('url', '?')[:60]})")
-            if len(removed) > 10:
-                print(f"    ... and {len(removed) - 10} more")
+        print(f"    bar: {len(created)} added, {len(renamed)} renamed, {n_removed} urls removed")
+        for c in created:
+            print(f"    + bookmark {c['name']} -> {c.get('url', '')[:60]}")
+        for old, new in renamed:
+            print(f"    ~ renamed: {old} -> {new}")
+        for r in removed:
+            n = count_urls(r)
+            print(f"    - removed: {r.get('name', '?')}" +
+                  (f" ({n} url{'s' if n != 1 else ''})" if r.get("type") == "folder" else
+                   f" ({r.get('url', '?')[:60]})"))
+        if args.dry:
+            print(f"    · {bm} (dry run, not written)")
+        else:
+            print(f"    ✓ wrote {bm} ({os.path.getsize(bm)} bytes)")
     if args.dry:
-        print("\n(dry run — nothing written)")
+        print("(dry run — nothing written)")
 
 
 def cmd_init(args):
