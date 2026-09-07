@@ -615,9 +615,10 @@ def push_engines_ff(profile, engines, prune, dry):
             kw = e["keyword"].lower()            # Firefox lowercases keyword lookups
             url = e["url"]                       # %s stays %s — Firefox's placeholder
             row = con.execute(
-                "SELECT p.url FROM moz_keywords k JOIN moz_places p ON p.id = k.place_id "
+                "SELECT p.id, p.url FROM moz_keywords k JOIN moz_places p ON p.id = k.place_id "
                 "WHERE k.keyword = ?", (kw,)).fetchone()
-            if row and row[0] == url:
+            if row and row[1] == url:
+                ensure_bookmark(row[0], e["name"], url)   # repair bookmarks missing from older pushes
                 actions.append(("=", kw, url))   # already correct
                 continue
             place = con.execute("SELECT id FROM moz_places WHERE url = ?", (url,)).fetchone()
