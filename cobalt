@@ -138,12 +138,28 @@ def resolve_target(args):
         if not root or not os.path.isdir(root):
             sys.exit(f"error: browser '{args.browser}' not found. Try `list`, or pass --root.")
     profiles = find_profiles(root)
+    names = [os.path.basename(p) for p in profiles]
+
     if args.profile:
-        profiles = [p for p in profiles if os.path.basename(p) == args.profile]
-        if not profiles:
-            sys.exit(f"error: profile '{args.profile}' not found under {root}")
+        # fuzzy match: exact, then case-insensitive, then substring (so `7` -> `Profile 7`)
+        low = args.profile.lower()
+        for candidates in (
+                [p for p in profiles if os.path.basename(p) == args.profile],
+                [p for p in profiles if os.path.basename(p).lower() == low],
+                [p for p in profiles if low in os.path.basename(p).lower()]):
+            if len(candidates) == 1:
+                return root, candidates
+            if len(candidates) > 1:
+                sys.exit(f"error: --profile '{args.profile}' matches several profiles: "
+                         f"{', '.join(os.path.basename(c) for c in candidates)}")
+        sys.exit(f"error: profile '{args.profile}' not found under {root}\n"
+                 f"       profiles: {', '.join(names)}")
+
     if not profiles:
         sys.exit(f"error: no profiles found under {root}")
+    if len(profiles) > 1 and not getattr(args, "all_profiles", False):
+        sys.exit(f"error: multiple profiles found: {', '.join(names)}\n"
+                 f"       pass --profile <name> to pick one, or --all for every profile")
     return root, profiles
 
 
@@ -467,8 +483,6 @@ def cmd_list(args):
 
 def cmd_pull(args):
     root, profiles = resolve_target(args)
-    if len(profiles) > 1:
-        print("note: multiple profiles found; pass --profile to pick one")
     p = profiles[0]
     tree = pull_bookmarks(p)
     engines = pull_engines(p)
@@ -549,12 +563,16 @@ def main():
     p_push.add_argument("--profile", help="target one profile (e.g. 'Profile 7', 'Default')")
     p_push.add_argument("--prune", action="store_true",
                         help="delete engine rows we manage that are no longer in config")
+    p_push.add_argument("--all", dest="all_profiles", action="store_true",
+                        help="apply to every profile (default asks you to pick)")
     p_push.add_argument("--dry", action="store_true")
 
     p_pull = sub.add_parser("pull", help="browser -> config (exact nesting/order)")
     p_pull.add_argument("browser", nargs="?", default="chrome")
     p_pull.add_argument("--root", help="user-data dir of any Chromium fork")
     p_pull.add_argument("--profile", help="read one profile")
+    p_pull.add_argument("--all", dest="all_profiles", action="store_true",
+                        help="merge from every profile (default asks you to pick)")
     p_pull.add_argument("-o", "--out", help="write here instead of the default config path")
 
     p_init = sub.add_parser("init", help="create a starter config")
