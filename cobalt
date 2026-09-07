@@ -271,7 +271,8 @@ def push_engines(profile, engines, prune, dry):
                 "short_name": e["name"],
                 "keyword": e["keyword"],
                 "favicon_url": e["favicon_url"],
-                "url": e["url"],
+                # Chromium's DB stores {searchTerms}; %s is just config shorthand
+                "url": e["url"].replace("%s", "{searchTerms}"),
                 "safe_for_autoreplace": 0,
                 "input_encodings": "UTF-8",
                 "suggest_url": "",
@@ -333,7 +334,8 @@ def pull_engines(profile):
         where = "WHERE " + " AND ".join(conds)
         rows = con.execute(
             f"SELECT short_name, keyword, url FROM keywords {where} ORDER BY keyword").fetchall()
-        return [{"name": r[0], "keyword": r[1], "url": r[2]}
+        return [{"name": r[0], "keyword": r[1],
+                 "url": r[2].replace("{searchTerms}", "%s")}
                 for r in rows if r[1] and r[2]]
     finally:
         con.close()
