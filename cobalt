@@ -865,6 +865,7 @@ def cmd_push(args):
                     print(f"    ✓ wrote {wd} ({os.path.getsize(wd)} bytes)")
             bm = os.path.join(p, "Bookmarks")
             backup(bm, args.dry)
+            created, renamed, removed = push_bookmarks(p, tree, args.dry)
         else:
             bm = os.path.join(p, "places.sqlite")
             backup(bm, args.dry)
@@ -874,13 +875,8 @@ def cmd_push(args):
                     print(f"    {op} engine {kw:12} {url}")
                 if not actions:
                     print(f"    = engines: no changes")
-                if args.dry:
-                    print(f"    · {bm} (dry run, not written)")
-                else:
-                    print(f"    ✓ wrote {bm} ({os.path.getsize(bm)} bytes)")
-        created, renamed, removed = push_bookmarks(p, tree, args.dry)
-        n_removed = sum(count_urls(r) for r in removed)
-        print(f"    bar: {len(created)} added, {len(renamed)} renamed, {n_removed} urls removed")
+            created, renamed, removed = push_bookmarks_ff(p, tree, args.dry)
+        print(f"    bar: {len(created)} added, {len(renamed)} renamed, {sum(count_urls(r) for r in removed)} urls removed")
         for c in created:
             print(f"    + bookmark {c['name']} -> {c.get('url', '')[:60]}")
         for old, new in renamed:
