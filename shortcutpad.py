@@ -1,19 +1,29 @@
 #!/usr/bin/env python3
 """
-shortcutpad — manage Chromium bookmarks & site-search engines from a plain config file.
+shortcutpad — manage a Chromium browser's bookmarks bar & site-search engines
+from one plain config file. No extension, no daemon, no sync service.
 
-Works with any Chromium-based browser (Chrome, Chromium, ungoogled, Helium, Vivaldi,
-Brave, Edge, Arc, Thorium, ...) because they all use the same profile format:
+  config:  ~/.config/chromium-shortcuts.conf      (override: --config or $SHORTCUTPAD_CONFIG)
 
-  <profile>/Bookmarks    -> JSON
-  <profile>/Web Data     -> SQLite, `keywords` table (omnibox site-search engines)
+Config format:
+    Name | url                     bookmark (position in file = position on the bar)
+    Name | keyword | url           site-search engine (omnibox only, NOT a bookmark)
+    [Folder]                       folder — nesting via indentation, arbitrary depth
 
-Config format (one entry per line):
-    Name | keyword | url
-A url containing %s or {query} becomes a site-search engine; a plain url becomes a bookmark.
+  Top level = directly on the bookmarks bar. Order is strict, exactly as written.
 
-IMPORTANT: run `push` while the target browser is CLOSED — Chromium rewrites both
-files on exit and will clobber your changes.
+Usage:
+    shortcutpad list                          # detected browsers + profiles
+    shortcutpad pull [chrome] [--profile P]   # browser  -> config (exact nesting/order)
+    shortcutpad push [chrome] [--profile P]   # config   -> browser (bar is made to match EXACTLY)
+    shortcutpad push ... --dry                # preview: shows what would be added/removed
+    shortcutpad push ... --prune              # also delete engine rows we manage that left the config
+
+Works with any Chromium fork (Chrome, Chromium, Helium, Vivaldi, Brave, Edge, Arc...):
+same profile format everywhere. Unknown fork? Pass --root /path/to/user-data-dir.
+
+⚠ Push only while the browser is CLOSED — it rewrites these files on exit.
+  Pull (reading) is safe any time. Backups: *.scpad-bak next to the targets.
 """
 
 import argparse
@@ -23,65 +33,63 @@ import re
 import shutil
 import sqlite3
 import sys
+import tempfile
 import time
 import uuid
 from urllib.parse import urlparse
 
-FOLDER_NAME = "Shortcut Pad"          # bookmarks folder we own on the bookmarks bar
-GUID_PREFIX = "SCPAD-"                # marks engine rows created/managed by us (for --prune)
-LINE_RE = re.compile(r"^\s*(.+?)\s*\|\s*(.*?)\s*\|\s*(\S.*?)\s*$")
-PLACEHOLDER_RE = re.compile(r"\{query\}|%s", re.IGNORECASE)
+DEFAULT_CONFIG = os.environ.get(
+    "SHORTCUTPAD_CONFIG",
+    os.path.expanduser("~/.config/chromium-shortcuts.conf"))
+GUID_PREFIX = "SCPAD-"   # marks engine rows we manage (used by --prune)
 
 
 # --------------------------------------------------------------------------
-# Browser discovery
+# Browser discovery (any Chromium fork = same profile format)
 # --------------------------------------------------------------------------
 
 def browser_roots():
-    """Known install locations per browser. --root overrides all of this."""
     home = os.path.expanduser("~")
     if sys.platform == "darwin":
         base = os.path.join(home, "Library", "Application Support")
         return {
             "chrome":   os.path.join(base, "Google/Chrome"),
             "chromium": os.path.join(base, "Chromium"),
+            "helium":   os.path.join(base, "net.imput.helium"),
             "brave":    os.path.join(base, "BraveSoftware/Brave-Browser"),
             "edge":     os.path.join(base, "Microsoft Edge"),
             "vivaldi":  os.path.join(base, "Vivaldi"),
             "opera":    os.path.join(base, "Opera"),
-            "helium":   os.path.join(base, "Helium"),
             "thorium":  os.path.join(base, "Thorium"),
             "arc":      os.path.join(base, "Arc/User Data"),
         }
     base = os.path.join(home, ".config")
     return {
         "chrome":   os.path.join(base, "google-chrome"),
-        "chromium": os.path.join(base, "chromium"),   # covers most ungoogled builds too
+        "chromium": os.path.join(base, "chromium"),
+        "helium":   os.path.join(base, "helium"),
         "brave":    os.path.join(base, "BraveSoftware/Brave-Browser"),
         "edge":     os.path.join(base, "microsoft-edge"),
         "vivaldi":  os.path.join(base, "vivaldi"),
         "opera":    os.path.join(base, "opera"),
-        "helium":   os.path.join(base, "helium"),
         "thorium":  os.path.join(base, "thorium"),
     }
 
 
 def find_profiles(root):
-    """Profile dirs (Default, Profile 1, ...) directly under a browser user-data dir."""
     profiles = []
     if not os.path.isdir(root):
         return profiles
     for name in sorted(os.listdir(root)):
         d = os.path.join(root, name)
-        if not os.path.isdir(d):
-            continue
-        if os.path.exists(os.path.join(d, "Web Data")) or os.path.exists(os.path.join(d, "Bookmarks")):
+        if os.path.isdir(d) and (
+                os.path.exists(os.path.join(d, "Web Data"))
+                or os.path.exists(os.path.join(d, "Bookmarks"))):
             profiles.append(d)
     return profiles
 
 
 def resolve_target(args):
-    """Return list of profile dirs to operate on."""
     if args.root:
         root = os.path.abspath(os.path.expanduser(args.root))
         if not os.path.isdir(root):
@@ -101,38 +109,8 @@ def resolve_target(args):
 
 
 # --------------------------------------------------------------------------
-# Config parsing
+# Config parsing / serialization
 # --------------------------------------------------------------------------
-
-def parse_config(path):
-    engines, bookmarks = [], []
-    seen_keywords = {}
-    with open(path, encoding="utf-8") as f:
-        for n, raw in enumerate(f, 1):
-            line = raw.strip()
-            if not line or line.startswith("#"):
-                continue
-            m = LINE_RE.match(line)
-            if not m:
-                sys.exit(f"config error, line {n}: expected `Name | keyword | url`, got:\n  {raw.rstrip()}")
-            name, keyword, url = m.group(1), m.group(2), m.group(3)
-            if PLACEHOLDER_RE.search(url):
-                if not keyword:
-                    sys.exit(f"config error, line {n}: search-engine url needs a keyword:\n  {raw.rstrip()}")
-                if keyword in seen_keywords:
-                    print(f"warning: line {n}: duplicate keyword '{keyword}' "
-                          f"(also line {seen_keywords[keyword]}), last one wins")
-                seen_keywords[keyword] = n
-                engines.append({
-                    "name": name,
-                    "keyword": keyword,
-                    "url": PLACEHOLDER_RE.sub("%s", url),  # Chromium's native placeholder
-                    "favicon_url": favicon_for(url),
-                })
-            else:
-                bookmarks.append({"name": name, "url": url})
-    return engines, bookmarks
-
 
 def favicon_for(url):
     p = urlparse(url if "//" in url else "https://" + url)
@@ -141,22 +119,98 @@ def favicon_for(url):
     return ""
 
 
+def parse_config(path):
+    """Returns (tree, engines). tree = ordered/nested bookmark-bar nodes."""
+    tree, engines = [], []
+    stack = [(-1, tree)]                      # (indent, list) — [Folder] pushes
+    with open(path, encoding="utf-8") as f:
+        for n, raw in enumerate(f, 1):
+            line = raw.rstrip("\n")
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            indent = len(line) - len(line.lstrip(" \t"))
+            if "\t" in line[:indent + 1]:
+                indent = line[:indent + 1].count("\t") * 4   # tabs ≈ 4 spaces
+            while stack[-1][0] >= indent:
+                stack.pop()
+            parent = stack[-1][1]
+
+            if stripped.startswith("[") and stripped.endswith("]"):
+                name = stripped[1:-1].strip()
+                if not name:
+                    sys.exit(f"config error, line {n}: empty folder name")
+                node = {"type": "folder", "name": name, "children": []}
+                parent.append(node)
+                stack.append((indent, node["children"]))
+                continue
+
+            parts = [p.strip() for p in stripped.split("|")]
+            # a second field that starts with a URL scheme (javascript:, https:, ...)
+            # is a url, not a keyword — protects bookmarklets/urls containing '|'
+            if len(parts) >= 3 and re.match(r"^[a-zA-Z][a-zA-Z0-9+.\-]*:", parts[1]):
+                parts = [parts[0], "|".join(parts[1:])]
+            if len(parts) == 2:
+                name, keyword, url = parts[0], None, parts[1]
+            elif len(parts) >= 3:
+                name, keyword, url = parts[0], parts[1], "|".join(parts[2:])
+            else:
+                sys.exit(f"config error, line {n}: expected `Name | url` or "
+                         f"`Name | keyword | url`, got:\n  {stripped}")
+            if not url:
+                sys.exit(f"config error, line {n}: missing url")
+
+            if keyword:
+                if "|" in keyword:
+                    sys.exit(f"config error, line {n}: keyword must not contain '|'")
+                if not re.search(r"%s|\{query\}", url, re.I):
+                    print(f"warning: line {n}: engine '{keyword}' has no %s in its url — "
+                          f"the query won't be inserted")
+                engines.append({"name": name, "keyword": keyword,
+                                "url": re.sub(r"\{query\}", "%s", url, flags=re.I),
+                                "favicon_url": favicon_for(url)})
+            else:
+                if "|" in name:
+                    sys.exit(f"config error, line {n}: bookmark name contains '|' — rename it")
+                parent.append({"type": "url", "name": name, "url": url})
+    return tree, engines
+
+
+def serialize(tree):
+    lines = []
+    def walk(children, depth):
+        for n in children:
+            pad = "  " * depth
+            if n["type"] == "folder":
+                lines.append(f"{pad}[{n['name']}]")
+                walk(n["children"], depth + 1)
+            else:
+                lines.append(f"{pad}{n['name']} | {n['url']}")
+    walk(tree, 0)
+    return lines
+
+
 # --------------------------------------------------------------------------
 # Web Data (SQLite) — omnibox site-search engines
 # --------------------------------------------------------------------------
 
+def webkit_now():
+    return int((time.time() + 11644473600) * 1_000_000)   # µs since 1601
+
+
 def push_engines(profile, engines, prune, dry):
     path = os.path.join(profile, "Web Data")
-    con = sqlite3.connect(path)
+    try:
+        con = sqlite3.connect(path)
+    except sqlite3.OperationalError as e:
+        sys.exit(f"error: cannot open {path} ({e}) — is the browser running? Close it and retry")
     try:
         cols = {row[1] for row in con.execute("PRAGMA table_info(keywords)")}
         if "keyword" not in cols:
             sys.exit(f"error: {path} has no `keywords` table — open the browser once, then retry")
 
         now = webkit_now()
-        existing = dict(con.execute("SELECT keyword, id FROM keywords"))
         inserted = updated = 0
-
         for e in engines:
             values = {
                 "short_name": e["name"],
@@ -173,23 +227,23 @@ def push_engines(profile, engines, prune, dry):
                 "is_active": 1,
             }
             use = {k: v for k, v in values.items() if k in cols}
-            if e["keyword"] in existing:
+            row = con.execute("SELECT id FROM keywords WHERE keyword = ?",
+                              (e["keyword"],)).fetchone()
+            if row:
                 sets = ", ".join(f"{k} = ?" for k in use if k != "keyword")
-                con.execute(f"UPDATE keywords SET {sets} WHERE keyword = ?",
-                            [v for k, v in use.items() if k != "keyword"] + [e["keyword"]])
+                con.execute(f"UPDATE keywords SET {sets} WHERE id = ?",
+                            [v for k, v in use.items() if k != "keyword"] + [row[0]])
                 updated += 1
             else:
-                keys = ", ".join(use)
-                qs = ", ".join("?" for _ in use)
+                keys, qs = ", ".join(use), ", ".join("?" for _ in use)
                 con.execute(f"INSERT INTO keywords ({keys}) VALUES ({qs})", list(use.values()))
                 inserted += 1
 
         pruned = 0
         if prune:
-            ours = con.execute("SELECT keyword FROM keywords WHERE sync_guid LIKE ?",
-                               (GUID_PREFIX + "%",)).fetchall()
             keep = {e["keyword"] for e in engines}
-            for (kw,) in ours:
+            for (kw,) in con.execute("SELECT keyword FROM keywords WHERE sync_guid LIKE ?",
+                                     (GUID_PREFIX + "%",)).fetchall():
                 if kw not in keep:
                     con.execute("DELETE FROM keywords WHERE keyword = ?", (kw,))
                     pruned += 1
@@ -199,34 +253,41 @@ def push_engines(profile, engines, prune, dry):
         else:
             con.commit()
         return inserted, updated, pruned
+    except sqlite3.OperationalError as e:
+        sys.exit(f"error: {path} is locked ({e}) — close the browser and retry")
     finally:
         con.close()
 
 
 def pull_engines(profile):
-    """User-defined engines (not built-in/prepopulated), ours first."""
+    """User-defined engines (built-in/prepopulated ones excluded)."""
     path = os.path.join(profile, "Web Data")
-    con = sqlite3.connect(path)
+    if not os.path.exists(path):
+        return []
+    # the browser may hold a lock; read a snapshot copy instead
+    tmp = tempfile.mktemp(prefix="scpad-webdata-")
+    shutil.copy2(path, tmp)
+    con = sqlite3.connect(tmp)
     try:
         cols = {row[1] for row in con.execute("PRAGMA table_info(keywords)")}
         if "keyword" not in cols:
             return []
-        prepop = "prepopulate_id" in cols
+        conds = ["prepopulate_id = 0", "keyword NOT LIKE '@%'"]
+        if "starter_pack_id" in cols:
+            conds.append("starter_pack_id = 0")
+        where = "WHERE " + " AND ".join(conds)
         rows = con.execute(
-            "SELECT short_name, keyword, url FROM keywords "
-            f"{'WHERE prepopulate_id = 0' if prepop else ''} ORDER BY keyword").fetchall()
-        return [{"name": r[0], "keyword": r[1], "url": r[2]} for r in rows if r[1] and r[2]]
+            f"SELECT short_name, keyword, url FROM keywords {where} ORDER BY keyword").fetchall()
+        return [{"name": r[0], "keyword": r[1], "url": r[2]}
+                for r in rows if r[1] and r[2]]
     finally:
         con.close()
+        os.remove(tmp)
 
 
 # --------------------------------------------------------------------------
-# Bookmarks (JSON)
+# Bookmarks (JSON) — the bar is made to match the config tree EXACTLY
 # --------------------------------------------------------------------------
-
-def webkit_now():
-    return int((time.time() + 11644473600) * 1_000_000)  # µs since 1601
-
 
 def skeleton_bookmarks():
     now = str(webkit_now())
@@ -249,73 +310,93 @@ def walk_ids(node, acc):
             walk_ids(v, acc)
 
 
-def push_bookmarks(profile, bookmarks, dry):
+def count_urls(node):
+    if node.get("type") == "url":
+        return 1
+    return sum(count_urls(c) for c in node.get("children", []) if isinstance(c, dict))
+
+
+def push_bookmarks(profile, tree, dry):
     path = os.path.join(profile, "Bookmarks")
     if os.path.exists(path):
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
     else:
         data = skeleton_bookmarks()
-
     try:
         bar = data["roots"]["bookmark_bar"]
     except KeyError:
         sys.exit(f"error: {path} has unexpected structure, aborting")
     bar.setdefault("children", [])
 
-    folder = next((c for c in bar["children"]
-                   if c.get("type") == "folder" and c.get("name") == FOLDER_NAME), None)
-    if folder is None:
-        ids = []
-        walk_ids(data, ids)
-        folder = {"children": [], "date_added": str(webkit_now()), "date_last_used": "0",
-                  "date_modified": str(webkit_now()), "guid": str(uuid.uuid4()),
-                  "id": str(max(ids or [0]) + 1), "name": FOLDER_NAME, "type": "folder"}
-        bar["children"].append(folder)
-    folder.setdefault("children", [])
-
-    want = {b["url"]: b["name"] for b in bookmarks}
-    kids = folder["children"]
-
-    # drop stale entries inside OUR folder only
-    kids[:] = [c for c in kids if c.get("type") != "url" or c.get("url") in want]
-
     ids = []
     walk_ids(data, ids)
-    next_id = max(ids or [0]) + 1
+    counter = max(ids or [0]) + 1
+    created, removed = 0, []
 
-    added = updated = 0
-    for url, name in want.items():
-        child = next((c for c in kids if c.get("type") == "url" and c.get("url") == url), None)
-        if child is None:
-            kids.append({"date_added": str(webkit_now()), "date_last_used": "0",
-                         "guid": str(uuid.uuid4()), "id": str(next_id), "name": name,
-                         "type": "url", "url": url})
-            next_id += 1
-            added += 1
-        elif child.get("name") != name:
-            child["name"] = name
-            updated += 1
+    def sync(existing, wanted):
+        nonlocal counter, created
+        available = list(existing)
+        result = []
+        for w in wanted:
+            if w["type"] == "folder":
+                m = next((c for c in available if isinstance(c, dict)
+                          and c.get("type") == "folder" and c.get("name") == w["name"]), None)
+                if m is None:
+                    m = {"type": "folder", "name": w["name"], "guid": str(uuid.uuid4()),
+                         "id": str(counter), "children": [],
+                         "date_added": str(webkit_now()), "date_last_used": "0",
+                         "date_modified": str(webkit_now())}
+                    counter += 1
+                    created += 1
+                else:
+                    available.remove(m)
+                m["children"] = sync(m.get("children") or [], w["children"])
+            else:
+                m = next((c for c in available if isinstance(c, dict)
+                          and c.get("type") == "url" and c.get("url") == w["url"]), None)
+                if m is None:
+                    m = {"type": "url", "name": w["name"], "url": w["url"],
+                         "guid": str(uuid.uuid4()), "id": str(counter),
+                         "date_added": str(webkit_now()), "date_last_used": "0"}
+                    counter += 1
+                    created += 1
+                else:
+                    available.remove(m)
+                if m.get("name") != w["name"]:
+                    m["name"] = w["name"]
+            result.append(m)
+        removed.extend(available)
+        return result
 
-    # checksum omitted -> Chromium recomputes and rewrites it on next launch
-    data.pop("checksum", None)
+    bar["children"] = sync(bar["children"], tree)
+    data.pop("checksum", None)          # Chromium recomputes on next launch
     if not dry:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=3, ensure_ascii=False)
-    return added, updated
+    return created, removed
 
 
 def pull_bookmarks(profile):
+    """The bookmarks bar, exactly as-is: nested folders, strict order."""
     path = os.path.join(profile, "Bookmarks")
     if not os.path.exists(path):
         return []
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
     bar = data.get("roots", {}).get("bookmark_bar", {})
-    folder = next((c for c in bar.get("children", [])
-                   if c.get("type") == "folder" and c.get("name") == FOLDER_NAME), {})
-    return [{"name": c.get("name", c.get("url", "")), "url": c["url"]}
-            for c in folder.get("children", []) if c.get("type") == "url"]
+
+    def convert(children):
+        out = []
+        for c in children or []:
+            if c.get("type") == "folder":
+                out.append({"type": "folder", "name": c.get("name", ""),
+                            "children": convert(c.get("children"))})
+            elif c.get("type") == "url":
+                out.append({"type": "url", "name": c.get("name", ""), "url": c.get("url", "")})
+        return out
+
+    return convert(bar.get("children"))
 
 
 # --------------------------------------------------------------------------
@@ -330,74 +411,84 @@ def backup(path, dry):
 def cmd_list(args):
     roots = browser_roots()
     width = max(map(len, roots))
-    found_any = False
+    found = False
     for name, root in roots.items():
         if not os.path.isdir(root):
             continue
         profiles = find_profiles(root)
         if not profiles:
             continue
-        found_any = True
+        found = True
         print(f"{name.ljust(width)}  {root}")
         for p in profiles:
             print(f"{' ' * width}    -> {os.path.basename(p)}")
-    if not found_any:
+    if not found:
         print("no known browsers found — point me at one with --root /path/to/user-data-dir")
 
 
-def cmd_push(args):
-    engines, bookmarks = parse_config(args.config)
+def cmd_pull(args):
     root, profiles = resolve_target(args)
-    print(f"config: {args.config}  ({len(engines)} engines, {len(bookmarks)} bookmarks)")
+    if len(profiles) > 1:
+        print("note: multiple profiles found; pass --profile to pick one")
+    p = profiles[0]
+    tree = pull_bookmarks(p)
+    engines = pull_engines(p)
+
+    lines = [
+        "# chromium-shortcuts — generated by `shortcutpad pull`",
+        "#   Name | url                  = bookmark (file order = bar order, strictly)",
+        "#   Name | keyword | url        = search engine (omnibox only, not a bookmark)",
+        "#   [Folder]                    = folder; nesting via indentation",
+        "",
+    ]
+    lines += serialize(tree)
+    if engines:
+        lines += ["", "# ── search engines (omnibox) ──"]
+        lines += [f"{e['name']} | {e['keyword']} | {e['url']}" for e in engines]
+    out = args.out or DEFAULT_CONFIG
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    with open(out, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    print(f"pulled bookmarks bar ({len(tree)} top-level) + {len(engines)} engines -> {out}")
+
+
+def cmd_push(args):
+    tree, engines = parse_config(args.config)
+    root, profiles = resolve_target(args)
+    print(f"config: {args.config}  ({len(engines)} engines)")
     if not args.dry:
         print("NOTE: make sure the browser is closed — it rewrites these files on exit.\n")
     for p in profiles:
         label = f"{os.path.basename(root)} / {os.path.basename(p)}"
         backup(os.path.join(p, "Bookmarks"), args.dry)
-        backup(os.path.join(p, "Web Data"), args.dry)
-        if engines or args.prune:
+        if engines:
+            backup(os.path.join(p, "Web Data"), args.dry)
             ins, upd, pruned = push_engines(p, engines, args.prune, args.dry)
             print(f"{label}: engines +{ins} ~{upd}" + (f" pruned {pruned}" if args.prune else ""))
-        if bookmarks:
-            added, updated = push_bookmarks(p, bookmarks, args.dry)
-            print(f"{label}: bookmarks +{added} ~{updated} (folder '{FOLDER_NAME}')")
+        created, removed = push_bookmarks(p, tree, args.dry)
+        n_removed = sum(count_urls(r) for r in removed)
+        print(f"{label}: bookmarks bar matched to config "
+              f"(+{created} new, {n_removed} urls removed from the bar)")
+        if removed and args.dry:
+            for r in removed[:10]:
+                print(f"    would remove: {r.get('name', '?')} ({r.get('url', '?')[:60]})")
+            if len(removed) > 10:
+                print(f"    ... and {len(removed) - 10} more")
     if args.dry:
         print("\n(dry run — nothing written)")
 
 
-def cmd_pull(args):
-    root, profiles = resolve_target(args)
-    engines, bookmarks, seen = [], [], set()
-    for p in profiles:
-        for e in pull_engines(p):
-            if e["keyword"] not in seen:
-                seen.add(e["keyword"])
-                engines.append(e)
-        for b in pull_bookmarks(p):
-            if b["url"] not in seen:
-                seen.add(b["url"])
-                bookmarks.append(b)
-    out = args.out or args.config
-    lines = ["# generated by `shortcutpad pull` — edit freely", ""]
-    lines += [f"{e['name']} | {e['keyword']} | {e['url']}" for e in engines]
-    if engines and bookmarks:
-        lines.append("")
-    lines += [f"{b['name']} | | {b['url']}" for b in bookmarks]
-    with open(out, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines) + "\n")
-    print(f"pulled {len(engines)} engines + {len(bookmarks)} bookmarks -> {out}")
-
-
 def cmd_init(args):
-    if os.path.exists(args.config) and not args.force:
-        sys.exit(f"error: {args.config} already exists (use --force to overwrite)")
-    os.makedirs(os.path.dirname(args.config), exist_ok=True)
+    if os.path.exists(DEFAULT_CONFIG) and not args.force:
+        sys.exit(f"error: {DEFAULT_CONFIG} already exists (use --force to overwrite)")
+    os.makedirs(os.path.dirname(DEFAULT_CONFIG), exist_ok=True)
     example = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shortcuts.conf.example")
     if os.path.exists(example):
-        shutil.copy(example, args.config)
+        shutil.copy(example, DEFAULT_CONFIG)
     else:
-        open(args.config, "w").write("# Name | keyword | url\nGitHub | gh | https://github.com/search?q=%s\n")
-    print(f"wrote {args.config} — now put it in your dotfiles repo and edit it")
+        open(DEFAULT_CONFIG, "w").write(
+            "GitHub | https://github.com\n[Search]\n  GitHub | gh | https://github.com/search?q=%s\n")
+    print(f"wrote {DEFAULT_CONFIG} — edit it, then `shortcutpad push` with the browser closed")
 
 
 # --------------------------------------------------------------------------
@@ -405,27 +496,27 @@ def cmd_init(args):
 # --------------------------------------------------------------------------
 
 def main():
-    default_config = os.environ.get("SHORTCUTPAD_CONFIG",
-                                    os.path.expanduser("~/.config/shortcutpad/shortcuts.conf"))
-    ap = argparse.ArgumentParser(prog="shortcutpad",
-                                 description="Chromium bookmarks & site-search engines from a plain config file")
-    ap.add_argument("--config", default=default_config, help=f"config file (default: {default_config})")
+    ap = argparse.ArgumentParser(
+        prog="shortcutpad",
+        description="Chromium bookmarks bar & search engines from one config file")
+    ap.add_argument("--config", default=DEFAULT_CONFIG, help=f"(default: {DEFAULT_CONFIG})")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("list", help="list detected browsers/profiles")
 
-    p_push = sub.add_parser("push", help="apply config -> browser(s)")
+    p_push = sub.add_parser("push", help="apply config -> browser (bar made to match exactly)")
     p_push.add_argument("browser", nargs="?", default="chrome")
-    p_push.add_argument("--root", help="user-data dir of any Chromium fork (vendor-agnostic escape hatch)")
-    p_push.add_argument("--profile", help="target one profile (Default, Profile 1, ...)")
-    p_push.add_argument("--prune", action="store_true", help="also delete engine rows we manage that are no longer in config")
+    p_push.add_argument("--root", help="user-data dir of any Chromium fork")
+    p_push.add_argument("--profile", help="target one profile (e.g. 'Profile 7', 'Default')")
+    p_push.add_argument("--prune", action="store_true",
+                        help="delete engine rows we manage that are no longer in config")
     p_push.add_argument("--dry", action="store_true")
 
-    p_pull = sub.add_parser("pull", help="browser -> config file")
+    p_pull = sub.add_parser("pull", help="browser -> config (exact nesting/order)")
     p_pull.add_argument("browser", nargs="?", default="chrome")
     p_pull.add_argument("--root", help="user-data dir of any Chromium fork")
     p_pull.add_argument("--profile", help="read one profile")
-    p_pull.add_argument("-o", "--out", help="write to this file instead of --config")
+    p_pull.add_argument("-o", "--out", help="write here instead of the default config path")
 
     p_init = sub.add_parser("init", help="create a starter config")
     p_init.add_argument("--force", action="store_true")
