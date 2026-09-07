@@ -38,7 +38,15 @@ cobalt push --prune               # apply + clean up removed engines
 ln -sf ~/dev/cobalt/cobalt ~/.local/bin/cobalt
 ```
 
-## Firefox / Zen
+## Firefox family (Firefox, Zen, LibreWolf, Waterfox, Floorp)
 
-Not yet — different storage (`places.sqlite` + `search.json.mozlz4`).
-Planned as a second adapter behind the same config.
+Same config, same commands — just name the browser: `cobalt push zen`.
+Bookmarks go to `places.sqlite` (toolbar root, nested, strict order). Engines
+use Firefox's native bookmark keywords (`moz_keywords`) — `yt = youtube.com`
+jumps, `%s` in a url gets the query substituted. They work from the address
+bar but don't appear in Firefox's search-settings page.
+
+## Chromium family
+
+Chrome, Chromium, Helium, Vivaldi, Brave, Edge, Arc, Opera, Thorium...
+`Bookmarks` JSON + `Web Data` SQLite, as described above.
