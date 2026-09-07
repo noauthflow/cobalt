@@ -35,7 +35,7 @@ cobalt push --prune               # apply + clean up removed engines
 ## Install
 
 ```bash
-ln -sf ~/dev/shortcut-pad/cobalt ~/.local/bin/cobalt
+ln -sf ~/dev/cobalt/cobalt ~/.local/bin/cobalt
 ```
 
 ## Firefox / Zen
