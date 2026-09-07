@@ -21,7 +21,8 @@ Usage:
     cobalt push ... --dry                # preview: shows what would be added/removed
     cobalt push ... --prune              # also delete engine rows we manage that left the config
 
-Works with any Chromium fork (Chrome, Chromium, Helium, Vivaldi, Brave, Edge, Arc...):
+Works on macOS, Linux and Windows, with any Chromium fork
+(Chrome, Chromium, Helium, Vivaldi, Brave, Edge, Arc, Opera...):
 same profile format everywhere. Unknown fork? Pass --root /path/to/user-data-dir.
 
 ⚠ Push only while the browser is CLOSED — it rewrites these files on exit.
@@ -55,26 +56,56 @@ def browser_roots():
     if sys.platform == "darwin":
         base = os.path.join(home, "Library", "Application Support")
         return {
-            "chrome":   os.path.join(base, "Google/Chrome"),
-            "chromium": os.path.join(base, "Chromium"),
-            "helium":   os.path.join(base, "net.imput.helium"),
-            "brave":    os.path.join(base, "BraveSoftware/Brave-Browser"),
-            "edge":     os.path.join(base, "Microsoft Edge"),
-            "vivaldi":  os.path.join(base, "Vivaldi"),
-            "opera":    os.path.join(base, "Opera"),
-            "thorium":  os.path.join(base, "Thorium"),
-            "arc":      os.path.join(base, "Arc/User Data"),
+            "chrome":        os.path.join(base, "Google/Chrome"),
+            "chrome-beta":   os.path.join(base, "Google/Chrome Beta"),
+            "chrome-dev":    os.path.join(base, "Google/Chrome Dev"),
+            "chrome-canary": os.path.join(base, "Google/Chrome Canary"),
+            "chromium":      os.path.join(base, "Chromium"),
+            "helium":        os.path.join(base, "net.imput.helium"),
+            "brave":         os.path.join(base, "BraveSoftware/Brave-Browser"),
+            "edge":          os.path.join(base, "Microsoft Edge"),
+            "edge-beta":     os.path.join(base, "Microsoft Edge Beta"),
+            "edge-dev":      os.path.join(base, "Microsoft Edge Dev"),
+            "edge-canary":   os.path.join(base, "Microsoft Edge Canary"),
+            "vivaldi":       os.path.join(base, "Vivaldi"),
+            "opera":         os.path.join(base, "com.operasoftware.Opera"),
+            "thorium":       os.path.join(base, "Thorium"),
+            "arc":           os.path.join(base, "Arc/User Data"),
         }
+    if sys.platform == "win32":
+        local = os.environ.get("LOCALAPPDATA", os.path.join(home, "AppData", "Local"))
+        roaming = os.environ.get("APPDATA", os.path.join(home, "AppData", "Roaming"))
+        return {
+            "chrome":        os.path.join(local, r"Google\Chrome\User Data"),
+            "chrome-beta":   os.path.join(local, r"Google\Chrome Beta\User Data"),
+            "chrome-dev":    os.path.join(local, r"Google\Chrome Dev\User Data"),
+            "chrome-canary": os.path.join(local, r"Google\Chrome SxS\User Data"),
+            "chromium":      os.path.join(local, r"Chromium\User Data"),
+            "helium":        os.path.join(local, r"Helium\User Data"),
+            "brave":         os.path.join(local, r"BraveSoftware\Brave-Browser\User Data"),
+            "edge":          os.path.join(local, r"Microsoft\Edge\User Data"),
+            "edge-beta":     os.path.join(local, r"Microsoft\Edge Beta\User Data"),
+            "edge-dev":      os.path.join(local, r"Microsoft\Edge Dev\User Data"),
+            "edge-canary":   os.path.join(local, r"Microsoft\Edge SxS\User Data"),
+            "vivaldi":       os.path.join(local, r"Vivaldi\User Data"),
+            "opera":         os.path.join(roaming, r"Opera Software\Opera Stable"),
+            "thorium":       os.path.join(local, r"Thorium\User Data"),
+        }
+    # linux & other unix
     base = os.path.join(home, ".config")
     return {
-        "chrome":   os.path.join(base, "google-chrome"),
-        "chromium": os.path.join(base, "chromium"),
-        "helium":   os.path.join(base, "helium"),
-        "brave":    os.path.join(base, "BraveSoftware/Brave-Browser"),
-        "edge":     os.path.join(base, "microsoft-edge"),
-        "vivaldi":  os.path.join(base, "vivaldi"),
-        "opera":    os.path.join(base, "opera"),
-        "thorium":  os.path.join(base, "thorium"),
+        "chrome":        os.path.join(base, "google-chrome"),
+        "chrome-beta":   os.path.join(base, "google-chrome-beta"),
+        "chrome-dev":    os.path.join(base, "google-chrome-unstable"),
+        "chromium":      os.path.join(base, "chromium"),
+        "helium":        os.path.join(base, "helium"),
+        "brave":         os.path.join(base, "BraveSoftware/Brave-Browser"),
+        "edge":          os.path.join(base, "microsoft-edge"),
+        "edge-beta":     os.path.join(base, "microsoft-edge-beta"),
+        "edge-dev":      os.path.join(base, "microsoft-edge-dev"),
+        "vivaldi":       os.path.join(base, "vivaldi"),
+        "opera":         os.path.join(base, "opera"),
+        "thorium":       os.path.join(base, "thorium"),
     }
 
 
@@ -82,11 +113,17 @@ def find_profiles(root):
     profiles = []
     if not os.path.isdir(root):
         return profiles
+
+    def has_profile_files(d):
+        return (os.path.exists(os.path.join(d, "Web Data"))
+                or os.path.exists(os.path.join(d, "Bookmarks")))
+
+    # some forks (Opera) keep the profile in the user-data dir itself
+    if has_profile_files(root):
+        profiles.append(root)
     for name in sorted(os.listdir(root)):
         d = os.path.join(root, name)
-        if os.path.isdir(d) and (
-                os.path.exists(os.path.join(d, "Web Data"))
-                or os.path.exists(os.path.join(d, "Bookmarks"))):
+        if os.path.isdir(d) and has_profile_files(d):
             profiles.append(d)
     return profiles
 

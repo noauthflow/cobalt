@@ -5,7 +5,7 @@
 Manage a Chromium browser's bookmarks bar and omnibox site-search engines from
 one plain config file. No extension, no daemon, no sync service.
 
-Works with any Chromium fork (Chrome, Chromium, Helium, Vivaldi, Brave, Edge,
+Works on macOS, Linux and Windows, with any Chromium fork (Chrome, Helium, Vivaldi, Brave, Edge,
 Arc...) — same profile format everywhere. Unknown fork? `--root /path/to/dir`.
 
 ## Config
