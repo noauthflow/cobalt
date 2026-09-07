@@ -570,8 +570,47 @@ def push_engines_ff(profile, engines, prune, dry):
     actions = []
     try:
         pcols = ff_cols(con, "moz_places")
+        bcols = ff_cols(con, "moz_bookmarks")
         if "keyword" not in ff_cols(con, "moz_keywords"):
             sys.exit(f"error: {path} has no `moz_keywords` table — open the browser once, then retry")
+
+        # Firefox urlbar keywords only fire for BOOKMARKED urls — park each engine
+        # bookmark in a dedicated folder under the menu root, out of the toolbar.
+        menu = con.execute("SELECT id FROM moz_bookmarks WHERE guid = 'menu________'").fetchone()
+        engine_folder = None
+        if menu:
+            engine_folder = con.execute(
+                "SELECT id FROM moz_bookmarks WHERE parent = ? AND type = 2 AND title = 'Cobalt Engines'",
+                (menu[0],)).fetchone()
+            if engine_folder is None:
+                now = ff_now()
+                cols = ["type", "parent", "position", "title", "dateAdded", "lastModified", "guid"]
+                vals = [2, menu[0], 0, "Cobalt Engines", now, now, ff_guid()]
+                if "syncChangeCounter" in bcols:
+                    cols.append("syncChangeCounter")
+                    vals.append(1)
+                cur = con.execute(f"INSERT INTO moz_bookmarks ({', '.join(cols)}) "
+                                  f"VALUES ({', '.join('?' * len(cols))})", vals)
+                engine_folder = (cur.lastrowid,)
+
+        def ensure_bookmark(pid, name, url):
+            if not engine_folder:
+                return
+            row = con.execute(
+                "SELECT b.id FROM moz_bookmarks b JOIN moz_places p ON p.id = b.fk "
+                "WHERE b.parent = ? AND p.url = ?", (engine_folder[0], url)).fetchone()
+            if row:
+                con.execute("UPDATE moz_bookmarks SET title = ? WHERE id = ?", (name, row[0]))
+            else:
+                now = ff_now()
+                cols = ["type", "fk", "parent", "position", "title", "dateAdded", "lastModified", "guid"]
+                vals = [1, pid, engine_folder[0], 0, name, now, now, ff_guid()]
+                if "syncChangeCounter" in bcols:
+                    cols.append("syncChangeCounter")
+                    vals.append(1)
+                con.execute(f"INSERT INTO moz_bookmarks ({', '.join(cols)}) "
+                            f"VALUES ({', '.join('?' * len(cols))})", vals)
+
         for e in engines:
             kw = e["keyword"].lower()            # Firefox lowercases keyword lookups
             url = e["url"]                       # %s stays %s — Firefox's placeholder
@@ -589,13 +628,17 @@ def push_engines_ff(profile, engines, prune, dry):
             else:
                 con.execute("INSERT INTO moz_keywords (keyword, place_id) VALUES (?, ?)", (kw, pid))
                 actions.append(("+", kw, url))
+            ensure_bookmark(pid, e["name"], url)
         if prune:
             keep = {e["keyword"].lower() for e in engines}
             ours = con.execute(
-                "SELECT k.keyword FROM moz_keywords k JOIN moz_places p ON p.id = k.place_id "
+                "SELECT k.keyword, k.place_id FROM moz_keywords k JOIN moz_places p ON p.id = k.place_id "
                 "WHERE p.title = 'cobalt-managed'").fetchall()
-            for (kw,) in ours:
+            for (kw, pid) in ours:
                 if kw not in keep:
+                    if engine_folder:
+                        con.execute("DELETE FROM moz_bookmarks WHERE fk = ? AND parent = ?",
+                                    (pid, engine_folder[0]))
                     con.execute("DELETE FROM moz_keywords WHERE keyword = ?", (kw,))
                     actions.append(("-", kw, ""))
         if dry:
