@@ -1,6 +1,6 @@
 # cobalt
 
-Cobalt is named after the periodic table: three atomic points above Chromium. (Because Chromium is better than Firefox. Yes, we now support Firefox too. Someone has to.)
+Cobalt is named after the periodic table: three atomic points above Chromium. (Because Chromium is better than Firefox :)
 
 One plain text config drives the bookmarks-bar structure and omnibox keyword engines of any chromium-family or firefox-family browser. No extension, no daemon, no sync service. The config file is the source of truth; push writes the browser's native databases directly.
 
