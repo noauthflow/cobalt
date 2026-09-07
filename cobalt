@@ -71,6 +71,12 @@ def browser_roots():
             "opera":         os.path.join(base, "com.operasoftware.Opera"),
             "thorium":       os.path.join(base, "Thorium"),
             "arc":           os.path.join(base, "Arc/User Data"),
+            # firefox family (places.sqlite-based)
+            "firefox":       os.path.join(base, "Firefox"),
+            "zen":           os.path.join(base, "zen"),
+            "librewolf":     os.path.join(base, "librewolf"),
+            "waterfox":      os.path.join(base, "Waterfox"),
+            "floorp":        os.path.join(base, "Floorp"),
         }
     if sys.platform == "win32":
         local = os.environ.get("LOCALAPPDATA", os.path.join(home, "AppData", "Local"))
@@ -90,6 +96,12 @@ def browser_roots():
             "vivaldi":       os.path.join(local, r"Vivaldi\User Data"),
             "opera":         os.path.join(roaming, r"Opera Software\Opera Stable"),
             "thorium":       os.path.join(local, r"Thorium\User Data"),
+            # firefox family (places.sqlite-based)
+            "firefox":       os.path.join(roaming, r"Mozilla\Firefox"),
+            "zen":           os.path.join(roaming, "zen"),
+            "librewolf":     os.path.join(roaming, "librewolf"),
+            "waterfox":      os.path.join(roaming, "Waterfox"),
+            "floorp":        os.path.join(roaming, "Floorp"),
         }
     # linux & other unix
     base = os.path.join(home, ".config")
@@ -106,7 +118,22 @@ def browser_roots():
         "vivaldi":       os.path.join(base, "vivaldi"),
         "opera":         os.path.join(base, "opera"),
         "thorium":       os.path.join(base, "thorium"),
+        # firefox family (places.sqlite-based)
+        "firefox":       os.path.join(home, ".mozilla/firefox"),
+        "zen":           os.path.join(home, ".zen"),
+        "librewolf":     os.path.join(home, ".librewolf"),
+        "waterfox":      os.path.join(home, ".waterfox"),
+        "floorp":        os.path.join(home, ".floorp"),
     }
+
+
+def profile_kind(d):
+    """'chromium' (Web Data / Bookmarks JSON), 'firefox' (places.sqlite), or None."""
+    if os.path.exists(os.path.join(d, "Web Data")) or os.path.exists(os.path.join(d, "Bookmarks")):
+        return "chromium"
+    if os.path.exists(os.path.join(d, "places.sqlite")):
+        return "firefox"
+    return None
 
 
 def find_profiles(root):
@@ -114,17 +141,19 @@ def find_profiles(root):
     if not os.path.isdir(root):
         return profiles
 
-    def has_profile_files(d):
-        return (os.path.exists(os.path.join(d, "Web Data"))
-                or os.path.exists(os.path.join(d, "Bookmarks")))
-
     # some forks (Opera) keep the profile in the user-data dir itself
-    if has_profile_files(root):
+    if profile_kind(root):
         profiles.append(root)
-    for name in sorted(os.listdir(root)):
-        d = os.path.join(root, name)
-        if os.path.isdir(d) and has_profile_files(d):
+    # chromium: <root>/<Profile>; firefox: <root>/Profiles/<xyz.default>
+    search_dirs = [root] + [os.path.join(root, n) for n in sorted(os.listdir(root))
+                            if os.path.isdir(os.path.join(root, n))]
+    for d in search_dirs:
+        if d != root and profile_kind(d) and d not in profiles:
             profiles.append(d)
+        for name in sorted(os.listdir(d)):
+            sub = os.path.join(d, name)
+            if os.path.isdir(sub) and profile_kind(sub) and sub not in profiles:
+                profiles.append(sub)
     return profiles
 
 
@@ -475,6 +504,255 @@ def pull_bookmarks(profile):
 
 
 # --------------------------------------------------------------------------
+# Firefox family (Zen, LibreWolf, Waterfox, Floorp, ...) — places.sqlite
+#
+# Bookmarks bar = moz_bookmarks row with guid `toolbar_____`; tree shape and
+# strict order come from `parent` + `position`. Engines use Firefox's native
+# bookmark keywords (moz_keywords): `yt = youtube.com` jumps, and a url with
+# %s gets the query substituted — same semantics as the config, no mozlz4.
+# --------------------------------------------------------------------------
+
+FF_BAR_GUID = "toolbar_____"
+
+
+def ff_now():
+    return int(time.time() * 1_000_000)          # PRTime: µs since unix epoch
+
+
+def ff_guid():
+    return uuid.uuid4().hex[:12]
+
+
+def ff_cols(con, table):
+    return {row[1] for row in con.execute(f"PRAGMA table_info({table})")}
+
+
+def ff_snapshot(profile):
+    """Copy places.sqlite (+WAL/SHM) — safe to read while the browser runs."""
+    src = os.path.join(profile, "places.sqlite")
+    tmp = tempfile.mktemp(prefix="cobalt-places-")
+    shutil.copy2(src, tmp)
+    for ext in ("-wal", "-shm"):
+        if os.path.exists(src + ext):
+            shutil.copy2(src + ext, tmp + ext)
+    return tmp
+
+
+def ff_cleanup(tmp):
+    for f in (tmp, tmp + "-wal", tmp + "-shm"):
+        if os.path.exists(f):
+            os.remove(f)
+
+
+def ff_insert_place(con, pcols, url, title):
+    cols, vals = ["url", "title", "guid", "foreign_count"], [url, title, ff_guid(), 1]
+    if "rev_host" in pcols:
+        host = urlparse(url).netloc
+        cols.append("rev_host")
+        vals.append(host[::-1] + "." if host else None)
+    if "url_hash" in pcols:
+        cols.append("url_hash")
+        vals.append(0)   # recomputed by Firefox on next maintenance
+    if "frecency" in pcols:
+        cols.append("frecency")
+        vals.append(-1)
+    cur = con.execute(f"INSERT INTO moz_places ({', '.join(cols)}) "
+                      f"VALUES ({', '.join('?' * len(cols))})", vals)
+    return cur.lastrowid
+
+
+def push_engines_ff(profile, engines, prune, dry):
+    path = os.path.join(profile, "places.sqlite")
+    try:
+        con = sqlite3.connect(path)
+    except sqlite3.OperationalError as e:
+        sys.exit(f"error: cannot open {path} ({e}) — is the browser running? Close it and retry")
+    actions = []
+    try:
+        pcols = ff_cols(con, "moz_places")
+        if "keyword" not in ff_cols(con, "moz_keywords"):
+            sys.exit(f"error: {path} has no `moz_keywords` table — open the browser once, then retry")
+        for e in engines:
+            kw = e["keyword"].lower()            # Firefox lowercases keyword lookups
+            url = e["url"]                       # %s stays %s — Firefox's placeholder
+            row = con.execute(
+                "SELECT p.url FROM moz_keywords k JOIN moz_places p ON p.id = k.place_id "
+                "WHERE k.keyword = ?", (kw,)).fetchone()
+            if row and row[0] == url:
+                actions.append(("=", kw, url))   # already correct
+                continue
+            place = con.execute("SELECT id FROM moz_places WHERE url = ?", (url,)).fetchone()
+            pid = place[0] if place else ff_insert_place(con, pcols, url, "cobalt-managed")
+            if row:
+                con.execute("UPDATE moz_keywords SET place_id = ? WHERE keyword = ?", (pid, kw))
+                actions.append(("~", kw, url))
+            else:
+                con.execute("INSERT INTO moz_keywords (keyword, place_id) VALUES (?, ?)", (kw, pid))
+                actions.append(("+", kw, url))
+        if prune:
+            keep = {e["keyword"].lower() for e in engines}
+            ours = con.execute(
+                "SELECT k.keyword FROM moz_keywords k JOIN moz_places p ON p.id = k.place_id "
+                "WHERE p.title = 'cobalt-managed'").fetchall()
+            for (kw,) in ours:
+                if kw not in keep:
+                    con.execute("DELETE FROM moz_keywords WHERE keyword = ?", (kw,))
+                    actions.append(("-", kw, ""))
+        if dry:
+            con.rollback()
+        else:
+            con.commit()
+        return actions
+    except sqlite3.OperationalError as e:
+        sys.exit(f"error: {path} is locked ({e}) — close the browser and retry")
+    finally:
+        con.close()
+
+
+def push_bookmarks_ff(profile, tree, dry):
+    path = os.path.join(profile, "places.sqlite")
+    try:
+        con = sqlite3.connect(path)
+    except sqlite3.OperationalError as e:
+        sys.exit(f"error: cannot open {path} ({e}) — is the browser running? Close it and retry")
+    created, renamed, removed = [], [], []
+    try:
+        bcols = ff_cols(con, "moz_bookmarks")
+        pcols = ff_cols(con, "moz_places")
+        row = con.execute("SELECT id FROM moz_bookmarks WHERE guid = ?", (FF_BAR_GUID,)).fetchone()
+        if row is None:
+            sys.exit(f"error: no bookmarks-toolbar root in {path} — open the browser once, then retry")
+        bar = row[0]
+
+        def children_of(pid):
+            return con.execute(
+                "SELECT b.id, b.type, b.title, p.url FROM moz_bookmarks b "
+                "LEFT JOIN moz_places p ON p.id = b.fk WHERE b.parent = ? ORDER BY b.position",
+                (pid,)).fetchall()
+
+        def node_dict(bid, t, title, url):
+            d = {"type": "url" if t == 1 else "folder", "name": title or "",
+                 "url": url or "", "children": []}
+            for (cid, ct, ctitle, curl) in children_of(bid):
+                d["children"].append(node_dict(cid, ct, ctitle, curl))
+            return d
+
+        def delete_tree(bid):
+            for (cid,) in con.execute("SELECT id FROM moz_bookmarks WHERE parent = ?",
+                                      (bid,)).fetchall():
+                delete_tree(cid)
+            con.execute("DELETE FROM moz_bookmarks WHERE id = ?", (bid,))
+
+        def new_node(kind, parent_id, name, url=None):
+            now = ff_now()
+            cols = ["type", "parent", "position", "title", "dateAdded", "lastModified", "guid"]
+            vals = [1 if kind == "url" else 2, parent_id, 0, name, now, now, ff_guid()]
+            if url is not None:
+                cols.insert(2, "fk")
+                vals.insert(2, ff_insert_place(con, pcols, url, name))
+            if "syncChangeCounter" in bcols:
+                cols.append("syncChangeCounter")
+                vals.append(1)
+            cur = con.execute(f"INSERT INTO moz_bookmarks ({', '.join(cols)}) "
+                              f"VALUES ({', '.join('?' * len(cols))})", vals)
+            return cur.lastrowid
+
+        def sync(parent_id, existing, wanted):
+            avail = list(existing)
+            result = []
+            for w in wanted:
+                if w["type"] == "folder":
+                    m = next((r for r in avail if r[1] == 2 and (r[2] or "") == w["name"]), None)
+                    if m is None:
+                        bid = new_node("folder", parent_id, w["name"])
+                        created.append({"name": w["name"], "type": "folder"})
+                    else:
+                        bid = m[0]
+                        avail.remove(m)
+                    sync(bid, children_of(bid), w["children"])
+                else:
+                    m = next((r for r in avail if r[1] == 1 and (r[3] or "") == w["url"]), None)
+                    if m is None:
+                        bid = new_node("url", parent_id, w["name"], w["url"])
+                        created.append({"name": w["name"], "type": "url", "url": w["url"]})
+                    else:
+                        bid = m[0]
+                        avail.remove(m)
+                        if (m[2] or "") != w["name"]:
+                            renamed.append((m[2] or "", w["name"]))
+                            sets = "title = ?"
+                            if "syncChangeCounter" in bcols:
+                                sets += ", syncChangeCounter = syncChangeCounter + 1"
+                            con.execute(f"UPDATE moz_bookmarks SET {sets} WHERE id = ?",
+                                        (w["name"], bid))
+                result.append(bid)
+            for i, bid in enumerate(result):
+                con.execute("UPDATE moz_bookmarks SET position = ? WHERE id = ?", (i, bid))
+            for r in avail:
+                removed.append(node_dict(*r))
+                delete_tree(r[0])
+
+        sync(bar, children_of(bar), tree)
+        if dry:
+            con.rollback()
+        else:
+            con.commit()
+        return created, renamed, removed
+    except sqlite3.OperationalError as e:
+        sys.exit(f"error: {path} is locked ({e}) — close the browser and retry")
+    finally:
+        con.close()
+
+
+def pull_bookmarks_ff(profile):
+    path = os.path.join(profile, "places.sqlite")
+    if not os.path.exists(path):
+        return []
+    tmp = ff_snapshot(profile)
+    try:
+        con = sqlite3.connect(tmp)
+        try:
+            row = con.execute("SELECT id FROM moz_bookmarks WHERE guid = ?",
+                              (FF_BAR_GUID,)).fetchone()
+            return conv2(con, row[0]) if row else []
+        finally:
+            con.close()
+    finally:
+        ff_cleanup(tmp)
+
+
+def conv2(con, pid):
+    out = []
+    for (bid, t, title, url) in con.execute(
+            "SELECT b.id, b.type, b.title, p.url FROM moz_bookmarks b "
+            "LEFT JOIN moz_places p ON p.id = b.fk WHERE b.parent = ? ORDER BY b.position",
+            (pid,)).fetchall():
+        if t == 1:
+            out.append({"type": "url", "name": title or "", "url": url or ""})
+        elif t == 2:
+            out.append({"type": "folder", "name": title or "", "children": conv2(con, bid)})
+    return out
+
+
+def pull_engines_ff(profile):
+    path = os.path.join(profile, "places.sqlite")
+    if not os.path.exists(path):
+        return []
+    tmp = ff_snapshot(profile)
+    try:
+        con = sqlite3.connect(tmp)
+        try:
+            rows = con.execute(
+                "SELECT k.keyword, p.url FROM moz_keywords k "
+                "JOIN moz_places p ON p.id = k.place_id ORDER BY k.keyword").fetchall()
+            return [make_engine(r[0], r[0], r[1], 0) for r in rows if r[0] and r[1]]
+        finally:
+            con.close()
+    finally:
+        ff_cleanup(tmp)
+
+
+# --------------------------------------------------------------------------
 # Commands
 # --------------------------------------------------------------------------
 
@@ -495,8 +773,8 @@ def cmd_list(args):
             continue
         found = True
         print(f"{name.ljust(width)}  {root}")
-        for p in profiles:
-            print(f"{' ' * width}    -> {os.path.basename(p)}")
+        for pr in profiles:
+            print(f"{' ' * width}    -> {os.path.basename(pr)}  [{profile_kind(pr)}]")
     if not found:
         print("no known browsers found — point me at one with --root /path/to/user-data-dir")
 
@@ -511,8 +789,12 @@ def engine_line(e):
 def cmd_pull(args):
     root, profiles = resolve_target(args)
     p = profiles[0]
-    tree = pull_bookmarks(p)
-    engines = pull_engines(p)
+    if profile_kind(p) == "chromium":
+        tree = pull_bookmarks(p)
+        engines = pull_engines(p)
+    else:
+        tree = pull_bookmarks_ff(p)
+        engines = pull_engines_ff(p)
 
     # keep engines that exist in the config but not (yet) in the browser,
     # so pulling never silently deletes your manually added engines
@@ -565,23 +847,37 @@ def cmd_push(args):
     root, profiles = resolve_target(args)
     print(f"config: {args.config}  ({len(engines)} engines)")
     for p in profiles:
-        label = f"{os.path.basename(root)} / {os.path.basename(p)}"
+        kind = profile_kind(p)
+        label = f"{os.path.basename(root)} / {os.path.basename(p)} [{kind}]"
         print(label + ":")
-        if engines:
-            wd = os.path.join(p, "Web Data")
-            backup(wd, args.dry)
-            actions = push_engines(p, engines, args.prune, args.dry)
-            for op, kw, url in actions:
-                print(f"    {op} engine {kw:12} {url}")
-            if not actions:
-                print(f"    = engines: no changes")
-            if args.dry:
-                print(f"    · {wd} (dry run, not written)")
-            else:
-                print(f"    ✓ wrote {wd} ({os.path.getsize(wd)} bytes)")
-
-        bm = os.path.join(p, "Bookmarks")
-        backup(bm, args.dry)
+        if kind == "chromium":
+            if engines:
+                wd = os.path.join(p, "Web Data")
+                backup(wd, args.dry)
+                actions = push_engines(p, engines, args.prune, args.dry)
+                for op, kw, url in actions:
+                    print(f"    {op} engine {kw:12} {url}")
+                if not actions:
+                    print(f"    = engines: no changes")
+                if args.dry:
+                    print(f"    · {wd} (dry run, not written)")
+                else:
+                    print(f"    ✓ wrote {wd} ({os.path.getsize(wd)} bytes)")
+            bm = os.path.join(p, "Bookmarks")
+            backup(bm, args.dry)
+        else:
+            bm = os.path.join(p, "places.sqlite")
+            backup(bm, args.dry)
+            if engines:
+                actions = push_engines_ff(p, engines, args.prune, args.dry)
+                for op, kw, url in actions:
+                    print(f"    {op} engine {kw:12} {url}")
+                if not actions:
+                    print(f"    = engines: no changes")
+                if args.dry:
+                    print(f"    · {bm} (dry run, not written)")
+                else:
+                    print(f"    ✓ wrote {bm} ({os.path.getsize(bm)} bytes)")
         created, renamed, removed = push_bookmarks(p, tree, args.dry)
         n_removed = sum(count_urls(r) for r in removed)
         print(f"    bar: {len(created)} added, {len(renamed)} renamed, {n_removed} urls removed")
