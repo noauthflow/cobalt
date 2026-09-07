@@ -548,6 +548,18 @@ def cmd_pull(args):
           f"{len(tree)} top-level bar items, {len(engines)} engines")
 
 
+def sync_enabled(profile):
+    """True if Chrome Sync is on for bookmarks in this profile (server may restore deletes)."""
+    try:
+        with open(os.path.join(profile, "Preferences"), encoding="utf-8") as f:
+            prefs = json.load(f)
+    except (OSError, ValueError):
+        return False
+    if not prefs.get("sync", {}).get("has_setup_completed"):
+        return False
+    return prefs.get("sync", {}).get("selected_types", {}).get("bookmarks", True)
+
+
 def cmd_push(args):
     tree, engines = parse_config(args.config)
     root, profiles = resolve_target(args)
@@ -582,6 +594,11 @@ def cmd_push(args):
             print(f"    - removed: {r.get('name', '?')}" +
                   (f" ({n} url{'s' if n != 1 else ''})" if r.get("type") == "folder" else
                    f" ({r.get('url', '?')[:60]})"))
+        if removed and sync_enabled(p):
+            print("    ⚠ Chrome Sync is ON for bookmarks — the server may re-add these "
+                  "deleted items on next launch.")
+            print("      If they come back: chrome://settings/syncSetup → Manage sync → "
+                  "toggle Bookmarks off (or delete them once inside Chrome).")
         if args.dry:
             print(f"    · {bm} (dry run, not written)")
         else:
