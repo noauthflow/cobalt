@@ -1,0 +1,17 @@
+# shortcutpad config — one entry per line: Name | keyword | url
+# A url containing %s or {query} becomes a site-search engine (usable from the omnibox).
+# A plain url becomes a bookmark.
+# Blank lines and # comments are ignored.
+
+GitHub          | gh    | https://github.com/search?q=%s
+Google          | g     | https://www.google.com/search?q=%s
+DuckDuckGo      | d     | https://duckduckgo.com/?q=%s
+Wikipedia       | w     | https://en.wikipedia.org/w/index.php?search=%s
+YouTube         | yt    | https://www.youtube.com/results?search_query=%s
+Hacker News     | hn    | https://hn.algolia.com/?q=%s
+MDN             | mdn   | https://developer.mozilla.org/en-US/search?q=%s
+Stack Overflow  | so    | https://stackoverflow.com/search?q=%s
+Reddit          | r     | https://www.reddit.com/search/?q=%s
+Sourcegraph     | sg    | https://sourcegraph.com/search?q=%s
+NPM             | npm   | https://www.npmjs.com/search?q=%s
+GitHub Home     | ghh   | https://github.com
