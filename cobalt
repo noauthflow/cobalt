@@ -1,32 +1,7 @@
 #!/usr/bin/env python3
 """
-cobalt — manage a Chromium browser's bookmarks bar & site-search engines
-from one plain config file. No extension, no daemon, no sync service.
-
-(atomic number 27: three spots after Chromium)
-
-  config:  ~/.config/cobalt.conf      (override: --config or $COBALT_CONFIG)
-
-Config format:
-    Name | url                     bookmark (position in file = position on the bar)
-    Name | keyword | url           site-search engine (omnibox only, NOT a bookmark)
-    [Folder]                       folder — nesting via indentation, arbitrary depth
-
-  Top level = directly on the bookmarks bar. Order is strict, exactly as written.
-
-Usage:
-    cobalt list                          # detected browsers + profiles
-    cobalt pull [chrome] [--profile P]   # browser  -> config (exact nesting/order)
-    cobalt push [chrome] [--profile P]   # config   -> browser (bar is made to match EXACTLY)
-    cobalt push ... --dry                # preview: shows what would be added/removed
-    cobalt push ... --prune              # also delete engine rows we manage that left the config
-
-Works on macOS, Linux and Windows, with any Chromium fork
-(Chrome, Chromium, Helium, Vivaldi, Brave, Edge, Arc, Opera...):
-same profile format everywhere. Unknown fork? Pass --root /path/to/user-data-dir.
-
-⚠ Push only while the browser is CLOSED — it rewrites these files on exit.
-  Pull (reading) is safe any time. Backups: *.cobalt-bak next to the targets.
+cobalt — bookmarks bar & omnibox keyword engines for Chromium and Firefox
+family browsers, driven by one plain config file. See README.md.
 """
 
 import argparse
@@ -44,12 +19,7 @@ from urllib.parse import urlparse
 DEFAULT_CONFIG = os.environ.get(
     "COBALT_CONFIG",
     os.path.expanduser("~/.config/cobalt.conf"))
-GUID_PREFIX = "COBALT-"   # marks engine rows we manage (used by --prune)
-
-
-# --------------------------------------------------------------------------
-# Browser discovery (any Chromium fork = same profile format)
-# --------------------------------------------------------------------------
+GUID_PREFIX = "COBALT-"
 
 def browser_roots():
     home = os.path.expanduser("~")
@@ -71,7 +41,7 @@ def browser_roots():
             "opera":         os.path.join(base, "com.operasoftware.Opera"),
             "thorium":       os.path.join(base, "Thorium"),
             "arc":           os.path.join(base, "Arc/User Data"),
-            # firefox family (places.sqlite-based)
+
             "firefox":       os.path.join(base, "Firefox"),
             "zen":           os.path.join(base, "zen"),
             "librewolf":     os.path.join(base, "librewolf"),
@@ -96,14 +66,14 @@ def browser_roots():
             "vivaldi":       os.path.join(local, r"Vivaldi\User Data"),
             "opera":         os.path.join(roaming, r"Opera Software\Opera Stable"),
             "thorium":       os.path.join(local, r"Thorium\User Data"),
-            # firefox family (places.sqlite-based)
+
             "firefox":       os.path.join(roaming, r"Mozilla\Firefox"),
             "zen":           os.path.join(roaming, "zen"),
             "librewolf":     os.path.join(roaming, "librewolf"),
             "waterfox":      os.path.join(roaming, "Waterfox"),
             "floorp":        os.path.join(roaming, "Floorp"),
         }
-    # linux & other unix
+
     base = os.path.join(home, ".config")
     return {
         "chrome":        os.path.join(base, "google-chrome"),
@@ -118,7 +88,7 @@ def browser_roots():
         "vivaldi":       os.path.join(base, "vivaldi"),
         "opera":         os.path.join(base, "opera"),
         "thorium":       os.path.join(base, "thorium"),
-        # firefox family (places.sqlite-based)
+
         "firefox":       os.path.join(home, ".mozilla/firefox"),
         "zen":           os.path.join(home, ".zen"),
         "librewolf":     os.path.join(home, ".librewolf"),
@@ -126,25 +96,21 @@ def browser_roots():
         "floorp":        os.path.join(home, ".floorp"),
     }
 
-
 def profile_kind(d):
-    """'chromium' (Web Data / Bookmarks JSON), 'firefox' (places.sqlite), or None."""
     if os.path.exists(os.path.join(d, "Web Data")) or os.path.exists(os.path.join(d, "Bookmarks")):
         return "chromium"
     if os.path.exists(os.path.join(d, "places.sqlite")):
         return "firefox"
     return None
 
-
 def find_profiles(root):
     profiles = []
     if not os.path.isdir(root):
         return profiles
 
-    # some forks (Opera) keep the profile in the user-data dir itself
     if profile_kind(root):
         profiles.append(root)
-    # chromium: <root>/<Profile>; firefox: <root>/Profiles/<xyz.default>
+
     search_dirs = [root] + [os.path.join(root, n) for n in sorted(os.listdir(root))
                             if os.path.isdir(os.path.join(root, n))]
     for d in search_dirs:
@@ -155,7 +121,6 @@ def find_profiles(root):
             if os.path.isdir(sub) and profile_kind(sub) and sub not in profiles:
                 profiles.append(sub)
     return profiles
-
 
 def resolve_target(args):
     if args.root:
@@ -170,7 +135,7 @@ def resolve_target(args):
     names = [os.path.basename(p) for p in profiles]
 
     if args.profile:
-        # fuzzy match: exact, then case-insensitive, then substring (so `7` -> `Profile 7`)
+
         low = args.profile.lower()
         for candidates in (
                 [p for p in profiles if os.path.basename(p) == args.profile],
@@ -191,22 +156,15 @@ def resolve_target(args):
                  f"       pass --profile <name> to pick one, or --all for every profile")
     return root, profiles
 
-
-# --------------------------------------------------------------------------
-# Config parsing / serialization
-# --------------------------------------------------------------------------
-
 def favicon_for(url):
     p = urlparse(url if "//" in url else "https://" + url)
     if p.scheme in ("http", "https") and p.netloc:
         return f"{p.scheme}://{p.netloc}/favicon.ico"
     return ""
 
-
 def parse_config(path):
-    """Returns (tree, engines). tree = ordered/nested bookmark-bar nodes."""
     tree, engines = [], []
-    stack = [(-1, tree)]                      # (indent, list) — [Folder] pushes
+    stack = [(-1, tree)]
     with open(path, encoding="utf-8") as f:
         for n, raw in enumerate(f, 1):
             line = raw.rstrip("\n")
@@ -215,7 +173,7 @@ def parse_config(path):
                 continue
             indent = len(line) - len(line.lstrip(" \t"))
             if "\t" in line[:indent + 1]:
-                indent = line[:indent + 1].count("\t") * 4   # tabs ≈ 4 spaces
+                indent = line[:indent + 1].count("\t") * 4
             while stack[-1][0] >= indent:
                 stack.pop()
             parent = stack[-1][1]
@@ -230,12 +188,10 @@ def parse_config(path):
                 continue
 
             parts = [p.strip() for p in stripped.split("|")]
-            # a second field that starts with a URL scheme (javascript:, https:, ...)
-            # is a url, not a keyword — protects bookmarklets/urls containing '|'
+
             if len(parts) >= 3 and re.match(r"^[a-zA-Z][a-zA-Z0-9+.\-]*:", parts[1]):
                 parts = [parts[0], "|".join(parts[1:])]
 
-            # shorthand: `keyword = url` (no '|') -> omnibox engine named after its keyword
             if len(parts) == 1 and "=" in stripped:
                 kw, url = (s.strip() for s in stripped.split("=", 1))
                 if not kw or not url:
@@ -263,15 +219,11 @@ def parse_config(path):
                 parent.append({"type": "url", "name": name, "url": url})
     return tree, engines
 
-
 def make_engine(name, keyword, url, line_no):
-    """Normalize an engine entry. %s / {query} = query placeholder (optional!);
-    a plain domain (yt = youtube.com) is a valid keyword-jump: it just navigates."""
     url = re.sub(r"\{query\}", "%s", url, flags=re.I)
     if "//" not in url:
         url = "https://" + url
     return {"name": name, "keyword": keyword, "url": url, "favicon_url": favicon_for(url)}
-
 
 def serialize(tree):
     lines = []
@@ -286,17 +238,10 @@ def serialize(tree):
     walk(tree, 0)
     return lines
 
-
-# --------------------------------------------------------------------------
-# Web Data (SQLite) — omnibox site-search engines
-# --------------------------------------------------------------------------
-
 def webkit_now():
-    return int((time.time() + 11644473600) * 1_000_000)   # µs since 1601
-
+    return int((time.time() + 11644473600) * 1_000_000)
 
 def push_engines(profile, engines, prune, dry):
-    """Returns [(op, keyword, url)] with op in {+, ~, -} describing each change."""
     path = os.path.join(profile, "Web Data")
     try:
         con = sqlite3.connect(path)
@@ -314,8 +259,7 @@ def push_engines(profile, engines, prune, dry):
                 "short_name": e["name"],
                 "keyword": e["keyword"],
                 "favicon_url": e["favicon_url"],
-                # Chromium's DB placeholder is {searchTerms}; %s is config shorthand.
-                # No placeholder at all = plain keyword-jump (yt -> youtube.com).
+
                 "url": e["url"].replace("%s", "{searchTerms}"),
                 "safe_for_autoreplace": 0,
                 "input_encodings": "UTF-8",
@@ -330,7 +274,7 @@ def push_engines(profile, engines, prune, dry):
             row = con.execute("SELECT short_name, url FROM keywords WHERE keyword = ?",
                               (e["keyword"],)).fetchone()
             if row and row[0] == e["name"] and row[1] == use["url"]:
-                actions.append(("=", e["keyword"], e["url"]))   # already correct
+                actions.append(("=", e["keyword"], e["url"]))
                 continue
             if row:
                 sets = ", ".join(f"{k} = ?" for k in use if k != "keyword")
@@ -360,13 +304,11 @@ def push_engines(profile, engines, prune, dry):
     finally:
         con.close()
 
-
 def pull_engines(profile):
-    """User-defined engines (built-in/prepopulated ones excluded)."""
     path = os.path.join(profile, "Web Data")
     if not os.path.exists(path):
         return []
-    # the browser may hold a lock; read a snapshot copy instead
+
     tmp = tempfile.mktemp(prefix="cobalt-webdata-")
     shutil.copy2(path, tmp)
     con = sqlite3.connect(tmp)
@@ -387,11 +329,6 @@ def pull_engines(profile):
         con.close()
         os.remove(tmp)
 
-
-# --------------------------------------------------------------------------
-# Bookmarks (JSON) — the bar is made to match the config tree EXACTLY
-# --------------------------------------------------------------------------
-
 def skeleton_bookmarks():
     now = str(webkit_now())
     def folder(i, name):
@@ -402,7 +339,6 @@ def skeleton_bookmarks():
                       "other": folder(2, "Other bookmarks"),
                       "synced": folder(3, "Mobile bookmarks")}, "version": 1}
 
-
 def walk_ids(node, acc):
     if isinstance(node, dict):
         try:
@@ -412,12 +348,10 @@ def walk_ids(node, acc):
         for v in node.values():
             walk_ids(v, acc)
 
-
 def count_urls(node):
     if node.get("type") == "url":
         return 1
     return sum(count_urls(c) for c in node.get("children", []) if isinstance(c, dict))
-
 
 def push_bookmarks(profile, tree, dry):
     path = os.path.join(profile, "Bookmarks")
@@ -474,15 +408,13 @@ def push_bookmarks(profile, tree, dry):
         return result
 
     bar["children"] = sync(bar["children"], tree)
-    data.pop("checksum", None)          # Chromium recomputes on next launch
+    data.pop("checksum", None)
     if not dry:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=3, ensure_ascii=False)
     return created, renamed, removed
 
-
 def pull_bookmarks(profile):
-    """The bookmarks bar, exactly as-is: nested folders, strict order."""
     path = os.path.join(profile, "Bookmarks")
     if not os.path.exists(path):
         return []
@@ -502,33 +434,18 @@ def pull_bookmarks(profile):
 
     return convert(bar.get("children"))
 
-
-# --------------------------------------------------------------------------
-# Firefox family (Zen, LibreWolf, Waterfox, Floorp, ...) — places.sqlite
-#
-# Bookmarks bar = moz_bookmarks row with guid `toolbar_____`; tree shape and
-# strict order come from `parent` + `position`. Engines use Firefox's native
-# bookmark keywords (moz_keywords): `yt = youtube.com` jumps, and a url with
-# %s gets the query substituted — same semantics as the config, no mozlz4.
-# --------------------------------------------------------------------------
-
 FF_BAR_GUID = "toolbar_____"
 
-
 def ff_now():
-    return int(time.time() * 1_000_000)          # PRTime: µs since unix epoch
-
+    return int(time.time() * 1_000_000)
 
 def ff_guid():
     return uuid.uuid4().hex[:12]
 
-
 def ff_cols(con, table):
     return {row[1] for row in con.execute(f"PRAGMA table_info({table})")}
 
-
 def ff_snapshot(profile):
-    """Copy places.sqlite (+WAL/SHM) — safe to read while the browser runs."""
     src = os.path.join(profile, "places.sqlite")
     tmp = tempfile.mktemp(prefix="cobalt-places-")
     shutil.copy2(src, tmp)
@@ -537,12 +454,10 @@ def ff_snapshot(profile):
             shutil.copy2(src + ext, tmp + ext)
     return tmp
 
-
 def ff_cleanup(tmp):
     for f in (tmp, tmp + "-wal", tmp + "-shm"):
         if os.path.exists(f):
             os.remove(f)
-
 
 def ff_insert_place(con, pcols, url, title):
     cols, vals = ["url", "title", "guid", "foreign_count"], [url, title, ff_guid(), 1]
@@ -552,14 +467,13 @@ def ff_insert_place(con, pcols, url, title):
         vals.append(host[::-1] + "." if host else None)
     if "url_hash" in pcols:
         cols.append("url_hash")
-        vals.append(0)   # recomputed by Firefox on next maintenance
+        vals.append(0)
     if "frecency" in pcols:
         cols.append("frecency")
         vals.append(-1)
     cur = con.execute(f"INSERT INTO moz_places ({', '.join(cols)}) "
                       f"VALUES ({', '.join('?' * len(cols))})", vals)
     return cur.lastrowid
-
 
 def push_engines_ff(profile, engines, prune, dry):
     path = os.path.join(profile, "places.sqlite")
@@ -574,8 +488,6 @@ def push_engines_ff(profile, engines, prune, dry):
         if "keyword" not in ff_cols(con, "moz_keywords"):
             sys.exit(f"error: {path} has no `moz_keywords` table — open the browser once, then retry")
 
-        # Firefox urlbar keywords only fire for BOOKMARKED urls — park each engine
-        # bookmark in a dedicated folder under the menu root, out of the toolbar.
         menu = con.execute("SELECT id FROM moz_bookmarks WHERE guid = 'menu________'").fetchone()
         engine_folder = None
         if menu:
@@ -612,14 +524,14 @@ def push_engines_ff(profile, engines, prune, dry):
                             f"VALUES ({', '.join('?' * len(cols))})", vals)
 
         for e in engines:
-            kw = e["keyword"].lower()            # Firefox lowercases keyword lookups
-            url = e["url"]                       # %s stays %s — Firefox's placeholder
+            kw = e["keyword"].lower()
+            url = e["url"]
             row = con.execute(
                 "SELECT p.id, p.url FROM moz_keywords k JOIN moz_places p ON p.id = k.place_id "
                 "WHERE k.keyword = ?", (kw,)).fetchone()
             if row and row[1] == url:
-                ensure_bookmark(row[0], e["name"], url)   # repair bookmarks missing from older pushes
-                actions.append(("=", kw, url))   # already correct
+                ensure_bookmark(row[0], e["name"], url)
+                actions.append(("=", kw, url))
                 continue
             place = con.execute("SELECT id FROM moz_places WHERE url = ?", (url,)).fetchone()
             pid = place[0] if place else ff_insert_place(con, pcols, url, "cobalt-managed")
@@ -651,7 +563,6 @@ def push_engines_ff(profile, engines, prune, dry):
         sys.exit(f"error: {path} is locked ({e}) — close the browser and retry")
     finally:
         con.close()
-
 
 def push_bookmarks_ff(profile, tree, dry):
     path = os.path.join(profile, "places.sqlite")
@@ -747,7 +658,6 @@ def push_bookmarks_ff(profile, tree, dry):
     finally:
         con.close()
 
-
 def pull_bookmarks_ff(profile):
     path = os.path.join(profile, "places.sqlite")
     if not os.path.exists(path):
@@ -764,7 +674,6 @@ def pull_bookmarks_ff(profile):
     finally:
         ff_cleanup(tmp)
 
-
 def conv2(con, pid):
     out = []
     for (bid, t, title, url) in con.execute(
@@ -776,7 +685,6 @@ def conv2(con, pid):
         elif t == 2:
             out.append({"type": "folder", "name": title or "", "children": conv2(con, bid)})
     return out
-
 
 def pull_engines_ff(profile):
     path = os.path.join(profile, "places.sqlite")
@@ -795,15 +703,9 @@ def pull_engines_ff(profile):
     finally:
         ff_cleanup(tmp)
 
-
-# --------------------------------------------------------------------------
-# Commands
-# --------------------------------------------------------------------------
-
 def backup(path, dry):
     if not dry and os.path.exists(path):
         shutil.copy2(path, path + ".cobalt-bak")
-
 
 def cmd_list(args):
     roots = browser_roots()
@@ -822,13 +724,11 @@ def cmd_list(args):
     if not found:
         print("no known browsers found — point me at one with --root /path/to/user-data-dir")
 
-
 def engine_line(e):
-    # `yt = youtube.com` when the name is the keyword, long form otherwise
+
     if e["name"].lower() == e["keyword"].lower():
         return f"{e['keyword']} = {e['url']}"
     return f"{e['name']} | {e['keyword']} | {e['url']}"
-
 
 def cmd_pull(args):
     root, profiles = resolve_target(args)
@@ -840,8 +740,6 @@ def cmd_pull(args):
         tree = pull_bookmarks_ff(p)
         engines = pull_engines_ff(p)
 
-    # keep engines that exist in the config but not (yet) in the browser,
-    # so pulling never silently deletes your manually added engines
     kept = 0
     if os.path.exists(args.out or DEFAULT_CONFIG) and not args.out:
         _, cfg_engines = parse_config(args.out or DEFAULT_CONFIG)
@@ -873,9 +771,7 @@ def cmd_pull(args):
     print(f"✓ wrote {out} ({os.path.getsize(out)} bytes): "
           f"{len(tree)} top-level bar items, {len(engines)} engines")
 
-
 def sync_enabled(profile):
-    """True if Chrome Sync is on for bookmarks in this profile (server may restore deletes)."""
     try:
         with open(os.path.join(profile, "Preferences"), encoding="utf-8") as f:
             prefs = json.load(f)
@@ -884,7 +780,6 @@ def sync_enabled(profile):
     if not prefs.get("sync", {}).get("has_setup_completed"):
         return False
     return prefs.get("sync", {}).get("selected_types", {}).get("bookmarks", True)
-
 
 def cmd_push(args):
     tree, engines = parse_config(args.config)
@@ -942,7 +837,6 @@ def cmd_push(args):
     if args.dry:
         print("(dry run — nothing written)")
 
-
 def cmd_init(args):
     if os.path.exists(DEFAULT_CONFIG) and not args.force:
         sys.exit(f"error: {DEFAULT_CONFIG} already exists (use --force to overwrite)")
@@ -955,19 +849,14 @@ def cmd_init(args):
             "GitHub | https://github.com\n[Search]\n  GitHub | gh | https://github.com/search?q=%s\n")
     print(f"wrote {DEFAULT_CONFIG} — edit it, then `cobalt push` with the browser closed")
 
-
-# --------------------------------------------------------------------------
-# CLI
-# --------------------------------------------------------------------------
-
 def main():
     ap = argparse.ArgumentParser(
         prog="cobalt",
-        description="Chromium bookmarks bar & search engines from one config file (atomic no. 27)")
+        description="bookmarks bar & omnibox keyword engines from one config file")
     ap.add_argument("--config", default=DEFAULT_CONFIG, help=f"(default: {DEFAULT_CONFIG})")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("list", help="list detected browsers/profiles")
+    sub.add_parser("ls", aliases=["list"], help="list detected browsers/profiles")
 
     p_push = sub.add_parser("push", help="apply config -> browser (bar made to match exactly)")
     p_push.add_argument("browser", nargs="?", default="chrome")
@@ -991,8 +880,8 @@ def main():
     p_init.add_argument("--force", action="store_true")
 
     args = ap.parse_args()
-    {"list": cmd_list, "push": cmd_push, "pull": cmd_pull, "init": cmd_init}[args.cmd](args)
-
+    {"ls": cmd_list, "list": cmd_list, "push": cmd_push, "pull": cmd_pull,
+     "init": cmd_init}[args.cmd](args)
 
 if __name__ == "__main__":
     main()
