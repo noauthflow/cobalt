@@ -1,48 +1,44 @@
-# shortcutpad
+# cobalt
 
-Manage bookmarks + omnibox site-search engines for **any Chromium browser** from a
-plain, git-friendly config file. No extension, no sync service — your config repo
-*is* the sync.
+*Atomic number 27 — three spots after chromium.*
 
-Works with Chrome, Chromium (incl. ungoogled builds), Helium, Vivaldi, Brave, Edge,
-Opera, Thorium, Arc — and anything else via `--root`, since they all share the same
-profile format (`Bookmarks` JSON + `Web Data` SQLite).
+Manage a Chromium browser's bookmarks bar and omnibox site-search engines from
+one plain config file. No extension, no daemon, no sync service.
 
-## Setup
+Works with any Chromium fork (Chrome, Chromium, Helium, Vivaldi, Brave, Edge,
+Arc...) — same profile format everywhere. Unknown fork? `--root /path/to/dir`.
 
-```bash
-shortcutpad init          # writes ~/.config/shortcutpad/shortcuts.conf
-git add ~/.config/shortcutpad/shortcuts.conf   # put it in your dotfiles
-```
+## Config
 
-Config format — one entry per line:
+`~/.config/cobalt.conf`
 
 ```
-Name | keyword | url
+Name | url                  bookmark (file order = bar order, strictly)
+Name | keyword | url        search engine (omnibox only, not a bookmark)
+[Folder]                    folder; nesting via indentation, any depth
 ```
 
-- URL contains `%s` or `{query}` → **site-search engine** (usable from the omnibox: type the keyword, then Tab)
-- Plain URL → **bookmark** (inside a "Shortcut Pad" folder on the bookmarks bar)
+Top level sits directly on the bookmarks bar. Order in the file is law.
 
 ## Usage
 
 ```bash
-shortcutpad list                    # detected browsers + profiles
-shortcutpad push chrome             # apply config (all profiles)
-shortcutpad push chromium --profile Default --prune   # also delete removed engines
-shortcutpad push --root ~/.config/helium              # any fork, no built-in name needed
-shortcutpad push vivaldi --dry      # preview
-shortcutpad pull vivaldi            # browser -> config (bootstrap from existing setup)
+cobalt list                       # detected browsers + profiles
+cobalt pull chrome --profile "Profile 7"   # browser -> config (exact nesting/order)
+cobalt push --dry                 # preview exactly what would change
+cobalt push --prune               # apply + clean up removed engines
 ```
 
-Backups are written next to the targets (`*.scpad-bak`) before every push.
+⚠ `push` only while the browser is **closed** — it rewrites the files on exit.
+`pull` is safe anytime. Backups land next to the targets (`*.cobalt-bak`).
 
-## ⚠️ The one rule
+## Install
 
-Run `push` while the target browser is **closed**. Chromium rewrites both files on
-exit and will clobber your changes otherwise.
+```bash
+ln -sf ~/dev/shortcut-pad/cobalt ~/.local/bin/cobalt
+```
 
 ## Firefox / Zen
 
-Not yet — different storage (`places.sqlite` + `search.json.mozlz4`). Planned as a
-second adapter behind the same config.
+Not yet — different storage (`places.sqlite` + `search.json.mozlz4`).
+Planned as a second adapter behind the same config.

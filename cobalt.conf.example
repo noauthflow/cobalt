@@ -1,4 +1,4 @@
-# chromium-shortcuts
+# cobalt — bookmarks bar + omnibox search engines
 #   Name | url                  = bookmark (file order = bar order, strictly)
 #   Name | keyword | url        = search engine (omnibox only, not a bookmark)
 #   [Folder]                    = folder; nesting via indentation
