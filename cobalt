@@ -271,9 +271,9 @@ def push_engines(profile, engines, prune, dry):
                 "is_active": 1,
             }
             use = {k: v for k, v in values.items() if k in cols}
-            row = con.execute("SELECT short_name, url FROM keywords WHERE keyword = ?",
+            row = con.execute("SELECT id, short_name, url FROM keywords WHERE keyword = ?",
                               (e["keyword"],)).fetchone()
-            if row and row[0] == e["name"] and row[1] == use["url"]:
+            if row and row[1] == e["name"] and row[2] == use["url"]:
                 actions.append(("=", e["keyword"], e["url"]))
                 continue
             if row:
@@ -536,6 +536,9 @@ def push_engines_ff(profile, engines, prune, dry):
             place = con.execute("SELECT id FROM moz_places WHERE url = ?", (url,)).fetchone()
             pid = place[0] if place else ff_insert_place(con, pcols, url, "cobalt-managed")
             if row:
+                if engine_folder:
+                    con.execute("DELETE FROM moz_bookmarks WHERE fk = ? AND parent = ?",
+                                (row[0], engine_folder[0]))   # old url's bookmark
                 con.execute("UPDATE moz_keywords SET place_id = ? WHERE keyword = ?", (pid, kw))
                 actions.append(("~", kw, url))
             else:
