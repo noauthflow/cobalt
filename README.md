@@ -17,11 +17,11 @@ the repo ships two optional browser addons, self-contained in their own folders
     extension/   the new tab page: blank #353535 page, "New Tab" title, white
                  8-point starburst icon, plus a content script that blocks
                  youtube shorts (sidebar entry, shelves, /shorts/ redirects).
-                 see extension/manifest.json.
-    theme/       a standalone theme: neutral grey surfaces, elevation in three
-                 flat steps. see theme/README.md for surfaces + reproducibility.
-                 accent colors are handled by `cobalt seed`, not the theme.
-                 recommended accent: #7C4DFF (violet).
+                 optional — cobalt works without it. see extension/README.md.
+    template-theme/
+                 a boilerplate chrome theme: neutral grey surfaces, elevation
+                 in three flat steps. accent colors are handled by
+                 `cobalt seed`, not the theme. recommended accent: #7C4DFF.
 
     note: chrome only draws the native bookmarks bar on its own stock new tab
     page. with any override extension the bar obeys the global "show bookmarks

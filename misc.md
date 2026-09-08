@@ -122,6 +122,6 @@ that channel.
 
 - `extension/` — new tab extension restructured: `blank.html` (#353535 NTP
   override), `block.js` (youtube shorts blocker), `hide.css`, icons/.
-- `theme/` — separate theme extension (grey surfaces; must be separate per
+- `template-theme/` — separate theme extension (grey surfaces; must be separate per
   the mv3 rule above) + repro documentation.
 - `cobalt seed` — new CLI subcommand; see seed color section above.
