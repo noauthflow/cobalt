@@ -1,4 +1,8 @@
 {
+  // The accent recommended for user_color and user_color2 is #7C4DFF.
+  // Accents are NOT set in this manifest (chrome resets accent prefs when a
+  // theme is applied). Apply with: cobalt seed '#7C4DFF' --profile Default
+  // (chrome's manifest parser allows comments; strict JSON parsers do not.)
   "name": "cobalt-theme",
   "version": "1.0",
   "description": "Cobalt theme.",

@@ -19,8 +19,9 @@ the repo ships two optional browser addons, self-contained in their own folders
                  youtube shorts (sidebar entry, shelves, /shorts/ redirects).
                  see extension/manifest.json.
     theme/       a standalone theme: neutral grey surfaces, elevation in three
-                 flat steps. see theme/README.md for full setup + the seed color
-                 (violet focus ring) and reproducibility notes.
+                 flat steps. see theme/README.md for surfaces + reproducibility.
+                 accent colors are handled by `cobalt seed`, not the theme.
+                 recommended accent: #7C4DFF (violet).
 
     note: chrome only draws the native bookmarks bar on its own stock new tab
     page. with any override extension the bar obeys the global "show bookmarks
@@ -73,6 +74,21 @@ nesting: a line belongs to the nearest `[Folder]` above it whose indentation is 
         serialize the browser's bookmarks bar (exact nesting and order) plus its
         engines into the config file. engines that exist only in an existing
         config are kept, so pull never deletes manually added engine lines.
+
+    cobalt seed [browser] '#HEXCOLOR' [--profile NAME] [--root DIR] [--all]
+                [--dry] [--force]
+        set the theme accent color in a chromium profile's Preferences.
+        writes BOTH browser.theme.user_color AND browser.theme.user_color2 —
+        always both; no per-key granularity is supported (the dev couldn't
+        be bothered, and chrome's handling of the two keys is version-
+        dependent anyway; see misc.md). also deletes
+        browser.theme.saved_local_theme (a picker swatch pointer that
+        outranks the color keys) and mirrors the value into
+        account_values.browser.theme.user_color if present.
+        refuses to run while the browser is running (it rewrites Preferences
+        on exit); --force overrides. backs up Preferences to *.cobalt-bak.
+        hex: '#RRGGBB', 'RRGGBB', 'c4d' shorthand, optional alpha. quote
+        the # — unquoted, the shell eats it as a comment.
 
     cobalt init [--force]
         write a starter config to the default path.
