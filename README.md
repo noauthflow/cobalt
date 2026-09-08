@@ -9,6 +9,22 @@ One plain text config drives the bookmarks-bar structure and omnibox keyword eng
     install: ln -sf ~/dev/cobalt/cobalt ~/.local/bin/cobalt
     needs:   python 3.8+, stdlib only, macOS / linux / windows
 
+## new tab page (chrome extension)
+
+the repo doubles as an unpacked manifest v3 chrome extension that overrides
+the new tab page with a blank page: #353535 background, title "New Tab",
+white 8-point starburst icon. independent of the bookmark/omnibox tool.
+
+    install: chrome://extensions -> developer mode -> load unpacked -> ~/dev/cobalt
+
+    files:   manifest.json   chrome_url_overrides: newtab -> blank.html
+             blank.html      the page (bg color + title, nothing else)
+             icon*.png       16/32/48/128
+
+note: chrome only draws the native bookmarks bar on its own stock new tab
+page. with any override extension the bar obeys the global "show bookmarks
+bar" setting; there is no api to toggle it per-page.
+
 ## supported browsers
 
 chromium family (Bookmarks JSON + "Web Data" sqlite): chrome, chrome-beta, chrome-dev, chrome-canary, chromium, helium, brave, edge, edge-beta, edge-dev, edge-canary, vivaldi, opera, thorium, arc
