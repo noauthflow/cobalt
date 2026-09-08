@@ -1,0 +1,25 @@
+{
+  "name": "cobalt-theme",
+  "version": "1.0",
+  "description": "Cobalt theme.",
+  "manifest_version": 3,
+  "theme": {
+    "colors": {
+      "frame": [30, 30, 30],
+      "frame_inactive": [25, 25, 25],
+      "background_tab": [30, 30, 30],
+      "background_tab_inactive": [26, 26, 26],
+      "background_tab_hover": [40, 40, 40],
+      "toolbar": [42, 42, 42],
+      "toolbar_hover": [48, 48, 48],
+      "toolbar_button_icon": [210, 210, 210],
+      "toolbar_separator": [42, 42, 42],
+      "tab_text": [230, 230, 230],
+      "tab_background_text": [140, 140, 140],
+      "bookmark_text": [210, 210, 210],
+      "button_background": [46, 46, 46],
+      "ntp_background": [53, 53, 53],
+      "ntp_text": [210, 210, 210]
+    }
+  }
+}

@@ -9,21 +9,22 @@ One plain text config drives the bookmarks-bar structure and omnibox keyword eng
     install: ln -sf ~/dev/cobalt/cobalt ~/.local/bin/cobalt
     needs:   python 3.8+, stdlib only, macOS / linux / windows
 
-## new tab page (chrome extension)
+## addons
 
-the repo doubles as an unpacked manifest v3 chrome extension that overrides
-the new tab page with a blank page: #353535 background, title "New Tab",
-white 8-point starburst icon. independent of the bookmark/omnibox tool.
+the repo ships two optional browser addons, self-contained in their own folders
+(load each folder via chrome://extensions -> developer mode -> load unpacked):
 
-    install: chrome://extensions -> developer mode -> load unpacked -> ~/dev/cobalt
+    extension/   the new tab page: blank #353535 page, "New Tab" title, white
+                 8-point starburst icon, plus a content script that blocks
+                 youtube shorts (sidebar entry, shelves, /shorts/ redirects).
+                 see extension/manifest.json.
+    theme/       a standalone theme: neutral grey surfaces, elevation in three
+                 flat steps. see theme/README.md for full setup + the seed color
+                 (violet focus ring) and reproducibility notes.
 
-    files:   manifest.json   chrome_url_overrides: newtab -> blank.html
-             blank.html      the page (bg color + title, nothing else)
-             icon*.png       16/32/48/128
-
-note: chrome only draws the native bookmarks bar on its own stock new tab
-page. with any override extension the bar obeys the global "show bookmarks
-bar" setting; there is no api to toggle it per-page.
+    note: chrome only draws the native bookmarks bar on its own stock new tab
+    page. with any override extension the bar obeys the global "show bookmarks
+    bar" setting; there is no api to toggle it per-page.
 
 also includes a content script on *.youtube.com that blocks shorts: hides
 the sidebar entry and shorts shelves, hides grid/search items linking to

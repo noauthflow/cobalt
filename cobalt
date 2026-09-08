@@ -840,6 +840,152 @@ def cmd_push(args):
     if args.dry:
         print("(dry run — nothing written)")
 
+def hex_to_skcolor(s):
+    """'#7C4DFF' / '7C4DFF' / 'c4d' / '#7C4DFF80' -> (SkColor rgba int, '#RRGGBB', alpha)."""
+    t = s.strip().lstrip("#")
+    if t.lower().startswith("0x"):
+        t = t[2:]
+    if not re.fullmatch(r"[0-9a-fA-F]{3,8}", t) or len(t) not in (3, 6, 8):
+        raise ValueError(f"not a hex color: '{s}'")
+    if len(t) == 3:
+        t = "".join(c * 2 for c in t)
+    v = int(t, 16)
+    if len(t) == 6:
+        v |= 0xFF000000
+    return v, f"#{(v >> 16) & 0xFF:02X}{(v >> 8) & 0xFF:02X}{v & 0xFF:02X}", (v >> 24) & 0xFF
+
+def skcolor_signed(v):
+    return v - 0x100000000 if v & 0x80000000 else v
+
+def skcolor_describe(v):
+    """human-readable SkColor: hex + alpha note + signed decimal"""
+    v &= 0xFFFFFFFF
+    a = (v >> 24) & 0xFF
+    out = f"#{(v >> 16) & 0xFF:02X}{(v >> 8) & 0xFF:02X}{v & 0xFF:02X}"
+    if a != 0xFF:
+        out += f" (alpha 0x{a:02X})"
+    return out + f" (signed {skcolor_signed(v)})"
+
+def browser_running(root):
+    """presence of a singleton file in the user-data dir means the browser is up
+    (macOS/Linux). can be left stale after a crash — that's what --force is for."""
+    for name in ("SingletonSocket", "SingletonCookie", "SingletonLock"):
+        if os.path.exists(os.path.join(root, name)):
+            return name
+    return None
+
+def cmd_seed(args):
+    hex_raw = args.hex_color
+    if hex_raw is None:
+        # allow `cobalt seed '#7C4DFF'` — browser positional defaults to chrome
+        try:
+            hex_to_skcolor(args.browser)
+        except ValueError:
+            if args.browser == "chrome":
+                sys.exit("error: missing color argument\n"
+                         "       usage: cobalt seed [browser] '#RRGGBB' [--profile <name>] [--root <dir>]\n"
+                         "       (quote the # — unquoted, the shell eats it as a comment)")
+            sys.exit(f"error: '{args.browser}' is not a hex color\n"
+                     "       usage: cobalt seed [browser] '#RRGGBB' [--profile <name>] [--root <dir>]")
+        args.browser, hex_raw = "chrome", args.browser
+
+    try:
+        rgba, hexnorm, alpha = hex_to_skcolor(hex_raw)
+    except ValueError as e:
+        sys.exit(f"error: {e}\n"
+                 "       examples: '#7C4DFF', '7C4DFF', 'c4d', '#7C4DFF80' (quote the # in shells)")
+    signed = skcolor_signed(rgba)
+
+    root, profiles = resolve_target(args)
+
+    lock = browser_running(root)
+    if lock:
+        msg = (f"error: the browser looks like it's RUNNING ({lock} exists in {root})\n"
+               f"       it rewrites Preferences on exit and will clobber the seed.\n"
+               f"       quit it fully (cmd-Q, not just the window) and retry.")
+        if args.force:
+            print("⚠ --force: writing anyway — stale lock after a crash, or your call")
+        else:
+            sys.exit(msg)
+
+    print(f"seed color {hexnorm} -> SkColor 0x{rgba:08X} (signed {signed})")
+    if alpha != 0xFF:
+        print(f"  ⚠ alpha 0x{alpha:02X} — chrome's picker always writes FF; non-opaque seeds are untested")
+
+    for p in profiles:
+        kind = profile_kind(p)
+        label = f"{os.path.basename(root)} / {os.path.basename(p)} [{kind or '?'}]"
+        print(label + ":")
+        if kind != "chromium":
+            print("    ✗ seed is chromium-only (firefox has no Preferences file) — skipped")
+            continue
+        path = os.path.join(p, "Preferences")
+        try:
+            with open(path, encoding="utf-8") as f:
+                raw = f.read()
+            prefs = json.loads(raw)
+        except OSError as e:
+            sys.exit(f"    error: cannot read {path} ({e})")
+        except ValueError as e:
+            sys.exit(f"    error: {path} is not valid JSON ({e}) — refusing to touch it")
+        if not isinstance(prefs, dict):
+            sys.exit(f"    error: {path} is not a JSON object — refusing to touch it")
+
+        theme = prefs.get("browser", {}).get("theme", {})
+        if not isinstance(theme, dict):
+            theme = prefs.setdefault("browser", {}).setdefault("theme", {})
+
+        # ── report current state, verbosely, before changing anything ──
+        if "user_color2" in theme:
+            print(f"    current user_color2 : {skcolor_describe(theme['user_color2'])}")
+        else:
+            print("    current user_color2 : absent (no seed, or the theme extension wiped it)")
+        if "user_color" in theme:
+            print(f"    main accent user_color: {skcolor_describe(theme['user_color'])}")
+        if "saved_local_theme" in theme:
+            print("    saved_local_theme   : present — will be deleted (it outranks user_color2)")
+        else:
+            print("    saved_local_theme   : absent")
+        sync_sel = prefs.get("sync", {}).get("selected_types", {})
+        if prefs.get("sync", {}).get("has_setup_completed") and sync_sel.get("themes", True):
+            print("    ⚠ chrome Sync is ON and includes themes — the account copy may stomp this seed")
+
+        backup(path, args.dry)
+
+        theme["user_color2"] = signed
+        theme["user_color"] = signed  # MAIN accent key — the old "inert legacy" claim was wrong (proven 2026-09-09)
+        theme.pop("saved_local_theme", None)
+        acc = prefs.get("account_values", {}).get("browser", {}).get("theme")
+        if isinstance(acc, dict):
+            acc["user_color"] = signed
+            print("    mirrored into account_values.browser.theme.user_color")
+        else:
+            print("    account_values.browser.theme: not present — nothing to mirror")
+
+        if args.dry:
+            print(f"    · would set user_color + user_color2 = {hexnorm} (signed {signed}) — dry run, not written")
+            continue
+
+        indent = 2 if "\n" in raw.rstrip("\n") else None  # match the file's existing style
+        tmp = path + ".cobalt-tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(prefs, f, indent=indent, ensure_ascii=False,
+                          separators=None if indent else (",", ":"))
+            os.replace(tmp, path)
+        except OSError as e:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+            sys.exit(f"    error: cannot write {path} ({e})")
+        print(f"    ✓ user_color + user_color2 -> {hexnorm} (signed {signed}), saved_local_theme cleared")
+        print(f"    ✓ wrote {path} ({os.path.getsize(path)} bytes), backup at {path}.cobalt-bak")
+
+    if not args.dry:
+        print("done. relaunch the browser — it re-reads Preferences (and theme manifests) at startup.")
+        print("note: loading/unloading the theme extension wipes user_color2 — re-run `seed` after.")
+    else:
+        print("(dry run — nothing written)")
+
 def cmd_init(args):
     if os.path.exists(DEFAULT_CONFIG) and not args.force:
         sys.exit(f"error: {DEFAULT_CONFIG} already exists (use --force to overwrite)")
@@ -879,12 +1025,26 @@ def main():
                         help="merge from every profile (default asks you to pick)")
     p_pull.add_argument("-o", "--out", help="write here instead of the default config path")
 
+    p_seed = sub.add_parser("seed",
+                            help="set the theme seed color (user_color2 + legacy user_color) in a Chromium profile")
+    p_seed.add_argument("browser", nargs="?", default="chrome",
+                        help="target browser (default: chrome)")
+    p_seed.add_argument("hex_color", nargs="?",
+                        help="seed color: '#7C4DFF', '7C4DFF', 'c4d' — QUOTE the # in shells")
+    p_seed.add_argument("--root", help="user-data dir of any Chromium fork")
+    p_seed.add_argument("--profile", help="target one profile (e.g. 'Default', 'Profile 7')")
+    p_seed.add_argument("--all", dest="all_profiles", action="store_true",
+                        help="apply to every profile (default asks you to pick)")
+    p_seed.add_argument("--force", action="store_true",
+                        help="write even if the browser appears to be running")
+    p_seed.add_argument("--dry", action="store_true")
+
     p_init = sub.add_parser("init", help="create a starter config")
     p_init.add_argument("--force", action="store_true")
 
     args = ap.parse_args()
     {"ls": cmd_list, "list": cmd_list, "push": cmd_push, "pull": cmd_pull,
-     "init": cmd_init}[args.cmd](args)
+     "seed": cmd_seed, "init": cmd_init}[args.cmd](args)
 
 if __name__ == "__main__":
     main()
