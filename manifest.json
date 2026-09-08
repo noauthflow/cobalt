@@ -9,5 +9,11 @@
     "128": "icon128.png"
   },
   "manifest_version": 3,
-  "chrome_url_overrides": { "newtab": "blank.html" }
+  "chrome_url_overrides": { "newtab": "blank.html" },
+  "content_scripts": [{
+    "matches": ["*://*.youtube.com/*"],
+    "css": ["hide.css"],
+    "js": ["block.js"],
+    "run_at": "document_start"
+  }]
 }

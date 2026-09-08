@@ -25,6 +25,12 @@ note: chrome only draws the native bookmarks bar on its own stock new tab
 page. with any override extension the bar obeys the global "show bookmarks
 bar" setting; there is no api to toggle it per-page.
 
+also includes a content script on *.youtube.com that blocks shorts: hides
+the sidebar entry and shorts shelves, hides grid/search items linking to
+/shorts/, and redirects /shorts/ urls to the normal watch page. youtube
+renames its element classes periodically; the redirect is the only part
+that cannot break.
+
 ## supported browsers
 
 chromium family (Bookmarks JSON + "Web Data" sqlite): chrome, chrome-beta, chrome-dev, chrome-canary, chromium, helium, brave, edge, edge-beta, edge-dev, edge-canary, vivaldi, opera, thorium, arc

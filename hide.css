@@ -1,0 +1,6 @@
+/* shorts shelves (home, subscriptions, search) */
+ytd-rich-shelf-renderer,
+ytd-reel-shelf-renderer,
+ytd-rich-section-renderer:has(ytm-shorts-lockup-view-model) {
+  display: none !important;
+}
