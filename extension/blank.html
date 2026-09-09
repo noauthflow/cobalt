@@ -1,5 +1,268 @@
 <!DOCTYPE html>
 <meta charset="utf-8">
+<meta name="color-scheme" content="dark">
 <title>New Tab</title>
 <link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256"><path fill="%23C7B8E8" d="M152.62 237.85L128 256L103.38 237.85L114.568 151.248L45.05 204.22L17 192L20.425 161.635L101.128 128L20.425 94.365L17 64L45.05 51.78L114.568 104.752L103.38 18.15L128 0L152.62 18.15L141.432 104.752L210.95 51.78L239 64L235.575 94.365L154.872 128L235.575 161.635L239 192L210.95 204.22L141.432 151.248L152.62 237.85Z"/></svg>'>
-<style>html { background: #353535; }</style>
+<style>
+  /* ---- MD3 tokens, mapped to the cobalt grey ramp ---- */
+  :root {
+    --surface: #353535;              /* page + photo fallback */
+    --surface-container: #303030;
+    --surface-container-high: #2a2a2a;
+    --surface-container-highest: #333333;
+    --on-surface: #e6e6e6;
+    --on-surface-variant: #a8a8a8;
+    --outline: #555555;
+    --outline-variant: #424242;
+    --primary: #c7b8e8;              /* lavender accent */
+    --on-primary: #211c2e;
+    --primary-container: #4a4158;
+    --on-primary-container: #e6dcff;
+    --scrim: rgba(0, 0, 0, .4);
+    --state-hover: rgba(255, 255, 255, .08);
+    --state-focus: rgba(255, 255, 255, .12);
+    --elev-3: 0 4px 8px 3px rgba(0,0,0,.15), 0 1px 3px rgba(0,0,0,.3);
+    --md3-ease: cubic-bezier(.2, 0, 0, 1);
+  }
+
+  html { background: var(--surface); }
+  body { margin: 0; min-height: 100vh; font: 14px/1.5 'Roboto', -apple-system, system-ui, sans-serif; color: var(--on-surface); }
+
+  /* ---- background layers ---- */
+  #bg {
+    position: fixed; inset: 0; z-index: -1;
+    background: center / cover no-repeat;
+    opacity: 0;
+    transition: opacity 500ms var(--md3-ease) 200ms;
+    pointer-events: none;
+  }
+  #bg.on { opacity: 1; }
+
+  #artwrap {
+    position: fixed; top: 0; bottom: 0; right: 0; width: 55%; z-index: -1;
+    opacity: 0;
+    transition: opacity 500ms var(--md3-ease) 200ms;
+    pointer-events: none;
+  }
+  #artwrap.on { opacity: 1; }
+  #art { position: absolute; inset: 0; }
+
+  /* ---- bottom-left mini fab (fades in like the bg layers) ---- */
+  @keyframes fabfade { from { opacity: 0 } to { opacity: .55 } }
+  #menubtn {
+    position: fixed; left: 16px; bottom: 16px; z-index: 5;
+    width: 40px; height: 40px; border-radius: 50%;
+    background: var(--surface-container-high); border: none; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 1px 3px rgba(0,0,0,.3), 0 4px 8px 3px rgba(0,0,0,.15);
+    opacity: 0; transition: opacity .2s var(--md3-ease);
+    padding: 0;
+  }
+  #menubtn.on { opacity: .55; animation: fabfade 500ms var(--md3-ease) 200ms backwards; }
+  #menubtn.on:hover, #menubtn.on:focus-visible { opacity: 1; }
+  #menubtn svg { width: 20px; height: 20px; fill: var(--primary); }
+
+  /* ---- panel: MD3 modal (scrim + surface-container-high card) ---- */
+  #cfg {
+    position: fixed; inset: 0; z-index: 10;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--scrim);
+    opacity: 0; pointer-events: none;
+    transition: opacity 200ms var(--md3-ease);
+  }
+  #cfg.open { opacity: 1; pointer-events: auto; }
+  #panel {
+    width: 400px; max-width: calc(100vw - 48px); max-height: calc(100vh - 96px);
+    overflow-y: auto;
+    background: var(--surface-container-high);
+    border-radius: 28px;
+    box-shadow: var(--elev-3);
+    padding: 24px;
+    transform: scale(.94);
+    transition: transform 250ms var(--md3-ease);
+  }
+  #cfg.open #panel { transform: scale(1); }
+
+  #panel h2 {
+    margin: 0 0 4px; display: flex; align-items: center; gap: 10px;
+    font-size: 16px; font-weight: 500; color: var(--on-surface);
+  }
+  #panel h2 svg { width: 22px; height: 22px; fill: var(--primary); }
+  #panel .section { margin-top: 20px; }
+  #panel .label {
+    font-size: 12px; font-weight: 500; letter-spacing: .4px;
+    color: var(--on-surface-variant); margin-bottom: 10px;
+  }
+  #panel .val { float: right; color: var(--primary); font-variant-numeric: tabular-nums; }
+
+  /* icon color row */
+  #iconrow { display: flex; align-items: center; gap: 10px; }
+  #iconpick {
+    width: 36px; height: 36px; padding: 0; border: none; background: none;
+    cursor: pointer; flex: none;
+  }
+  #iconpick::-webkit-color-swatch-wrapper { padding: 0; }
+  #iconpick::-webkit-color-swatch { border: 1px solid var(--outline-variant); border-radius: 50%; }
+  #iconpick:hover::-webkit-color-swatch { border-color: var(--primary); }
+  #iconhex {
+    background: var(--surface-container-highest); color: var(--on-surface);
+    border: 1px solid var(--outline-variant); border-radius: 8px;
+    padding: 7px 10px; width: 9ch; font: inherit;
+  }
+  #iconhex:focus { outline: none; border-color: var(--primary); }
+
+  /* ---- MD3 switch ---- */
+  .m3switch { position: relative; display: inline-block; width: 52px; height: 32px; vertical-align: middle; }
+  .m3switch input { position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; z-index: 1; }
+  .m3switch .track {
+    position: absolute; inset: 0; border-radius: 16px;
+    background: var(--surface-container-highest);
+    border: 2px solid var(--outline);
+    transition: all 200ms var(--md3-ease);
+  }
+  .m3switch .thumb {
+    position: absolute; left: 6px; top: 6px; width: 16px; height: 16px;
+    border-radius: 8px; background: var(--outline);
+    transition: all 200ms var(--md3-ease);
+  }
+  .m3switch input:checked ~ .track { background: var(--primary); border-color: var(--primary); }
+  .m3switch input:checked ~ .track .thumb {
+    left: 22px; top: 2px; width: 24px; height: 24px; background: var(--on-primary);
+  }
+  .m3switch input:focus-visible ~ .track { outline: 3px solid var(--primary); outline-offset: 2px; }
+  .switchrow { display: flex; align-items: center; justify-content: space-between; margin: 8px 0; }
+  .switchrow span { color: var(--on-surface); }
+
+  /* ---- MD3 slider ---- */
+  input[type="range"] {
+    -webkit-appearance: none; appearance: none;
+    width: 100%; height: 24px; background: transparent; margin: 0; cursor: pointer;
+    --p: 50%;
+  }
+  input[type="range"]::-webkit-slider-runnable-track {
+    height: 4px; border-radius: 2px;
+    background: linear-gradient(90deg, var(--primary) var(--p), var(--surface-container-highest) var(--p));
+  }
+  input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%;
+    background: var(--primary); margin-top: -5px;
+    border: 0; box-shadow: 0 0 0 0 transparent;
+    transition: box-shadow .15s var(--md3-ease);
+  }
+  input[type="range"]:hover::-webkit-slider-thumb { box-shadow: 0 0 0 7px var(--state-hover); }
+  input[type="range"]::-moz-range-track {
+    height: 4px; border-radius: 2px;
+    background: linear-gradient(90deg, var(--primary) var(--p), var(--surface-container-highest) var(--p));
+  }
+  input[type="range"]::-moz-range-thumb {
+    width: 14px; height: 14px; border-radius: 50%; border: none; background: var(--primary);
+  }
+
+  /* ---- photo grid / drop zone ---- */
+  #dropzone {
+    display: flex; flex-wrap: wrap; gap: 8px;
+    padding: 10px; border-radius: 16px;
+    border: 1px dashed var(--outline);
+    transition: border-color .2s var(--md3-ease), background .2s var(--md3-ease);
+    min-height: 84px;
+  }
+  #dropzone.dragover { border-color: var(--primary); background: var(--state-hover); }
+  .ph {
+    position: relative; width: 64px; height: 64px;
+    border-radius: 12px; overflow: hidden;
+  }
+  .ph img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .ph button {
+    position: absolute; top: 3px; right: 3px; width: 18px; height: 18px;
+    border-radius: 50%; border: none; cursor: pointer;
+    background: rgba(0,0,0,.6); color: #fff; font: 11px/18px ui-monospace, monospace;
+    padding: 0; text-align: center;
+  }
+  .ph button:hover { background: rgba(0,0,0,.8); }
+  .addtile {
+    width: 64px; height: 64px; border-radius: 12px;
+    border: 1px dashed var(--outline); background: none; cursor: pointer;
+    color: var(--on-surface-variant); font-size: 22px; line-height: 1;
+  }
+  .addtile:hover { border-color: var(--primary); color: var(--primary); background: var(--state-hover); }
+  #photoclear {
+    margin-top: 10px; background: none; border: none; cursor: pointer;
+    color: var(--on-surface-variant); font: 500 12px 'Roboto', -apple-system, system-ui, sans-serif;
+    padding: 4px 0;
+  }
+  #photoclear:hover { color: var(--primary); }
+
+  /* ---- tonal button ---- */
+  .btn {
+    background: var(--primary-container); color: var(--on-primary-container);
+    border: none; border-radius: 999px; padding: 8px 18px;
+    font: 500 13px 'Roboto', -apple-system, system-ui, sans-serif;
+    cursor: pointer; transition: box-shadow .2s var(--md3-ease);
+  }
+  .btn:hover { box-shadow: var(--elev-3); }
+
+  #panel .hint { margin-top: 18px; font-size: 12px; color: var(--on-surface-variant); }
+  #panel .hint kbd {
+    background: var(--surface-container-highest); border-radius: 4px;
+    padding: 2px 7px; font: 11px ui-monospace, monospace; color: var(--on-surface);
+  }
+</style>
+
+<div id="artwrap"><canvas id="art" aria-hidden="true"></canvas></div>
+<div id="bg"></div>
+
+<button id="menubtn" aria-label="Customise" title="Customise (ctrl+c)">
+  <svg viewBox="0 0 256 256"><path d="M152.62 237.85L128 256L103.38 237.85L114.568 151.248L45.05 204.22L17 192L20.425 161.635L101.128 128L20.425 94.365L17 64L45.05 51.78L114.568 104.752L103.38 18.15L128 0L152.62 18.15L141.432 104.752L210.95 51.78L239 64L235.575 94.365L154.872 128L235.575 161.635L239 192L210.95 204.22L141.432 151.248L152.62 237.85Z"/></svg>
+</button>
+
+<div id="cfg">
+  <div id="panel" role="dialog" aria-label="Customise new tab">
+    <h2>
+      <svg viewBox="0 0 256 256"><path d="M152.62 237.85L128 256L103.38 237.85L114.568 151.248L45.05 204.22L17 192L20.425 161.635L101.128 128L20.425 94.365L17 64L45.05 51.78L114.568 104.752L103.38 18.15L128 0L152.62 18.15L141.432 104.752L210.95 51.78L239 64L235.575 94.365L154.872 128L235.575 161.635L239 192L210.95 204.22L141.432 151.248L152.62 237.85Z"/></svg>
+      Customise
+    </h2>
+
+    <div class="section">
+      <div class="label">ICON</div>
+      <div id="iconrow">
+        <input type="color" id="iconpick" value="#C7B8E8" title="Icon color">
+        <input type="text" id="iconhex" value="#C7B8E8" spellcheck="false" maxlength="7">
+        <button class="btn" id="iconreset">Reset</button>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="label">PHOTOS <span class="val" id="bginfo"></span></div>
+      <div id="dropzone">
+        <button class="addtile" id="addtile" title="Add photos">+</button>
+        <!-- thumbnails injected here -->
+      </div>
+      <input type="file" id="bgfiles" accept="image/*" multiple hidden>
+      <button id="photoclear">Clear all</button>
+      <div class="switchrow" style="margin-top:12px">
+        <span>Render as ascii art</span>
+        <label class="m3switch"><input type="checkbox" id="asciitoggle"><span class="track"><span class="thumb"></span></span></label>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="label">ADJUST <span class="val" id="brightval">100%</span></div>
+      <input type="range" id="brightness" min="25" max="150" value="100" step="1" aria-label="Brightness">
+      <div class="label" style="margin-top:12px">BLUR <span class="val" id="blurval">0px</span></div>
+      <input type="range" id="blur" min="0" max="20" value="0" step="1" aria-label="Blur">
+    </div>
+
+    <div class="section">
+      <div class="label">BEHAVIOR</div>
+      <div class="switchrow">
+        <span>Show menu button</span>
+        <label class="m3switch"><input type="checkbox" id="menutoggle"><span class="track"><span class="thumb"></span></span></label>
+      </div>
+    </div>
+
+    <div class="hint"><kbd>ctrl</kbd> <kbd>c</kbd> toggle &nbsp;·&nbsp; <kbd>esc</kbd> close</div>
+  </div>
+</div>
+
+<script src="ascii.js"></script>
+<script src="ntp.js"></script>
