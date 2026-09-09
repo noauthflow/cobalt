@@ -1018,6 +1018,9 @@ def cmd_seed(args):
 
 def cmd_avatar(args):
     """replace every avatar PNG in a chromium user-data dir's Avatars/ folder."""
+    if sys.platform != "darwin":
+        print("⚠ cobalt avatar is only verified on macOS + google chrome — "
+              "continuing on this platform is untested")
     img = os.path.abspath(os.path.expanduser(args.image))
     if not os.path.isfile(img):
         sys.exit(f"error: {img} does not exist")
@@ -1163,11 +1166,12 @@ def main():
 
     p_avatar = sub.add_parser("avatar",
                               help="replace every avatar PNG in a chromium Avatars/ folder "
-                                   "with one 192x192 PNG (toolbar profile icon)")
+                                   "with one 192x192 PNG (toolbar profile icon). "
+                                   "macOS + google chrome only (verified combo)")
     p_avatar.add_argument("image", help="path to a 192x192 PNG — exact, no resizing is done")
     p_avatar.add_argument("browser", nargs="?", default="chrome",
-                          help="target browser (default: chrome)")
-    p_avatar.add_argument("--root", help="user-data dir of any Chromium fork")
+                          help="target browser (default: chrome; only chrome verified)")
+    p_avatar.add_argument("--root", help="user-data dir of any Chromium fork (macOS paths only)")
     p_avatar.add_argument("--force", action="store_true",
                           help="write even if the browser appears to be running")
     p_avatar.add_argument("--dry", action="store_true")

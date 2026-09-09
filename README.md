@@ -103,6 +103,9 @@ nesting: a line belongs to the nearest `[Folder]` above it whose indentation is 
         the image and target are remembered for `cobalt reload`.
         note: a chrome update may revert this — re-run if the old face
         comes back.
+        macOS only, google chrome only — that is the verified combination;
+        other platforms/browsers are untested (the cobalt script itself is
+        cross-platform, this subcommand is not proven beyond the above).
 
     cobalt reload [--dry] [--force]
         re-apply the last `seed` color and the last `avatar` image to the
