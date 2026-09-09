@@ -118,6 +118,88 @@ everything else is version/metadata chatter. the stock new tab page phones
 home for tiles/logos; a blank NTP override (`extension/blank.html`) removes
 that channel.
 
+## profile avatars: two sources — and only one is the toolbar
+
+tested against 153.0.8010.37 (google chrome branding, /Applications/Chromium.app).
+the profile avatar has TWO independent image sources, and confusing them cost
+most of a day:
+
+1. pak resources (`IDR_PROFILE_AVATAR_*`, see pak format below) — drive the
+   avatar gallery and the avatar shown on `chrome://settings/manageProfile`.
+   swapping pak image 14356 changes the manage page. it does NOT change the
+   toolbar.
+2. `<user-data-dir>/Avatars/*.png` — a runtime cache of 192x192 avatar images
+   (e.g. `avatar_origami_cat.png`) that chrome populates itself. the toolbar
+   profile button reads from THESE files. swapping the file the profile points
+   at changes the toolbar.
+
+only #2 is user-serviceable without bundle surgery: it's a plain PNG in the
+user's own profile directory. no signature, no TCC, no re-signing. which file
+corresponds to which gallery slot: `Preferences -> profile.avatar_index` picks
+the slot; the filename mapping was determined empirically (index 27 =
+`avatar_origami_cat.png` on this build), not from source.
+
+caveats:
+
+- a chrome **update** rewrites the bundle AND may re-download the Avatars/
+  cache. re-run after updates.
+- profiles with `profile.using_gaia_avatar = true` (signed-in account picture)
+  ignore the Avatars/ folder entirely.
+- `Local State` gaia-picture flags (`use_gaia_picture` +
+  `gaia_picture_file_name`) are a dead end: on a signed-out profile, chrome
+  actively reverts them — deletes the picture file (`Google Profile
+  Picture.png`) and clears the name at launch. observed twice. custom
+  pictures via that path are defended; don't bother.
+
+## pak v5 format (chrome_100_percent.pak / chrome_200_percent.pak / resources.pak)
+
+reverse-engineered against 153.0.8010.37; layout matches data_pack.cc v5:
+
+    header (12B):  u32 version=5, u32 encoding, u16 resource_count, u16 alias_count
+    index:         (resource_count+1) entries of (u16 id, u32 offset)
+                   the last entry is a sentinel whose offset == end of blob data
+    alias table:   alias_count * 4 bytes (u16 id -> u16 entry index)
+    blobs:         raw, uncompressed, no per-entry checksums
+
+verified data point: entry 0 of chrome_100_percent.pak = (id 257, offset 2860)
+= 12 + 462*6 + 19*4. layout confirmed.
+
+chrome validates offsets at load (data_pack.cc): any offset past EOF ->
+`Data pack file corruption: Entry #N past end` and the pak is dropped
+("Some features may not be available") — a loud failure, never silent
+corruption. this makes pak edits safe to attempt: if it launches, the pak is
+valid.
+
+rebuild procedure that works: parse index, replace blobs, re-serialize with
+offsets recomputed so the blob region starts exactly at
+12+(count+1)*6+alias_count*4 and the sentinel equals the new file size. the
+gotcha that cost a night: the alias table must be written before the blobs —
+appending blobs directly after the index shifts every offset by the alias-
+table size and chrome rejects the file.
+
+## branded chrome tamper-resistance on macOS
+
+findings from attempting pak edits on google-branded builds:
+
+- editing pak files breaks the codesign resource seal. whether that matters
+  depends ENTIRELY on the quarantine attribute:
+  - quarantined + broken seal -> Gatekeeper re-validates at launch ->
+    "Google Chrome is damaged and can't be opened. You should move it to the
+    Bin." (observed. correct — the bundle no longer matches its manifest)
+  - quarantine stripped (or already launched once) -> macOS does not
+    re-validate the resource seal at every launch. pak edits run fine.
+    chrome's own Framework.sig covers the framework binary, not the paks.
+- **never re-sign the bundle ad-hoc to "fix" the seal.** the code signature is
+  the identity that keychain ACLs and TCC are anchored to. ad-hoc re-signing
+  locked chrome out of its own "Chromium Safe Storage" keychain item (cookies
+  undecryptable) and triggered TCC blocks ("tried to access data from other
+  apps"). the recovery is delete bundle + reinstall; profile data and the
+  keychain item survive, and the fresh google-signed binary matches the ACL
+  again.
+- chrome auto-update rewrites the bundle: pak modifications are reverted.
+- unsigned chromium-family builds have none of these defenses — pak edits are
+  free there.
+
 ## repo changes in this revision
 
 - `extension/` — new tab extension restructured: `blank.html` (#353535 NTP
@@ -125,3 +207,15 @@ that channel.
 - `template-theme/` — separate theme extension (grey surfaces; must be separate per
   the mv3 rule above) + repro documentation.
 - `cobalt seed` — new CLI subcommand; see seed color section above.
+- `cobalt avatar` — new CLI subcommand; replaces every PNG in
+  `<user-data-dir>/Avatars/` with one 192x192 PNG (toolbar profile avatar).
+  strict input validation (must be exactly 192x192 PNG, no resizing), refuses
+  while the browser is running, backs up to *.cobalt-bak. see profile avatars
+  section above. the pak-level swap (manage-page avatar) is deliberately NOT
+  automated — documented above, but bundle surgery on branded chrome is not a
+  thing a config tool should do silently.
+- `cobalt reload` — new CLI subcommand; re-applies the last seed color and
+  last avatar image to the targets they were last applied to. state lives in
+  `~/.config/cobalt.state` (JSON, override with COBALT_STATE), written only
+  on successful non-dry runs. the post-update recovery flow is now:
+  quit chrome -> `cobalt reload`.

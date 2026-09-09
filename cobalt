@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import sqlite3
+import struct
 import sys
 import tempfile
 import time
@@ -19,7 +20,28 @@ from urllib.parse import urlparse
 DEFAULT_CONFIG = os.environ.get(
     "COBALT_CONFIG",
     os.path.expanduser("~/.config/cobalt.conf"))
+STATE_FILE = os.environ.get(
+    "COBALT_STATE",
+    os.path.expanduser("~/.config/cobalt.state"))
 GUID_PREFIX = "COBALT-"
+
+def load_state():
+    try:
+        with open(STATE_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+def record_state(key, data):
+    """remember the last successful invocation of a command (cobalt reload re-applies it)"""
+    state = load_state()
+    state[key] = data
+    state["updated"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+    tmp = STATE_FILE + ".cobalt-tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2)
+    os.replace(tmp, STATE_FILE)
 
 def browser_roots():
     home = os.path.expanduser("~")
@@ -986,8 +1008,105 @@ def cmd_seed(args):
     if args.dry:
         print("(dry run — nothing written)")
     elif wrote_any:
+        record_state("seed", {"hex": hexnorm, "browser": args.browser,
+                              "profile": args.profile, "root": args.root,
+                              "all": bool(getattr(args, "all_profiles", False))})
+        print(f"remembered: `cobalt reload` will re-apply this seed ({hexnorm})")
+    elif wrote_any:
         print("done. relaunch the browser — it re-reads Preferences (and theme manifests) at startup.")
         print("note: loading/unloading the theme extension wipes user_color2 — re-run `seed` after.")
+
+def cmd_avatar(args):
+    """replace every avatar PNG in a chromium user-data dir's Avatars/ folder."""
+    img = os.path.abspath(os.path.expanduser(args.image))
+    if not os.path.isfile(img):
+        sys.exit(f"error: {img} does not exist")
+    with open(img, "rb") as f:
+        head = f.read(24)
+    if head[:8] != b"\x89PNG\r\n\x1a\n":
+        sys.exit(f"error: {os.path.basename(img)} is not a PNG\n"
+                 "       avatar images must be exactly 192x192 PNG — no resizing is done here")
+    w, h = struct.unpack(">II", head[16:24])
+    if (w, h) != (192, 192):
+        sys.exit(f"error: {os.path.basename(img)} is {w}x{h}, must be exactly 192x192\n"
+                 "       resize it first:\n"
+                 "         macOS: sips -z 192 192 in.png --out out.png\n"
+                 "         imagemagick: magick in.png -resize 192x192! out.png")
+
+    root = (os.path.abspath(os.path.expanduser(args.root)) if args.root
+            else browser_roots().get(args.browser))
+    if not root or not os.path.isdir(root):
+        sys.exit(f"error: browser '{args.browser}' not found. Try `ls`, or pass --root.")
+    av = os.path.join(root, "Avatars")
+    if not os.path.isdir(av):
+        sys.exit(f"error: no Avatars/ folder under {root} — open the browser once, then retry")
+    targets = [f for f in sorted(os.listdir(av)) if f.lower().endswith(".png")]
+    if not targets:
+        sys.exit(f"error: no PNGs in {av} — nothing to replace")
+    lock = browser_running(root)
+    if lock and not args.force:
+        sys.exit(f"error: the browser looks like it's RUNNING ({lock} exists in {root})\n"
+                 f"       it may re-download/rewrite the avatar cache on exit.\n"
+                 f"       quit it fully (cmd-Q) and retry, or pass --force")
+
+    print(f"image: {img} (192x192 PNG, {os.path.getsize(img)} bytes)")
+    for p in find_profiles(root):
+        try:
+            with open(os.path.join(p, "Preferences"), encoding="utf-8") as f:
+                prof = json.load(f).get("profile", {})
+            if prof.get("using_gaia_avatar"):
+                print(f"  ⚠ profile {os.path.basename(p)} uses a signed-in account picture "
+                      f"— it will not reflect this change")
+        except (OSError, ValueError):
+            pass
+
+    replaced = 0
+    for f in targets:
+        dst = os.path.join(av, f)
+        if os.path.abspath(dst) == img:
+            continue
+        if args.dry:
+            print(f"  · would replace: {f} ({os.path.getsize(dst)} bytes)")
+            continue
+        backup(dst, args.dry)
+        shutil.copy2(img, dst)
+        replaced += 1
+        print(f"  ✓ replaced: {f} (backup at {f}.cobalt-bak)")
+    if args.dry:
+        print(f"(dry run — {len(targets)} avatar(s) would be replaced)")
+    else:
+        record_state("avatar", {"image": img, "browser": args.browser, "root": args.root})
+        print(f"done. {replaced} avatar(s) replaced — relaunch the browser to see it.\n"
+              f"remembered: `cobalt reload` will re-apply this avatar ({os.path.basename(img)})\n"
+              f"note: a chrome update rewrites the bundle AND may re-download the avatar "
+              f"cache; re-run if the old face ever comes back.")
+
+def cmd_reload(args):
+    state = load_state()
+    jobs = []
+    if "seed" in state:
+        s = state["seed"]
+        jobs.append(("seed", argparse.Namespace(
+            browser=s.get("browser") or "chrome", hex_color=s.get("hex"),
+            profile=s.get("profile"), root=s.get("root"),
+            all_profiles=bool(s.get("all")), force=args.force, dry=args.dry)))
+    if "avatar" in state:
+        a = state["avatar"]
+        jobs.append(("avatar", argparse.Namespace(
+            image=a.get("image"), browser=a.get("browser") or "chrome",
+            root=a.get("root"), force=args.force, dry=args.dry)))
+    if not jobs:
+        sys.exit("nothing to reload — run `cobalt seed` and/or `cobalt avatar` once first; "
+                 "cobalt remembers the last color and image and re-applies them here")
+
+    print(f"re-applying last-seen settings (recorded {state.get('updated', '?')}):")
+    for name, ns in jobs:
+        print(f"── {name} ──")
+        try:
+            (cmd_seed if name == "seed" else cmd_avatar)(ns)
+        except SystemExit as e:
+            # a failed half (browser missing, image gone) shouldn't stop the other one
+            print(f"  (skipped: {e})")
 
 def cmd_init(args):
     if os.path.exists(DEFAULT_CONFIG) and not args.force:
@@ -1042,12 +1161,31 @@ def main():
                         help="write even if the browser appears to be running")
     p_seed.add_argument("--dry", action="store_true")
 
+    p_avatar = sub.add_parser("avatar",
+                              help="replace every avatar PNG in a chromium Avatars/ folder "
+                                   "with one 192x192 PNG (toolbar profile icon)")
+    p_avatar.add_argument("image", help="path to a 192x192 PNG — exact, no resizing is done")
+    p_avatar.add_argument("browser", nargs="?", default="chrome",
+                          help="target browser (default: chrome)")
+    p_avatar.add_argument("--root", help="user-data dir of any Chromium fork")
+    p_avatar.add_argument("--force", action="store_true",
+                          help="write even if the browser appears to be running")
+    p_avatar.add_argument("--dry", action="store_true")
+
+    p_reload = sub.add_parser("reload",
+                              help="re-apply the last `seed` color and last `avatar` image "
+                                   "(e.g. after a chrome update resets them)")
+    p_reload.add_argument("--dry", action="store_true")
+    p_reload.add_argument("--force", action="store_true",
+                          help="write even if the browser appears to be running")
+
     p_init = sub.add_parser("init", help="create a starter config")
     p_init.add_argument("--force", action="store_true")
 
     args = ap.parse_args()
     {"ls": cmd_list, "list": cmd_list, "push": cmd_push, "pull": cmd_pull,
-     "seed": cmd_seed, "init": cmd_init}[args.cmd](args)
+     "seed": cmd_seed, "avatar": cmd_avatar, "reload": cmd_reload,
+     "init": cmd_init}[args.cmd](args)
 
 if __name__ == "__main__":
     main()

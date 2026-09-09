@@ -92,6 +92,25 @@ nesting: a line belongs to the nearest `[Folder]` above it whose indentation is 
         on exit); --force overrides. backs up Preferences to *.cobalt-bak.
         hex: '#RRGGBB', 'RRGGBB', 'c4d' shorthand, optional alpha. quote
         the # — unquoted, the shell eats it as a comment.
+        the color and target are remembered for `cobalt reload`.
+
+    cobalt avatar IMAGE [browser] [--root DIR] [--dry] [--force]
+        replace EVERY avatar PNG in <user-data-dir>/Avatars/ with IMAGE —
+        this is the toolbar profile icon. IMAGE must be exactly 192x192
+        PNG; there is no resizing, wrong sizes are rejected. the toolbar
+        reads these files, not the browser bundle (see misc.md). refuses
+        while the browser is running; backs up each file to *.cobalt-bak.
+        the image and target are remembered for `cobalt reload`.
+        note: a chrome update may revert this — re-run if the old face
+        comes back.
+
+    cobalt reload [--dry] [--force]
+        re-apply the last `seed` color and the last `avatar` image to the
+        same browser/profile they were last applied to. this is the whole
+        point: a chrome update resets both — one command puts everything
+        back. state lives in ~/.config/cobalt.state; both halves remember
+        independently, and one failing (e.g. image deleted) never blocks
+        the other.
 
     cobalt init [--force]
         write a starter config to the default path.
