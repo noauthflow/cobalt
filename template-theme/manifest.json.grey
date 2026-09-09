@@ -10,20 +10,19 @@
   "theme": {
     "colors": {
       // elevation ramp: 27 -> 40 -> 53, even 13-step increments.
-      // tab colors: background_tab* are intentionally NOT set — chrome derives
-      // the active tab surface from toolbar and inactive tabs from frame, which
-      // keeps tabs seamless (no drawn pill outlines) like the default dark theme.
-      // tab_text MUST stay set: chrome's fallback for the active tab label when
-      // absent is black, while inactive labels derive light — inverted contrast.
       // ntp_background is pinned to #353535 to match the extension's
       // blank.html new tab page.
       "frame": [27, 27, 27],
       "frame_inactive": [23, 23, 23],
+      "background_tab": [22, 22, 22],
+      "background_tab_inactive": [19, 19, 19],
+      "background_tab_hover": [34, 34, 34],
       "toolbar": [40, 40, 40],
       "toolbar_hover": [47, 47, 47],
       "toolbar_button_icon": [216, 216, 216],
       "toolbar_separator": [48, 48, 48],
       "tab_text": [235, 235, 235],
+      "tab_background_text": [150, 150, 150],
       "bookmark_text": [216, 216, 216],
       "button_background": [34, 34, 34],
       "ntp_background": [53, 53, 53],

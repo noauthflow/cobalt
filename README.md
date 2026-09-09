@@ -20,8 +20,11 @@ the repo ships two optional browser addons, self-contained in their own folders
                  optional — cobalt works without it. see extension/README.md.
     template-theme/
                  a boilerplate chrome theme: neutral grey surfaces, elevation
-                 in three flat steps. accent colors are handled by
+                 in three flat steps, seamless tabs. a violet variant ships
+                 as manifest.json.violet. accent colors are handled by
                  `cobalt seed`, not the theme. recommended accent: #7C4DFF.
+                 see template-theme/README.md for palette rules and the
+                 chrome theme quirks that shaped them.
 
     note: chrome only draws the native bookmarks bar on its own stock new tab
     page. with any override extension the bar obeys the global "show bookmarks

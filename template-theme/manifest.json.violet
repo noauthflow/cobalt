@@ -1,0 +1,36 @@
+{
+  // lavender/violet variant. accent recommended for user_color and
+  // user_color2: #B79CFF (the grey variant pairs with #7C4DFF instead).
+  // Accents are NOT set in this manifest (chrome resets accent prefs when a
+  // theme is applied). Apply with: cobalt seed '#B79CFF' --profile Default
+  // (chrome's manifest parser allows comments; strict JSON parsers do not.)
+  //
+  // surfaces follow an even-step elevation ramp, hue-shifted toward
+  // violet: R trails B, G sits lowest.
+  // tab colors: background_tab* are intentionally NOT set — chrome derives
+  // the active tab surface from toolbar and inactive tabs from frame, which
+  // keeps tabs seamless (no drawn pill outlines) like the default dark theme.
+  // tab_text MUST stay set: chrome's fallback for the active tab label when
+  // absent is black, while inactive labels derive light — inverted contrast.
+  // ntp_background stays pinned to #353535 so it matches the extension's
+  // blank.html new tab page (no load flash).
+  "name": "cobalt-theme",
+  "version": "1.0",
+  "description": "Cobalt theme (lavender).",
+  "manifest_version": 3,
+  "theme": {
+    "colors": {
+      "frame": [26, 21, 42],
+      "frame_inactive": [22, 18, 36],
+      "toolbar": [38, 31, 60],
+      "toolbar_hover": [47, 39, 72],
+      "toolbar_button_icon": [224, 214, 246],
+      "tab_text": [224, 214, 246],
+      "toolbar_separator": [62, 52, 92],
+      "bookmark_text": [224, 214, 246],
+      "button_background": [32, 26, 50],
+      "ntp_background": [53, 53, 53],
+      "ntp_text": [224, 214, 246]
+    }
+  }
+}
