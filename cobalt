@@ -912,12 +912,14 @@ def cmd_seed(args):
     if alpha != 0xFF:
         print(f"  ⚠ alpha 0x{alpha:02X} — chrome's picker always writes FF; non-opaque seeds are untested")
 
+    wrote_any = False
     for p in profiles:
         kind = profile_kind(p)
         label = f"{os.path.basename(root)} / {os.path.basename(p)} [{kind or '?'}]"
         print(label + ":")
         if kind != "chromium":
-            print("    ✗ seed is chromium-only (firefox has no Preferences file) — skipped")
+            print("    ✗ seed only works with chromium-family browsers — "
+                  "firefox profiles have no Preferences file. skipped")
             continue
         path = os.path.join(p, "Preferences")
         try:
@@ -979,12 +981,13 @@ def cmd_seed(args):
             sys.exit(f"    error: cannot write {path} ({e})")
         print(f"    ✓ user_color + user_color2 -> {hexnorm} (signed {signed}), saved_local_theme cleared")
         print(f"    ✓ wrote {path} ({os.path.getsize(path)} bytes), backup at {path}.cobalt-bak")
+        wrote_any = True
 
-    if not args.dry:
+    if args.dry:
+        print("(dry run — nothing written)")
+    elif wrote_any:
         print("done. relaunch the browser — it re-reads Preferences (and theme manifests) at startup.")
         print("note: loading/unloading the theme extension wipes user_color2 — re-run `seed` after.")
-    else:
-        print("(dry run — nothing written)")
 
 def cmd_init(args):
     if os.path.exists(DEFAULT_CONFIG) and not args.force:

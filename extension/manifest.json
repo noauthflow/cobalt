@@ -9,6 +9,16 @@
     "128": "icons/icon128.png"
   },
   "manifest_version": 3,
+  "background": { "service_worker": "pin.js" },
+  "commands": {
+    "pin-tab": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+P",
+        "mac": "Command+Shift+P"
+      },
+      "description": "Pin or unpin the current tab"
+    }
+  },
   "chrome_url_overrides": { "newtab": "blank.html" },
   "content_scripts": [{
     "matches": ["*://*.youtube.com/*"],

@@ -18,6 +18,11 @@ developer mode, or don't run it at all.
 - youtube renames element classes periodically; the redirect is the only
   part that cannot break.
 
+**tab pin shortcut** (`pin.js`)
+- chrome has no native keyboard shortcut for pinning tabs; this adds one.
+- toggles pin on the active tab. default Ctrl+Shift+P (Cmd+Shift+P on mac),
+  rebindable at chrome://extensions/shortcuts.
+
 **icons** (`icons/`) — white 8-point starburst, 16/32/48/128.
 
 ## notes
