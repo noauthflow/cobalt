@@ -8,7 +8,7 @@ const bg = $('bg'), cfg = $('cfg'), dropzone = $('dropzone');
 const store = chrome.storage.local;
 
 // live settings snapshot; every value mirrors chrome.storage
-const S = { iconColor: DEFAULT_ICON, photos: [], ascii: false, brightness: 100, blur: 0, menu: true };
+const S = { iconColor: DEFAULT_ICON, photos: [], ascii: false, intro: true, brightness: 100, blur: 0, menu: true };
 let stopAscii = null;
 
 const favicon = (color) =>
@@ -195,6 +195,13 @@ $('asciitoggle').addEventListener('change', (e) => {
   showMode();
 });
 
+// intro switch (decode vs fade-in; only affects ascii mode)
+$('introtoggle').addEventListener('change', (e) => {
+  S.intro = e.target.checked;
+  persist({ intro: S.intro });
+  if (S.ascii) showMode(); // restart ascii with the new load animation
+});
+
 $('menutoggle').addEventListener('change', (e) => {
   S.menu = e.target.checked;
   persist({ menu: S.menu });
@@ -215,6 +222,7 @@ store.get(S, (vals) => {
   $('iconpick').value = S.iconColor;
   $('iconhex').value = S.iconColor;
   $('asciitoggle').checked = S.ascii;
+  $('introtoggle').checked = S.intro;
   $('menutoggle').checked = S.menu;
   $('brightness').value = S.brightness;
   $('blur').value = S.blur;

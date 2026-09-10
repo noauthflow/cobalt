@@ -39,7 +39,7 @@
   #bg.on { opacity: 1; }
 
   #artwrap {
-    position: fixed; top: 0; bottom: 0; right: 0; width: 55%; z-index: -1;
+    position: fixed; inset: 0; z-index: -1;
     opacity: 0;
     transition: opacity 500ms var(--md3-ease) 200ms;
     pointer-events: none;
@@ -242,6 +242,10 @@
       <div class="switchrow" style="margin-top:12px">
         <span>Render as ascii art</span>
         <label class="m3switch"><input type="checkbox" id="asciitoggle"><span class="track"><span class="thumb"></span></span></label>
+      </div>
+      <div class="switchrow" style="margin-top:12px">
+        <span>Decode intro (ascii)</span>
+        <label class="m3switch"><input type="checkbox" id="introtoggle"><span class="track"><span class="thumb"></span></span></label>
       </div>
     </div>
 

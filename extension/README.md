@@ -21,9 +21,11 @@ hand-rolled material design 3 tokens/components — no libraries, no build)
   500ms fade — tunable in the #bg transition).
 - **adjust**: brightness (25-150%) + blur (0-20px) sliders. photo mode
   applies live via css filter; ascii re-samples on slider release.
-- **ascii art mode**: m3 switch. exact port of aeolian's DotImage.tsx
-  (`ascii.js`): same 7x12 grid, ramp, decode intro (scrolling COBALT),
-  hover-scramble + healing, left taper. only deltas: word is COBALT,
+- **ascii art mode**: m3 switch. port of aeolian's DotImage.tsx
+  (`ascii.js`): same 7x12 grid, ramp, hover-scramble + healing, full-page
+  canvas (no left taper). "decode intro" switch picks the load animation:
+  intro = flickering COBALT resolving top to bottom (1600ms), off = plain
+  fade-in of the finished image. only deltas vs aeolian: word is COBALT,
   panel bg #353535, adjustments applied via ctx.filter at sample time.
 - mv3 csp: no inline scripts — logic lives in `ntp.js`/`ascii.js`.
 

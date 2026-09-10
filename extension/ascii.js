@@ -1,17 +1,19 @@
-// ASCII art renderer for the new tab page. 1:1 vanilla port of aeolian's
+// ASCII art renderer for the new tab page. Port of aeolian's
 // components/ui/DotImage.tsx (same constants, same spacing, same algorithm):
 // renders one of the stored photos (picked at random per load) as ASCII art
 // on a canvas. On load it plays a "decode" intro: the whole panel starts as
 // flickering random characters and resolves into the real image top to
 // bottom, like a terminal decrypting. The grid is keyed off "whiteness"
 // (luminance) so subjects separate from background, tinted from the image's
-// own palette. Fills its positioned parent, redraws on resize.
+// own palette. Covers the full page, fills its positioned parent, redraws on
+// resize. adj.intro selects the load animation: true = "decode" intro
+// (flickering COBALT resolving top to bottom), false = plain fade-in of the
+// finished image.
 const CELL_W = 7 // px per character column
 const CELL_H = 12 // px per character row (also the font size)
 const RAMP = " .,:;-~=+i!lI/\\|()1[]{}rcvzxnufjtLCJUYXZ0OQmwqpdbkhao*#MW&8%B@$" // sparse -> dense
 const WORD = 'COBALT' // spelled, repeating + scrolling, in the loading/decode state
 const DURATION = 1600 // ms for the decode
-const TAPER_FRAC = 0.42 // left fraction of the panel that tapers off vertically
 const HOVER_RADIUS = 72 // px around the cursor that scrambles on hover
 const HOVER_JITTER = 22 // px of per-cell radius jitter, so the edge isn't a clean circle
 const HOVER_CHARS = '!<>-_/\\[]{}*+=?#%&@$~^cyd' // random symbols shown on hover
@@ -146,22 +148,6 @@ function startAsciiArt(canvas, parent, srcs, background = '#353535', adj = { bri
     const pl = palette.length
     for (let p = 0; p < n; p++) {
       loadColors[p] = pl ? palette[(Math.random() * pl) | 0] : colors[p]
-    }
-
-    // Left taper: toward the left edge, the vertical band the image may occupy
-    // shrinks (per-column, with random height + centre) so it feathers off
-    // naturally instead of stopping at a hard vertical line.
-    const taperCols = Math.floor(cols * TAPER_FRAC)
-    for (let i = 0; i < taperCols; i++) {
-      const t = i / taperCols // 0 at left edge -> 1 at end of taper zone
-      const frac = Math.min(1, Math.pow(t, 0.85) * (0.55 + 0.75 * Math.random()))
-      const halfSpan = (frac * rows) / 2
-      const center = rows / 2 + (Math.random() - 0.5) * rows * 0.14
-      const top = center - halfSpan
-      const bottom = center + halfSpan
-      for (let j = 0; j < rows; j++) {
-        if (j < top || j > bottom) chars[j * cols + i] = ''
-      }
     }
     return true
   }
@@ -309,6 +295,13 @@ function startAsciiArt(canvas, parent, srcs, background = '#353535', adj = { bri
 
   const start = () => {
     if (!setup()) return
+    // Fade mode (adj.intro false): skip the decode entirely — draw the final
+    // grid and let #artwrap's css opacity transition do the fade-in.
+    if (adj.intro === false) {
+      drawFrame(1)
+      ready = true
+      return
+    }
     // ready may already be true here: the ResizeObserver's initial callback
     // can draw the final image before onload. in that case skip the intro —
     // replaying it would interleave decode flicker with live hover frames.
