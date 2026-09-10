@@ -33,6 +33,23 @@ cfg.addEventListener('click', (e) => { if (e.target === cfg) openPanel(false); }
 $('menubtn').addEventListener('click', () => openPanel(true));
 
 // ---- icon color ----
+// every new tab warms the favicon up from white to the saved colour (see warmUp)
+
+// no cache yet (first run / colour just changed): warm the favicon up
+// from white to the saved colour instead of popping in.
+const warmUp = (to) => {
+  const end = [1, 3, 5].map((i) => parseInt(to.slice(i, i + 2), 16));
+  const steps = 20; // 20 × 100ms ≈ 2s white → colour fade
+  let i = 0;
+  setFavicon('#ffffff');
+  const t = setInterval(() => {
+    i++;
+    const mix = (v) => Math.round(255 + (v - 255) * (i / steps));
+    setFavicon('#' + end.map((v) => mix(v).toString(16).padStart(2, '0')).join(''));
+    if (i >= steps) clearInterval(t);
+  }, 100);
+};
+
 const applyIcon = (color) => {
   S.iconColor = color;
   setFavicon(color);
@@ -218,7 +235,7 @@ $('menutoggle').addEventListener('change', (e) => {
 // ---- init ----
 store.get(S, (vals) => {
   Object.assign(S, vals);
-  setFavicon(S.iconColor);
+  warmUp(S.iconColor); // every new tab: 2s white -> colour fade
   $('iconpick').value = S.iconColor;
   $('iconhex').value = S.iconColor;
   $('asciitoggle').checked = S.ascii;

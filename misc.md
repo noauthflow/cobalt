@@ -219,3 +219,98 @@ findings from attempting pak edits on google-branded builds:
   `~/.config/cobalt.state` (JSON, override with COBALT_STATE), written only
   on successful non-dry runs. the post-update recovery flow is now:
   quit chrome -> `cobalt reload`.
+
+## animation-duration-scale: the one ui speed flag that works
+
+discovered 2026-09-10, against the same 153.0.8010.37 build.
+
+`--animation-duration-scale=<factor>` scales ui animation/tween durations
+browser-wide. `0.001` reads as instant; `0.25` reads as snappy. it is an
+unofficial test hook in the compositor, not a preference: there is no
+chrome://flags entry, no Preferences key, no policy. it exists for chrome's
+own ui test automation, which is why it still works and why it is
+undocumented.
+
+verified working on: the experimental vertical-tabs strip animations
+(expand/collapse). not verified per-animation otherwise; some tabstrip
+animations are driven by their own tween code and may ignore the scale.
+
+what it does NOT touch: the vertical-tabs **hover debounce** (~100ms before
+expansion starts). that is hover-intent gating in the tabstrip code, a
+separate path from animation tweens — it decides whether the animation
+starts, not how fast it plays. no flag, pref, or policy reaches it.
+
+## launch flags on macOS: argv only, no persistence
+
+chrome reads launch flags from argv and nothing else. there is no
+chrome-flags.conf (that is a linux distro-wrapper convention), no Preferences
+key, no policy. therefore the flag exists only for the lifetime of one
+browser process, and only if that process was born with it:
+
+- relaunching into a running instance ignores flags entirely — `open`
+  focuses what already exists. a flagless session stays flagless until a
+  full quit.
+- any other launcher (dock, spotlight, a link click in another app while
+  chrome is closed) starts a flagless session.
+- the only "always" mechanisms are (a) wrapping every possible launcher —
+  unworkable, or (b) bundle modification — see the codesigning notes above:
+  Info.plist is inside the signed seal, any edit requires unsigning, and
+  unsigning breaks keychain ACLs and TCC. dead end, deliberately.
+
+## the wrapper-bundle approach (works, reproducible)
+
+since flags live and die with argv, the durable trick is a separate app
+bundle whose only executable is a shell script that execs the real browser
+with the flags. the real bundle is never modified — no signing, no update
+conflicts, survives chrome updates untouched.
+
+    /Applications/Chromium-Flags.app/
+      Contents/Info.plist          # CFBundleExecutable=launcher, icon, id
+      Contents/MacOS/launcher      # the script below
+      Contents/Resources/app.icns  # copied from chromium for looks
+
+launcher script:
+
+    #!/bin/bash
+    exec "/Applications/Chromium.app/Contents/MacOS/Google Chrome" \
+      --animation-duration-scale=0.001 "$@"
+
+gotcha that cost the debugging: the binary inside
+`/Applications/Chromium.app` (google-chrome-branded build) is named
+`Google Chrome`, not `Chromium` — `MacOS/Chromium` does not exist and the
+wrapper fails silently when launched via `open` (stderr goes nowhere).
+`ls /Applications/Chromium.app/Contents/MacOS/` to confirm the name for any
+given build before writing the path.
+
+minimal Info.plist for the wrapper (CFBundleIconFile points at the icns
+copied from the real app so it looks native in dock/raycast):
+
+    CFBundleExecutable = launcher
+    CFBundleIdentifier = com.cobalt.chromium-flags
+    CFBundleName       = Chromium-Flags
+    CFBundlePackageType = APPL
+
+after creating the bundle: `lsregister -f <bundle>` to register with
+LaunchServices (otherwise Spotlight/Raycast cannot see it), then
+`codesign -s - -f` the wrapper itself (ad-hoc is fine — it is our bundle;
+never do this to the real browser, see the tamper-resistance section).
+
+behavior: flags apply only when chromium is not already running. launching
+the wrapper into a running flagless instance just focuses it. so the flow
+is: fully quit chromium, launch via the wrapper, and the flag lives for the
+whole session. sessions started any other way are flagless until the next
+full quit + wrapper launch.
+
+the show/hide toggle in raycast app-keybinds works unchanged against the
+wrapper: keybinds just focus/hide the running process; the flag is already
+in the process at birth. new sessions started by other launchers remain
+flagless — that is the one leak, inherent to argv-only flags.
+
+what was tried and rejected for "always-on" flags:
+
+- LaunchAgent with RunAtLoad — starts chrome AT LOGIN, which is wrong for
+  anyone who does not want chrome auto-opening; also spawned chrome without
+  being asked, which is its own kind of bug. works mechanically, wrong shape.
+- editing the bundle — requires unsigning. dead, see above.
+- chrome://flags / Preferences / policy — no such knob. the animation lives
+  in compiled tween code; only the argv scale reaches it.
