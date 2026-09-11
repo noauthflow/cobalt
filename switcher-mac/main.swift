@@ -44,10 +44,12 @@ final class App: NSObject {
         }
     }
 
-    // first ctrl+tab while a chromium-family browser is frontmost. opens the
-    // overlay AND cycles immediately — the first press is a real switch, not
-    // just "show me the list".
-    func begin(shift: Bool) {
+    // opens the overlay. triggered by ctrl+shift (modifiers alone, no key
+    // press needed) or by the first ctrl+tab. on its own it NEVER cycles:
+    // the overlay just appears, anchored on chrome's real active tab.
+    // (the first ctrl+tab calls advance() right after begin() to keep the
+    // original "first press is a real switch" behavior.)
+    func begin() {
         guard let app = NSWorkspace.shared.frontmostApplication,
               Browser.isChromiumFamily(app),
               let bid = app.bundleIdentifier else { return }
@@ -63,7 +65,6 @@ final class App: NSObject {
         overlay.show()
         startWatchdog()
         refreshList()   // one query on open; corrects sel if chrome moved since last time
-        advance(shift: shift)   // the first press cycles too (no-op if cache is still empty)
     }
 
     // each ctrl+tab press: highlight moves INSTANTLY (local), and chrome

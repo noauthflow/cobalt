@@ -13,9 +13,20 @@ enum Tap {
             let ctrl = event.flags.contains(.maskControl)
             switch type {
             case .flagsChanged:
-                // ctrl released → cycling over → hide. nothing was changed,
-                // so there is nothing to commit.
-                if !ctrl { App.shared.end() }
+                if !ctrl {
+                    // ctrl released → session over → hide. nothing to commit:
+                    // every advance already switched chrome in real time.
+                    App.shared.end()
+                } else if event.flags.contains(.maskShift), !App.shared.open {
+                    // ctrl+shift held together, overlay not open, ctrl still
+                    // down → just SHOW the overlay. no cycling, no key press
+                    // needed — the modifier combo itself is the trigger.
+                    // (a tab tapped afterwards does the cycling.)
+                    let front = NSWorkspace.shared.frontmostApplication
+                    if front.map({ Browser.isChromiumFamily($0) }) == true {
+                        App.shared.begin()
+                    }
+                }
                 return Unmanaged.passUnretained(event)
 
             case .keyDown:
@@ -28,7 +39,11 @@ enum Tap {
                         if App.shared.open {
                             App.shared.advance(shift: shift)
                         } else {
-                            App.shared.begin(shift: shift)   // opens the overlay AND cycles
+                            // first ctrl+tab: open AND cycle — the first
+                            // press is a real switch, not just "show me the
+                            // list". (ctrl+shift is the no-cycle way in.)
+                            App.shared.begin()
+                            App.shared.advance(shift: shift)
                         }
                         return nil
                     }

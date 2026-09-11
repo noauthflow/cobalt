@@ -1,8 +1,9 @@
 # cobalt tab switcher (macOS)
 
-ctrl+tab → floating overlay lists your tabs, highlight mirrors chrome's real
-active tab, release ctrl → overlay collapses. hover a row + esc closes that tab.
-the panel is vertically centered and stays centered when it grows/shrinks.
+ctrl+tab / ctrl+shift → floating overlay lists your tabs, highlight mirrors
+chrome's real active tab, release ctrl → overlay collapses. hover a row + esc
+closes that tab. the panel is vertically centered and stays centered when it
+grows/shrinks.
 
 tab lists are always warm: replies land in the cache even when they arrive
 after the overlay closed (fast sessions used to discard them → blank opens),
@@ -24,6 +25,8 @@ open** — and only so chrome doesn't also treat it as "stop loading".
 everything else passes through untouched.
 
 ```
+ctrl+shift      overlay appears, anchored on chrome's active tab — nothing
+                cycles. tap tab afterwards to move the highlight.
 ctrl+tab        overlay appears AND cycles to the next tab — the first press
                 is a real switch, not just "show me the list"
 ctrl+shift+tab  same, but cycles backwards
