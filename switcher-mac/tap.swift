@@ -20,9 +20,13 @@ enum Tap {
 
             case .keyDown:
                 let code = event.getIntegerValueField(.keyboardEventKeycode)
-                if code == 48, ctrl {              // tab — pass through untouched
-                    App.shared.begin()             // chrome switches; we show the mirror
-                    return Unmanaged.passUnretained(event)
+                if code == 48, ctrl {              // tab — swallowed. WE are the cycle.
+                    if App.shared.open {
+                        App.shared.advance(shift: event.flags.contains(.maskShift))
+                    } else {
+                        App.shared.begin()
+                    }
+                    return nil
                 }
                 if code == 53, App.shared.open {   // esc — the ONE key we swallow
                     App.shared.escPressed()
