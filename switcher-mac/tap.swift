@@ -24,10 +24,11 @@ enum Tap {
                     let front = NSWorkspace.shared.frontmostApplication
                     let chromium = front.map { Browser.isChromiumFamily($0) } ?? false
                     if App.shared.open || chromium {
+                        let shift = event.flags.contains(.maskShift)
                         if App.shared.open {
-                            App.shared.advance(shift: event.flags.contains(.maskShift))
+                            App.shared.advance(shift: shift)
                         } else {
-                            App.shared.begin()
+                            App.shared.begin(shift: shift)   // opens the overlay AND cycles
                         }
                         return nil
                     }

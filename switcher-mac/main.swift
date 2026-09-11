@@ -23,8 +23,10 @@ final class App: NSObject {
     private var cache: [Browser.Tab] = []
     private var cacheSel = 0
 
-    // first ctrl+tab while a chromium-family browser is frontmost.
-    func begin() {
+    // first ctrl+tab while a chromium-family browser is frontmost. opens the
+    // overlay AND cycles immediately — the first press is a real switch, not
+    // just "show me the list".
+    func begin(shift: Bool) {
         guard let app = NSWorkspace.shared.frontmostApplication,
               Browser.isChromiumFamily(app),
               let bid = app.bundleIdentifier else { return }
@@ -39,12 +41,14 @@ final class App: NSObject {
         overlay.render(tabs: tabs, sel: sel, hover: nil)
         overlay.show()
         refreshList()   // one query on open; corrects sel if chrome moved since last time
+        advance(shift: shift)   // the first press cycles too (no-op if cache is still empty)
     }
 
     // each ctrl+tab press: highlight moves INSTANTLY (local), and chrome
     // switches to it in the background — fire-and-forget, real time, every press.
     func advance(shift: Bool) {
         guard open, !tabs.isEmpty else { return }
+        movedYet = true   // even on the very first press — don't let the refresh snap back
         sel = (sel + (shift ? -1 : 1) + tabs.count) % tabs.count
         overlay.moveHighlight(to: sel, tabs: tabs)
         if let bid = bundleId {
@@ -88,11 +92,18 @@ final class App: NSObject {
             DispatchQueue.main.async {
                 guard self.open else { return }
                 if let tabs {
+                    // if the user already moved (possibly on the very first
+                    // press), re-anchor the highlight to the same tab so a
+                    // reordered/fresh list can't make sel point elsewhere
+                    let anchor = self.movedYet && self.sel < self.tabs.count
+                        ? self.tabs[self.sel].n : nil
                     self.tabs = tabs
                     self.cache = tabs
-                    // if the user hasn't moved yet, land on chrome's real tab
                     if !self.movedYet, let a = active, a - 1 < tabs.count {
+                        // user hasn't moved: land on chrome's real tab
                         self.sel = a - 1
+                    } else if let anchor, let i = tabs.firstIndex(where: { $0.n == anchor }) {
+                        self.sel = i
                     }
                 }
                 self.overlay.render(tabs: self.tabs, sel: self.sel, hover: self.hover)

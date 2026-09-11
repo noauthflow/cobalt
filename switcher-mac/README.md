@@ -17,8 +17,10 @@ open** — and only so chrome doesn't also treat it as "stop loading".
 everything else passes through untouched.
 
 ```
-ctrl+tab        chrome switches natively; overlay appears, highlight mirrors
-ctrl+tab …      keep tapping — chrome keeps cycling, highlight follows
+ctrl+tab        overlay appears AND cycles to the next tab — the first press
+                is a real switch, not just "show me the list"
+ctrl+shift+tab  same, but cycles backwards
+ctrl+tab …      keep tapping — keeps cycling, highlight follows
 release ctrl    overlay collapses (chrome already settled the tab)
 esc             over a row → close that tab; not hovering → cancel overlay
 ```
