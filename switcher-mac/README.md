@@ -2,6 +2,13 @@
 
 ctrl+tab → floating overlay lists your tabs, highlight mirrors chrome's real
 active tab, release ctrl → overlay collapses. hover a row + esc closes that tab.
+the panel is vertically centered and stays centered when it grows/shrinks.
+
+tab lists are always warm: replies land in the cache even when they arrive
+after the overlay closed (fast sessions used to discard them → blank opens),
+the cache is re-primed after every session, and it persists to disk
+(~/Library/Caches/cobalt-switcher-tabs.json) so the first open after a relaunch
+is never blank either.
 
 ## design: chrome switches, we draw
 
@@ -24,6 +31,18 @@ ctrl+tab …      keep tapping — keeps cycling, highlight follows
 release ctrl    overlay collapses (chrome already settled the tab)
 esc             over a row → close that tab; not hovering → cancel overlay
 ```
+
+## safety nets
+
+the overlay must never get stuck on screen, no matter what:
+
+- a watchdog timer (independent of the event tap) checks the real global
+  modifier state every 100ms while the overlay is open — the moment ctrl
+  isn't actually held (or the frontmost app changed), the session force-ends.
+  covers missed flagsChanged events, taps disabled by macOS, cmd-tab away.
+- a dead tap self-revives every 2s (macOS disables taps on callback timeout).
+- last resort: `killall cobalt-switcher` — launchd restarts it within seconds,
+  and the overlay dies with the process.
 
 ## files
 

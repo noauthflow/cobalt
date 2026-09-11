@@ -6,7 +6,7 @@ cd "$(dirname "$0")"
 BIN="$PWD/cobalt-switcher"
 
 echo "building (swiftc)"
-swiftc -O -o "$BIN" main.swift tap.swift overlay.swift browser.swift \
+swiftc -O -o "$BIN" main.swift tap.swift overlay.swift browser.swift favicon.swift \
   -framework AppKit -framework ApplicationServices -framework OSAKit
 
 # sign with the persistent self-signed cert if it exists — keeps the

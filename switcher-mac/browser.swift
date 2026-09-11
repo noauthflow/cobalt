@@ -5,7 +5,7 @@ import OSAKit
 // the frontmost chromium-family app, targeted by bundle id (never by name —
 // the user's browser is a renamed Chromium.app).
 enum Browser {
-    struct Tab {
+    struct Tab: Codable {
         let n: Int      // 1-based tab index, as chrome sees it
         let title: String
         let url: String

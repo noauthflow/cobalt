@@ -57,6 +57,15 @@ enum Tap {
         let source = CFMachPortCreateRunLoopSource(nil, port, 0)
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
         CGEvent.tapEnable(tap: port, enable: true)
+
+        // macOS silently disables a tap when its callback times out. a dead
+        // tap means missed ctrl-release events → the overlay freezes on
+        // screen with no way to dismiss it. revive on a timer; enabling an
+        // already-enabled tap is a harmless no-op.
+        Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { _ in
+            if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
+        }
+
         fputs("cobalt-switcher: tap attached\n", stderr)
     }
 

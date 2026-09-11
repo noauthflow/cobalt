@@ -49,7 +49,7 @@ final class Overlay {
         guard let s = NSScreen.main else { return }
         var f = panel.frame
         f.origin.x = s.frame.midX - Overlay.W / 2
-        f.origin.y = s.frame.midY + 100
+        f.origin.y = s.frame.midY - f.size.height / 2   // vertically centered (origin = bottom edge)
         panel.setFrame(f, display: false)   // position only — render() owns the size
         panel.orderFrontRegardless()
     }
@@ -71,7 +71,10 @@ final class Overlay {
             let nRows = CGFloat(max(visible.count, 1))
             let newH = Overlay.MARGIN * 2 + Overlay.ROW_H * nRows + Overlay.GAP * (nRows - 1)
             var f = panel.frame
-            f.origin.y -= (newH - f.size.height)
+            // grow/shrink around the CENTER — anchoring an edge (the old
+            // behavior) made the panel jump up/down whenever the height
+            // changed between sessions
+            f.origin.y -= (newH - f.size.height) / 2
             f.size.height = newH
             panel.setFrame(f, display: true)
             glass.frame = NSRect(origin: .zero, size: f.size)
@@ -143,15 +146,16 @@ final class Overlay {
     }
 }
 
-// one row: colored letter badge (chrome-style "no favicon" tile) + title +
-// right-aligned domain. hover = subtle wash. no selection styling — the
-// sliding highlight layer draws that.
+// one row: favicon (or colored letter badge fallback) + title + right-aligned
+// domain. hover = subtle wash. no selection styling — the sliding highlight
+// layer draws that.
 final class RowView: NSView {
     var onEnter: (() -> Void)?
     var onExit: (() -> Void)?
     private var ta: NSTrackingArea?
 
     private let badge = NSTextField(labelWithString: "")
+    private let iconView = NSImageView()
     private let title = NSTextField(labelWithString: "")
     private let domain = NSTextField(labelWithString: "")
 
@@ -170,7 +174,25 @@ final class RowView: NSView {
         badge.layer?.cornerRadius = 5
         badge.layer?.backgroundColor = Self.color(for: d).cgColor
         badge.textColor = .white
+        badge.textColor = .white
         addSubview(badge)
+
+        // real favicon when we have one — instant from the disk cache, else
+        // fetched once per domain and dropped in when it arrives. the letter
+        // badge stays underneath as the fallback so unknown/offline domains
+        // never look broken.
+        iconView.frame = NSRect(x: 11, y: 11, width: 16, height: 16)
+        iconView.imageScaling = .scaleProportionallyDown
+        iconView.isHidden = true
+        addSubview(iconView)
+        if let img = Favicons.shared.cached(d) {
+            applyIcon(img)
+        } else {
+            Favicons.shared.fetch(d) { [weak self] img in
+                guard let self, let img else { return }
+                self.applyIcon(img)
+            }
+        }
 
         let textW = frame.width - 46
         title.stringValue = tab.title
@@ -197,6 +219,12 @@ final class RowView: NSView {
         CATransaction.setDisableActions(true)
         layer?.backgroundColor = hovered ? NSColor.white.withAlphaComponent(0.08).cgColor : NSColor.clear.cgColor
         CATransaction.commit()
+    }
+
+    private func applyIcon(_ img: NSImage) {
+        iconView.image = img
+        iconView.isHidden = false
+        badge.isHidden = true
     }
 
     private static func color(for domain: String) -> NSColor {
