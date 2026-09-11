@@ -90,23 +90,54 @@ final class App: NSObject {
         refreshList()   // prime the cache while idle — the NEXT open is instant
     }
 
-    // esc: over a row → close that tab. otherwise → cancel (nothing changed,
-    // so nothing to restore — chrome was never touched).
+    // esc: over a row → close that tab (overlay stays open). otherwise →
+    // cancel (nothing changed — chrome was never touched).
     func escPressed() {
-        guard open, let bid = bundleId else { return }
+        guard open else { return }
         stopWatchdog()
         if let h = hover, h < tabs.count {
-            let tab = tabs[h]
-            open = false
-            hover = nil
-            overlay.hide()
-            q.async { Browser.closeTab(bundleId: bid, n: tab.n) }
+            closeRow(h)
         } else {
             open = false
             hover = nil
             overlay.hide()
+            refreshList()
         }
-        refreshList()   // prime cache; also corrects the list after a close
+    }
+
+    // w while the overlay is open: close the SELECTED tab — keyboard path,
+    // no hovering required. the overlay stays open either way.
+    func closeSelected() {
+        guard open else { return }
+        closeRow(sel)
+    }
+
+    // close row i: fires the close in the background, drops the row locally,
+    // keeps the overlay open, and lands the selection on the row ABOVE the
+    // closed one — every time. lets you close several in a row.
+    private func closeRow(_ i: Int) {
+        guard open, let bid = bundleId, tabs.indices.contains(i) else { return }
+        let tab = tabs[i]
+        q.async { Browser.closeTab(bundleId: bid, n: tab.n) }
+        let wasSelected = i == sel
+        tabs.remove(at: i)
+        // chrome renumbers its tab indices after a close — keep local n in
+        // sync so a fast next-press still switches to the right tab
+        for k in tabs.indices where tabs[k].n > tab.n { tabs[k].n -= 1 }
+        cache = tabs
+        if wasSelected {
+            sel = max(0, i - 1)   // the row above; row 0 closes → stay at 0
+        } else if i < sel {
+            sel -= 1
+        }
+        hover = nil
+        if tabs.isEmpty {
+            open = false
+            overlay.hide()
+        } else {
+            overlay.render(tabs: tabs, sel: sel, hover: nil)
+        }
+        refreshList()   // confirm against chrome — renumbers & titles settle
     }
 
     // SAFETY NET — the tap is normally the only thing that ends a session

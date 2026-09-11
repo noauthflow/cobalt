@@ -155,6 +155,7 @@ final class RowView: NSView {
     private var ta: NSTrackingArea?
 
     private let badge = NSTextField(labelWithString: "")
+    private let tile = NSView()
     private let iconView = NSImageView()
     private let title = NSTextField(labelWithString: "")
     private let domain = NSTextField(labelWithString: "")
@@ -166,15 +167,23 @@ final class RowView: NSView {
         layer?.masksToBounds = true
 
         let d = tab.domain
+
+        // colored tile behind the fallback letter — deterministic color per
+        // domain (hash over utf8 bytes → hue; same site = same color, always)
+        tile.frame = NSRect(x: 9, y: 9, width: 20, height: 20)
+        tile.wantsLayer = true
+        tile.layer?.cornerRadius = 5
+        tile.layer?.masksToBounds = true
+        tile.layer?.backgroundColor = Self.color(for: d).cgColor
+        addSubview(tile)
+
         badge.stringValue = String(d.first.map { String($0) } ?? "?").uppercased()
-        badge.frame = NSRect(x: 9, y: 9, width: 20, height: 20)
         badge.alignment = .center
         badge.font = .systemFont(ofSize: 11, weight: .semibold)
-        badge.wantsLayer = true
-        badge.layer?.cornerRadius = 5
-        badge.layer?.backgroundColor = Self.color(for: d).cgColor
         badge.textColor = .white
-        badge.textColor = .white
+        badge.sizeToFit()   // frame → exact text bounds, so centering is real
+        badge.frame.origin = NSPoint(x: 9 + (20 - badge.frame.width) / 2,
+                                     y: 9 + (20 - badge.frame.height) / 2)
         addSubview(badge)
 
         // real favicon when we have one — instant from the disk cache, else
@@ -224,6 +233,7 @@ final class RowView: NSView {
     private func applyIcon(_ img: NSImage) {
         iconView.image = img
         iconView.isHidden = false
+        tile.isHidden = true
         badge.isHidden = true
     }
 

@@ -6,7 +6,7 @@ import OSAKit
 // the user's browser is a renamed Chromium.app).
 enum Browser {
     struct Tab: Codable {
-        let n: Int      // 1-based tab index, as chrome sees it
+        var n: Int      // 1-based tab index, as chrome sees it (mutable: renumbers on close)
         let title: String
         let url: String
 

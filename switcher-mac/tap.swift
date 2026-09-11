@@ -36,6 +36,10 @@ enum Tap {
                     // pass it through so other apps keep ctrl+tab working.
                     return Unmanaged.passUnretained(event)
                 }
+                if code == 13, App.shared.open {   // w — close the selected tab
+                    App.shared.closeSelected()
+                    return nil
+                }
                 if code == 53, App.shared.open {   // esc — the ONE key we swallow
                     App.shared.escPressed()
                     return nil

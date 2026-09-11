@@ -29,7 +29,10 @@ ctrl+tab        overlay appears AND cycles to the next tab — the first press
 ctrl+shift+tab  same, but cycles backwards
 ctrl+tab …      keep tapping — keeps cycling, highlight follows
 release ctrl    overlay collapses (chrome already settled the tab)
-esc             over a row → close that tab; not hovering → cancel overlay
+esc             over a row → close that tab (overlay stays open); not hovering
+                → cancel overlay
+w              close the SELECTED tab — keyboard path, overlay stays open;
+                selection lands on the row above the closed one every time
 ```
 
 ## safety nets
