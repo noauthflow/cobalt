@@ -20,13 +20,20 @@ enum Tap {
 
             case .keyDown:
                 let code = event.getIntegerValueField(.keyboardEventKeycode)
-                if code == 48, ctrl {              // tab — swallowed. WE are the cycle.
-                    if App.shared.open {
-                        App.shared.advance(shift: event.flags.contains(.maskShift))
-                    } else {
-                        App.shared.begin()
+                if code == 48, ctrl {              // tab — ours only while we own the cycle
+                    let front = NSWorkspace.shared.frontmostApplication
+                    let chromium = front.map { Browser.isChromiumFamily($0) } ?? false
+                    if App.shared.open || chromium {
+                        if App.shared.open {
+                            App.shared.advance(shift: event.flags.contains(.maskShift))
+                        } else {
+                            App.shared.begin()
+                        }
+                        return nil
                     }
-                    return nil
+                    // frontmost isn't chromium and no overlay open: not ours.
+                    // pass it through so other apps keep ctrl+tab working.
+                    return Unmanaged.passUnretained(event)
                 }
                 if code == 53, App.shared.open {   // esc — the ONE key we swallow
                     App.shared.escPressed()
