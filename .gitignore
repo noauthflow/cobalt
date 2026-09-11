@@ -1,6 +1,3 @@
-__pycache__/
-*.pyc
-*.cobalt-bak
+cobalt-switcher
 .DS_Store
-*.pak
-Cached*
+__pycache__/
