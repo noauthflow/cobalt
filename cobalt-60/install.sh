@@ -20,17 +20,28 @@ fi
 
 command -v swiftc >/dev/null || { echo "swiftc is required (xcode-select --install)"; exit 1; }
 
+# the binary must be signed so the accessibility grant survives rebuilds
+# (macos anchors permissions to the code signature at grant time)
+if ! security find-identity -v -p codesigning | grep -q "cobalt-dev"; then
+  cat <<'MSG'
+ERROR: no 'cobalt-dev' codesigning identity found.
+
+this daemon must be signed: macos anchors the accessibility permission to
+the binary's signature, and a stable identity means the grant survives
+rebuilds. create the identity once:
+
+  keychain access -> certificate assistant -> create certificate
+  name: cobalt-dev   type: code signing   self-signed root
+
+then re-run ./install.sh
+MSG
+  exit 1
+fi
+
 echo "building (swiftc)"
 swiftc -O -o "$NAME" main.swift -framework AppKit
-
-# sign with the persistent self-signed cert if it exists — keeps the
-# accessibility grant valid across rebuilds (ad-hoc binaries invalidate it)
-if security find-identity -v -p codesigning | grep -q "cobalt-dev"; then
-  codesign --force --sign "cobalt-dev" "$NAME"
-  echo "signed (cobalt-dev)"
-else
-  echo "NOTE: no 'cobalt-dev' codesigning cert; rebuilds will need a re-grant"
-fi
+codesign --force --sign "cobalt-dev" "$NAME"
+echo "signed (cobalt-dev)"
 
 mkdir -p "$HOME/.local/bin"
 cp -f "$NAME" "$BIN_LOCAL"

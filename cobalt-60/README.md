@@ -1,8 +1,8 @@
 # cobalt-60
 
-the radioactive isotope of cobalt — the invisible barrier you don't cross.
+the radioactive isotope of cobalt
 
-a daemon that keeps the mouse cursor from entering the top 5px of the screen (the menu bar area). you never notice it until you need it.
+a daemon that keeps the mouse cursor from entering the top 5px of the screen (the menu bar area).
 
 ## how it works
 
