@@ -41,6 +41,17 @@ intercepted, nothing is rewritten. that's why smalt needs zero permissions.
 between the reveal line and the hide line there's hysteresis, so cursor
 jitter at the edge can't flicker the strip.
 
+## commands
+
+the installed binary is on your PATH, so it controls itself:
+
+    smalt on       start the daemon (after install.sh)
+    smalt off      stop the daemon (starts again at next login — the launchd plist stays)
+    smalt status   installed / loaded / running
+
+`install.sh` and `install.sh uninstall` remain the way to install or remove
+the whole thing (binary + launchd agent).
+
 ## install
 
     ./install.sh            build, sign, install, register launchd agent, start

@@ -114,8 +114,12 @@ func makeCornerFillers() {
             w.isOpaque = false
             w.hasShadow = false
             w.ignoresMouseEvents = true
-            // above fullscreen windows (level 0), below the menu bar (24)
-            w.level = .floating
+            // level 21: above fullscreen windows (0) and the dock (20), below
+            // the menu bar (24) and elgiloy's overlay (25). MUST be ≥ 20 —
+            // elgiloy's begin() guard ignores the topmost window only when it's
+            // system chrome (layer ≥ 20); a floating-level patch up here used to
+            // make elgiloy think a launcher overlay was open and swallow ctrl+tab
+            w.level = NSWindow.Level(rawValue: 21)
             w.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
             w.alphaValue = 0
             w.contentView = CornerView(corner: corner, frame: NSRect(origin: .zero, size: rect.size))

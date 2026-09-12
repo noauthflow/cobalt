@@ -215,15 +215,95 @@ func runDaemon() -> Never {
     exit(0)
 }
 
+// MARK: - subcommands (thin launchctl wrappers — install/uninstall lives in install.sh)
+
+@discardableResult
+func sh(_ command: String) -> Int32 {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/bin/sh")
+    p.arguments = ["-c", command]
+    p.standardOutput = Pipe()
+    p.standardError = Pipe()
+    do { try p.run() } catch { return 1 }
+    p.waitUntilExit()
+    return p.terminationStatus
+}
+
+let label = "dev.cobalt.smalt"
+let name = "smalt"
+let gui = "gui/\(getuid())"
+let errLog = "/tmp/smalt.err"
+let plistPath = FileManager.default.homeDirectoryForCurrentUser.path
+    + "/Library/LaunchAgents/\(label).plist"
+
+func agentLoaded() -> Bool {
+    sh("launchctl print \(gui)/\(label) >/dev/null 2>&1") == 0
+}
+
+// the daemon registers as "smalt" — but so does this CLI invocation,
+// so exclude our own pid from the check
+func daemonRunning() -> Bool {
+    sh("pgrep -x \(name) | grep -vw \(getpid()) >/dev/null 2>&1") == 0
+}
+
+func cmdOn() {
+    guard FileManager.default.fileExists(atPath: plistPath) else {
+        print("not installed — run install.sh first"); exit(1)
+    }
+    if !agentLoaded() {
+        sh("launchctl bootstrap \(gui) '\(plistPath)'")
+    }
+    sh("launchctl kickstart -k \(gui)/\(label)")
+    print(daemonRunning()
+        ? "smalt is up — the glass is on"
+        : "starting… if it won't stay up, check \(errLog)")
+}
+
+func cmdOff() {
+    guard agentLoaded() || daemonRunning() else {
+        print("already off"); exit(0)
+    }
+    sh("launchctl bootout \(gui)/\(label)")
+    sh("pkill -x \(name) 2>/dev/null")
+    print("smalt is down (starts again at next login — plist kept)")
+}
+
+func cmdStatus() {
+    let installed = FileManager.default.fileExists(atPath: plistPath)
+    let loaded = agentLoaded()
+    let running = daemonRunning()
+
+    print("agent:    \(installed ? "installed (\(plistPath))" : "not installed — run install.sh")")
+    print("launchd:  \(loaded ? "loaded" : "not loaded")")
+    print("process:  \(running ? "running" : "not running")")
+
+    if running {
+        print("strip:    up — \(Int(BAR_HEIGHT))px of cobalt glass at the top (summon zone: \(Int(REVEAL_HEIGHT))px)")
+    } else if loaded {
+        print("strip:    down — launchd is retrying; check \(errLog)")
+        if let tail = try? String(contentsOfFile: errLog, encoding: .utf8).suffix(200) {
+            print("log:      \(tail.trimmingCharacters(in: .whitespacesAndNewlines))")
+        }
+    } else {
+        print("strip:    off (starts again at next login)")
+    }
+}
+
 // MARK: - entry
 
 switch CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "run" {
-case "run": runDaemon()
+case "run":              runDaemon()
+case "on", "enable":     cmdOn()
+case "off", "disable":   cmdOff()
+case "status":           cmdStatus()
 default:
     print("""
-    usage: smalt
+    usage: smalt [command]
 
       (none)          daemon mode — the strip (what launchd runs)
+      on, enable      start the daemon
+      off, disable    stop the daemon (starts again at next login)
+      status          installed / loaded / running
 
     install & uninstall: ./install.sh in the repo folder
     """)
