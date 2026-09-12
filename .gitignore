@@ -1,6 +1,6 @@
 # build artifacts — install.sh copies binaries to ~/.local/bin, never keep them here
 cobalt-60/cobalt-60
-elgiloy/elgiloy
+elgiloy-mac-arm/elgiloy
 *.cstemp
 
 # python

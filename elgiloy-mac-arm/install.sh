@@ -50,8 +50,13 @@ echo "signed (cobalt-dev)"
 # show the automation prompt for a process with an app bundle identity; a bare
 # binary launched by launchd gets silently auto-denied (-1743, no popup).
 # so the signed binary lives inside a minimal .app bundle, and launchd runs it there.
-mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp -f "$NAME" "$APP/Contents/MacOS/$NAME"
+ICON_LINE=""
+if [[ -f "Elgiloy.icns" ]]; then
+  cp -f "Elgiloy.icns" "$APP/Contents/Resources/Elgiloy.icns"
+  ICON_LINE='<key>CFBundleIconFile</key><string>Elgiloy</string>'
+fi
 cat > "$APP/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -61,6 +66,7 @@ cat > "$APP/Contents/Info.plist" <<EOF
   <key>CFBundleExecutable</key><string>$NAME</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleVersion</key><string>1.0</string>
+  $ICON_LINE
   <key>LSUIElement</key><true/>
 </dict></plist>
 EOF
