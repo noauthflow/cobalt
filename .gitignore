@@ -9,3 +9,6 @@ __pycache__/
 
 # macOS
 .DS_Store
+
+# chrome regenerates this whenever a theme is loaded unpacked
+Cached Theme.pak
