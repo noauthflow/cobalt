@@ -138,7 +138,11 @@ final class App: NSObject {
         for k in tabs.indices where tabs[k].n > tab.n { tabs[k].n -= 1 }
         cache = tabs
         if wasSelected {
-            sel = max(0, i - 1)   // the row above; row 0 closes → stay at 0
+            // land on the row BELOW the closed one — same index, since the
+            // rows below it shifted up into the gap — so you can keep closing
+            // down a run of tabs. closing the LAST tab (nothing below it)
+            // lands on the new last row, i.e. the one above.
+            sel = i < tabs.count ? i : max(0, i - 1)
         } else if i < sel {
             sel -= 1
         }

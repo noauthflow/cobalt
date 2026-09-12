@@ -44,7 +44,8 @@ and/or cmd      session can be carried by ctrl, cmd or option — it ends when
 and/or option   ALL of them are up.
 esc             cancel the overlay — nothing changed, chrome was never touched
 w               close the SELECTED tab — keyboard path, overlay stays open;
-                selection lands on the row above the closed one every time
+                selection lands on the row below the closed one (the last tab
+                falls back to the row above)
 1 … 9, 0        while open: jump straight to tab 1 … 10 (0 = tab 10) — chrome
                 switches in real time and the overlay stays up so jumps can
                 chain
