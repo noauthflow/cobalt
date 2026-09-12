@@ -81,12 +81,35 @@ cat > "$PLIST" <<EOF
 EOF
 launchctl bootstrap "$GUI" "$PLIST"
 
+# the daemon talks to chromium via apple events. normally the first send pops
+# a tcc automation prompt — but tccd suppresses that prompt for background
+# launchd agents and auto-denies (error -1743, no popup). so we pre-seed the
+# exact row the prompt would have written. requires full disk access on the
+# terminal running this script (reading/writing the system tcc db).
+TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
+if sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access
+  (service, client, client_type, auth_value, auth_reason, auth_version,
+   indirect_object_identifier_type, indirect_object_identifier, flags, last_modified)
+  VALUES ('kTCCServiceAppleEvents', '$BUNDLE_ID', 0, 2, 2, 1, 1,
+          'com.google.Chrome', 0, strftime('%s','now'));" 2>/dev/null; then
+  echo "automation: pre-granted (dev.cobalt.elgiloy -> com.google.Chrome)"
+else
+  cat <<'MSG'
+automation: could not pre-grant (tcc db not writable).
+
+the daemon needs to send apple events to chromium. if tab switching fails
+with -1743 in /tmp/elgiloy.err, grant full disk access to your terminal and
+re-run this script, or run manually:
+
+  sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, indirect_object_identifier, flags, last_modified) VALUES ('kTCCServiceAppleEvents', 'dev.cobalt.elgiloy', 0, 2, 2, 1, 1, 'com.google.Chrome', 0, strftime('%s','now'));"
+MSG
+fi
+
 echo
 echo "installed: $APP"
 echo "launchd:   $LABEL — starts at login, restarts on crash, logs: /tmp/$NAME.err"
 echo
-echo "one-time setup (both happen once, then never again — cobalt-dev signature):"
-echo "  1. system settings -> privacy & security -> accessibility -> add:"
+echo "one-time setup:"
+echo "  system settings -> privacy & security -> accessibility -> add:"
 echo "     $APP"
-echo "  2. first ctrl+tab over chromium pops the automation prompt"
-echo "     ('Elgiloy wants to control Chromium') -> allow"
+echo "  (automation is pre-granted by this script; a popup should never appear)"
