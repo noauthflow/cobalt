@@ -31,7 +31,7 @@ each folder is self-contained: source + its own `install.sh`. nothing here depen
 
 all scripts are standalone and idempotent. `./install.sh uninstall` reverses each one.
 
-**cobalt-sync** — symlinks the CLI to `~/.local/bin/cobalt-sync`.
+**cobalt-sync** — symlinks the CLI to `~/.local/bin/cobalt`.
 needs python 3.8+. **no special permissions** (writes browser profile files directly; quit browsers first).
 
 **cobalt-60** — builds with swiftc, signs, copies binary to `~/.local/bin/cobalt-60`, registers launchd agent `dev.cobalt.cobalt-60`.

@@ -1,28 +1,28 @@
-# cobalt-sync
+# cobalt
 
 Co-Al-Ni — the classic cobalt magnet alloy. sync is magnetic alignment: one plain text config, one field, every browser snapped into line.
 
-`cobalt-sync` drives the bookmarks-bar structure and omnibox keyword engines of any chromium-family or firefox-family browser. no extension, no daemon, no sync service. the config file is the source of truth; `push` writes the browser's native databases directly.
+`cobalt` drives the bookmarks-bar structure and omnibox keyword engines of any chromium-family or firefox-family browser. no extension, no daemon, no sync service. the config file is the source of truth; `push` writes the browser's native databases directly.
 
 ## install
 
-    ./install.sh            symlink the cli to ~/.local/bin/cobalt-sync
+    ./install.sh            symlink the cli to ~/.local/bin/cobalt
     ./install.sh uninstall  remove the symlink
 
 needs python 3.8+ (stdlib only, nothing to build). no special macOS permissions — it reads and writes browser profile files directly, so quit browsers before pushing.
 
 ## commands
 
-    cobalt-sync ls                      list detected browsers/profiles
-    cobalt-sync push [--browser B] [--profile P] [--dry]
+    cobalt ls                      list detected browsers/profiles
+    cobalt push [--browser B] [--profile P] [--dry]
                                         config -> browser (bar made to match exactly)
-    cobalt-sync pull [--browser B] [--profile P]
+    cobalt pull [--browser B] [--profile P]
                                         browser -> config (exact nesting/order)
-    cobalt-sync seed IMAGE|COLOR [--strength N] [--force]
+    cobalt seed IMAGE|COLOR [--strength N] [--force]
                                         set chrome's theme accent + NTP background
-    cobalt-sync avatar IMAGE [browser]  replace chromium profile avatar PNGs (192x192)
-    cobalt-sync reload [--force]        re-apply last seed color + avatar after chrome updates
-    cobalt-sync init [--force]          create a starter config
+    cobalt avatar IMAGE [browser]  replace chromium profile avatar PNGs (192x192)
+    cobalt reload [--force]        re-apply last seed color + avatar after chrome updates
+    cobalt init [--force]          create a starter config
 
 `--root /path/to/user-data-dir` targets any chromium fork not auto-detected.
 

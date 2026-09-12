@@ -29,7 +29,7 @@ manifest.json explain in detail:
 chrome resets accent preferences whenever a theme is applied, so accents are
 NOT set in this manifest. use the sync CLI instead:
 
-    cobalt-sync seed '#7C4DFF'
+    cobalt seed '#7C4DFF'
 
 that writes chrome's `browser.theme.user_color` preference directly (address
 bar focus ring, icon tinting) and survives independently of the theme. the
