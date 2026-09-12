@@ -12,7 +12,8 @@ final class Overlay {
     static let MAX_ROWS = 12
 
     private let panel: NSPanel
-    private let glass: NSVisualEffectView
+    private let glass: NSGlassEffectView
+    private let content: NSView
     private let highlight = CALayer()
     private var rows: [(RowView, Int)] = []
     private var lastKey = ""
@@ -26,19 +27,27 @@ final class Overlay {
         panel.level = .statusBar
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        panel.hasShadow = true
+        panel.hasShadow = true   // system shadow follows the glass shape now
         panel.hidesOnDeactivate = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
 
-        glass = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: Overlay.W, height: 100))
-        glass.material = .hudWindow
-        glass.blendingMode = .behindWindow
-        glass.state = .active
-        glass.wantsLayer = true
-        glass.layer?.cornerRadius = 14
-        glass.layer?.masksToBounds = true
-        glass.layer?.borderWidth = 1
-        glass.layer?.borderColor = NSColor.white.withAlphaComponent(0.10).cgColor
+        // macOS 26+ Liquid Glass: native rounded glass, no layer masking.
+        // the system draws both the rounding and the window shadow from the
+        // glass shape, so the shadow hugs the corners by construction.
+        glass = NSGlassEffectView(frame: NSRect(x: 0, y: 0, width: Overlay.W, height: 100))
+        glass.cornerRadius = 14
+        glass.style = .regular
+
+        // rows/highlight live in a dedicated content view — NSGlassEffectView
+        // only guarantees contentView is embedded inside the glass
+        content = NSView(frame: NSRect(x: 0, y: 0, width: Overlay.W, height: 100))
+        content.wantsLayer = true
+        content.layer?.cornerRadius = 14
+        content.layer?.masksToBounds = true
+        content.layer?.borderWidth = 1
+        content.layer?.borderColor = NSColor.white.withAlphaComponent(0.10).cgColor
+        content.autoresizingMask = [.width, .height]
+        glass.contentView = content
         panel.contentView = glass
 
         highlight.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.85).cgColor
@@ -78,11 +87,12 @@ final class Overlay {
             f.size.height = newH
             panel.setFrame(f, display: true)
             glass.frame = NSRect(origin: .zero, size: f.size)
+            content.frame = NSRect(origin: .zero, size: f.size)
 
-            glass.subviews.forEach { $0.removeFromSuperview() }
+            content.subviews.forEach { $0.removeFromSuperview() }
             rows.removeAll()
-            if glass.layer?.sublayers?.contains(highlight) != true {
-                glass.layer?.insertSublayer(highlight, at: 0)
+            if content.layer?.sublayers?.contains(highlight) != true {
+                content.layer?.insertSublayer(highlight, at: 0)
             }
 
             for (i, tab) in visible.enumerated() {
@@ -90,7 +100,7 @@ final class Overlay {
                 let row = RowView(frame: rowFrame(i, height: newH), tab: tab)
                 row.onEnter = { [weak self] in App.shared.hover = tabIndex; self?.restyle(hover: tabIndex) }
                 row.onExit  = { [weak self] in App.shared.hover = nil;    self?.restyle(hover: nil) }
-                glass.addSubview(row)
+                content.addSubview(row)
                 rows.append((row, tabIndex))
             }
         }
