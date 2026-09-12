@@ -2,7 +2,13 @@
 
 named after the periodic table: three atomic points above chromium (because chromium is better than firefox).
 
-everything in this family is something **made from cobalt** — an alloy, an isotope, a coating — because every tool here is derived from the same base material. each one is named for the material whose personality it borrows:
+## what this is
+
+cobalt started as one tool — a script that pushed a plain text bookmarks config into chrome. then it kept absorbing things: an omnibox engine, a new tab page, a tab overlay, a cursor wall. at some point it stopped being "a chrome bookmarks tool" and became what it actually is:
+
+**a weird range of small utilities that are secretly one setup.** this repo is not a product; it's my machine, written down. every folder is something my desktop does that stock macOS/chrome doesn't, and they're all built from the same metal.
+
+everything here is something **made from cobalt** — an alloy, an isotope, a coating — because each tool is derived from the same base material and named for the material whose personality it borrows:
 
     cobalt-sync   Co-Al-Ni magnet alloy      sync = magnetic alignment
     cobalt-60     the radioactive isotope    an invisible barrier you don't cross
@@ -11,12 +17,12 @@ everything in this family is something **made from cobalt** — an alloy, an iso
 
 ## the directories
 
-| folder | what it is |
-|---|---|
-| [cobalt-sync/](cobalt-sync/) | bookmarks + omnibox sync CLI |
-| [cobalt-60/](cobalt-60/) | cursor wall daemon |
-| [elgiloy/](elgiloy/) | tab overlay daemon |
-| [stellite/](stellite/) | new tab page + shorts blocker extension + template theme |
+| folder | what it is | os support |
+|---|---|---|
+| [cobalt-sync/](cobalt-sync/) | bookmarks + omnibox sync CLI | macOS today — logic is portable (python), browser paths aren't yet |
+| [cobalt-60/](cobalt-60/) | cursor wall daemon | **macOS only** — it exists *for* the menu bar; other desktops don't have one |
+| [elgiloy/](elgiloy/) | tab overlay daemon | **macOS only** — apple events, event taps, NSPanel; a linux port would be a different program |
+| [stellite/](stellite/) | new tab page + shorts blocker extension + template theme | **anywhere chrome runs** — it's just an extension |
 
 each folder is self-contained: source + its own `install.sh`. nothing here depends on anything else in the repo. see each folder's README for the full story.
 
