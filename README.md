@@ -42,4 +42,11 @@ needs swiftc. **Accessibility + Input Monitoring** (listens for ctrl+tab) and on
 **stellite** — no install script; chrome loads unpacked extensions by folder path:
 `chrome://extensions → developer mode → load unpacked → <folder>`. **no permissions** beyond chrome itself. (the `template-theme/` subfolder inside is a chrome theme, not part of the extension — load it separately.)
 
-notes: daemons run as launchd agents (start at login, restart on crash, logs at `/tmp/<name>.err`). signing with the optional `cobalt-dev` codesign identity keeps accessibility grants alive across rebuilds — see any daemon README.
+notes: daemons run as launchd agents (start at login, restart on crash, logs at `/tmp/<name>.err`).
+
+**one-time: the `cobalt-dev` signing identity.** the daemon scripts sign their binaries with a self-signed codesigning certificate named `cobalt-dev` — macOS anchors permissions to the signature, and a stable signature means accessibility grants survive rebuilds. create it once:
+
+    keychain access → certificate assistant → create certificate
+    name: cobalt-dev · type: code signing · self-signed root
+
+without it the daemons still work — you'll just re-grant accessibility after every rebuild. already have it? `security find-identity -p codesigning` will say so.
