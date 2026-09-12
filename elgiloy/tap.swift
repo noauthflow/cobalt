@@ -99,7 +99,7 @@ enum Tap {
         guard let port = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap,
                                            options: .defaultTap, eventsOfInterest: CGEventMask(mask),
                                            callback: callback, userInfo: nil) else {
-            fputs("cobalt-switcher: tap create failed (accessibility not granted?)\n", stderr)
+            fputs("elgiloy: tap create failed (accessibility not granted?)\n", stderr)
             return
         }
         tap = port
@@ -115,14 +115,14 @@ enum Tap {
             if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
         }
 
-        fputs("cobalt-switcher: tap attached\n", stderr)
+        fputs("elgiloy: tap attached\n", stderr)
     }
 
     // accessibility grants are tied to the binary's signature — poll until
     // granted instead of dying, so the toggle dance self-heals
     static func watchAndInstall() {
         if AXIsProcessTrusted() { install(); return }
-        fputs("cobalt-switcher: waiting for accessibility grant…\n", stderr)
+        fputs("elgiloy: waiting for accessibility grant…\n", stderr)
         Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { timer in
             if AXIsProcessTrusted() {
                 timer.invalidate()

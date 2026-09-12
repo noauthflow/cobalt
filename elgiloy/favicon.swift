@@ -7,13 +7,13 @@ import AppKit
 // badge stays, so offline/unknown domains still look intentional.
 final class Favicons {
     static let shared = Favicons()
-    private let q = DispatchQueue(label: "dev.cobalt.switcher.favicons")
+    private let q = DispatchQueue(label: "dev.cobalt.elgiloy.favicons")
     private var waiting: [String: [(NSImage?) -> Void]] = [:]   // domain → callbacks
     private let ttl: TimeInterval = 60 * 60 * 24 * 14           // refetch after 14 days
 
     private var dir: URL {
         let d = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("cobalt-switcher-favicons", isDirectory: true)
+            .appendingPathComponent("elgiloy-favicons", isDirectory: true)
         try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
         return d
     }

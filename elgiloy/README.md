@@ -8,7 +8,7 @@ grows/shrinks.
 tab lists are always warm: replies land in the cache even when they arrive
 after the overlay closed (fast sessions used to discard them → blank opens),
 the cache is re-primed after every session, and it persists to disk
-(~/Library/Caches/cobalt-switcher-tabs.json) so the first open after a relaunch
+(~/Library/Caches/elgiloy-tabs.json) so the first open after a relaunch
 is never blank either.
 
 ## design: chrome switches, we draw
@@ -58,7 +58,7 @@ the overlay must never get stuck on screen, no matter what:
   force-ends. covers missed flagsChanged events, taps disabled by macOS,
   cmd-tab away.
 - a dead tap self-revives every 2s (macOS disables taps on callback timeout).
-- last resort: `killall cobalt-switcher` — launchd restarts it within seconds,
+- last resort: `killall elgiloy` — launchd restarts it within seconds,
   and the overlay dies with the process.
 
 ## files
@@ -80,7 +80,7 @@ one-time permissions: accessibility (re-grant after every rebuild — the grant
 is tied to the binary's ad-hoc signature), plus one automation prompt on the
 first ctrl+tab.
 
-logs: `tail -f /tmp/cobalt-switcher.err`
+logs: `tail -f /tmp/elgiloy.err`
 
 ## why mirror instead of intercept+commit
 

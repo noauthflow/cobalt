@@ -9,7 +9,7 @@ final class App: NSObject {
     static let shared = App()
 
     let overlay = Overlay()
-    let q = DispatchQueue(label: "dev.cobalt.switcher")   // serial: apple events run here
+    let q = DispatchQueue(label: "dev.cobalt.elgiloy")   // serial: apple events run here
     var bundleId: String?
     var tabs: [Browser.Tab] = []
     var sel = 0
@@ -237,7 +237,7 @@ final class App: NSObject {
 
     private static var cacheURL: URL {
         let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-        return dir.appendingPathComponent("cobalt-switcher-tabs.json")
+        return dir.appendingPathComponent("elgiloy-tabs.json")
     }
 
     private func persist() {

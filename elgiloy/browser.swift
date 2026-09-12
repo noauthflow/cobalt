@@ -51,7 +51,7 @@ enum Browser {
         var err: NSDictionary?
         let result = script.executeAndReturnError(&err)
         if result == nil {
-            fputs("cobalt-switcher: apple event error \(err?["NSAppleScriptErrorMessage"] ?? err ?? "unknown")\n", stderr)
+            fputs("elgiloy: apple event error \(err?["NSAppleScriptErrorMessage"] ?? err ?? "unknown")\n", stderr)
             return nil
         }
         return result?.stringValue
@@ -117,7 +117,7 @@ enum Browser {
     // cycling only the newest target matters — no backlog of switches.
     // scripts compiled once per (browser, tab index), so commits are instant
     // after first use of an index.
-    private static let commitQ = DispatchQueue(label: "dev.cobalt.switcher.commit")
+    private static let commitQ = DispatchQueue(label: "dev.cobalt.elgiloy.commit")
     private static var activateScripts: [String: [Int: OSAScript]] = [:]
     private static var pendingActivate: (bundleId: String, n: Int)?
     private static var activateQueued = false
@@ -146,6 +146,6 @@ enum Browser {
     static func closeTab(bundleId: String, n: Int) {
         let script = OSAScript(source: "tell application id \"\(bundleId)\" to close tab \(n) of front window")
         _ = run(script)
-        fputs("cobalt-switcher: closed tab \(n)\n", stderr)
+        fputs("elgiloy: closed tab \(n)\n", stderr)
     }
 }

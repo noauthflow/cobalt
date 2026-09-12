@@ -3,7 +3,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-BIN="$PWD/cobalt-switcher"
+BIN="$PWD/elgiloy"
 
 echo "building (swiftc)"
 swiftc -O -o "$BIN" main.swift tap.swift overlay.swift browser.swift favicon.swift \
@@ -20,18 +20,18 @@ else
   echo "      name: cobalt-dev, type: self-signed root, type: code signing"
 fi
 
-PLIST="$HOME/Library/LaunchAgents/dev.cobalt.switcher.plist"
-launchctl bootout "gui/$(id -u)/dev.cobalt.switcher" 2>/dev/null || true
+PLIST="$HOME/Library/LaunchAgents/dev.cobalt.elgiloy.plist"
+launchctl bootout "gui/$(id -u)/dev.cobalt.elgiloy" 2>/dev/null || true
 rm -f "$PLIST"
 cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>Label</key><string>dev.cobalt.switcher</string>
+  <key>Label</key><string>dev.cobalt.elgiloy</string>
   <key>ProgramArguments</key><array><string>$BIN</string></array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardErrorPath</key><string>/tmp/cobalt-switcher.err</string>
+  <key>StandardErrorPath</key><string>/tmp/elgiloy.err</string>
 </dict></plist>
 EOF
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
@@ -42,7 +42,7 @@ echo "launchd:   starts at login, restarts on crash"
 echo
 echo "one-time setup:"
 echo "  1. system settings -> privacy & security -> accessibility"
-echo "     remove any stale cobalt-switcher entry, add: $BIN"
+echo "     remove any stale elgiloy entry, add: $BIN"
 echo "     (the daemon polls every 10s and attaches itself once granted)"
 echo "  2. first ctrl+tab pops ONE automation prompt ('control Chromium') -> allow"
-echo "  3. logs: tail -f /tmp/cobalt-switcher.err"
+echo "  3. logs: tail -f /tmp/elgiloy.err"

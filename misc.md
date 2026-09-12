@@ -115,7 +115,7 @@ channels are:
 - privacy sandbox: only if enabled (chrome://settings/adPrivacy)
 
 everything else is version/metadata chatter. the stock new tab page phones
-home for tiles/logos; a blank NTP override (`extension/blank.html`) removes
+home for tiles/logos; a blank NTP override (`stellite/blank.html`) removes
 that channel.
 
 ## profile avatars: two sources — and only one is the toolbar
@@ -202,9 +202,9 @@ findings from attempting pak edits on google-branded builds:
 
 ## repo changes in this revision
 
-- `extension/` — new tab extension restructured: `blank.html` (#353535 NTP
+- `stellite/` — new tab extension restructured: `blank.html` (#353535 NTP
   override), `block.js` (youtube shorts blocker), `hide.css`, icons/.
-- `template-theme/` — separate theme extension (grey surfaces; must be separate per
+- `cobalt-theme/` — separate theme extension (grey surfaces; must be separate per
   the mv3 rule above) + repro documentation.
 - `cobalt seed` — new CLI subcommand; see seed color section above.
 - `cobalt avatar` — new CLI subcommand; replaces every PNG in

@@ -18,7 +18,7 @@ chrome regenerates it from the manifest on load.
 
   - elevation is an even-step ramp: frame 27 -> toolbar 40 -> ntp 53
     (13 per step). violet variant keeps the same lightness ramp, hue-shifted.
-  - ntp_background is pinned to #353535 to match extension/blank.html, which
+  - ntp_background is pinned to #353535 to match cobalt-theme/../stellite/blank.html, which
     overrides the new tab page with the same color. change both or neither.
   - do NOT set background_tab / background_tab_inactive / background_tab_hover:
     chrome then draws explicit tab pills. leaving them unset makes chrome

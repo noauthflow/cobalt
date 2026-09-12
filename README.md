@@ -6,7 +6,7 @@ One plain text config drives the bookmarks-bar structure and omnibox keyword eng
 
     repo:    ~/dev/cobalt
     config:  ~/.config/cobalt.conf
-    install: ln -sf ~/dev/cobalt/cobalt ~/.local/bin/cobalt
+    install: ln -sf ~/dev/cobalt/cobalt-cli ~/.local/bin/cobalt
     needs:   python 3.8+, stdlib only, macOS / linux / windows
 
 ## addons
@@ -14,16 +14,16 @@ One plain text config drives the bookmarks-bar structure and omnibox keyword eng
 the repo ships two optional browser addons, self-contained in their own folders
 (load each folder via chrome://extensions -> developer mode -> load unpacked):
 
-    extension/   the new tab page: blank #353535 page, "New Tab" title, white
+    stellite/   the new tab page: blank #353535 page, "New Tab" title, white
                  8-point starburst icon, plus a content script that blocks
                  youtube shorts (sidebar entry, shelves, /shorts/ redirects).
-                 optional — cobalt works without it. see extension/README.md.
-    template-theme/
+                 optional — cobalt works without it. see stellite/README.md.
+    cobalt-theme/
                  a boilerplate chrome theme: neutral grey surfaces, elevation
                  in three flat steps, seamless tabs. a violet variant ships
                  as manifest.json.violet. accent colors are handled by
                  `cobalt seed`, not the theme. recommended accent: #7C4DFF.
-                 see template-theme/README.md for palette rules and the
+                 see cobalt-theme/README.md for palette rules and the
                  chrome theme quirks that shaped them.
 
     note: chrome only draws the native bookmarks bar on its own stock new tab
