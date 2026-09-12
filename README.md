@@ -21,6 +21,7 @@ everything here is something **made from cobalt** — an alloy, an isotope, a co
 |---|---|---|
 | [cobalt-sync/](cobalt-sync/) | bookmarks + omnibox sync CLI | **cross-platform** — macOS, linux, windows; auto-detects browser paths (`avatar` is macOS+chrome only) |
 | [cobalt-60/](cobalt-60/) | cursor wall daemon | **macOS only** — it exists *for* the menu bar; other desktops don't have one |
+| [smalt/](smalt/) | menu bar strip daemon — cobalt glass across the top of the screen | **macOS only** — first panel of the cobalt menu bar (strip + fullscreen reveal; widgets next) |
 | [elgiloy-mac-arm/](elgiloy-mac-arm/) | tab overlay daemon | **macOS (arm) only** — apple events, event taps, NSPanel |
 | [elgiloy-linux/](elgiloy-linux/) | tab overlay daemon, linux port | in progress — shared design, separate code |
 | [stellite/](stellite/) | new tab page + shorts blocker extension + template theme | **anywhere chrome runs** — it's just an extension |

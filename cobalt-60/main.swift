@@ -42,6 +42,131 @@ let tapCallback: CGEventTapCallBack = { _, type, event, _ in
     return Unmanaged.passRetained(event)
 }
 
+// MARK: - corner filler (minimal)
+
+// the window server rounds fullscreen windows; wallpaper shows through the
+// cutouts. tiny black squares pinned at each screen corner, faded in while a
+// fullscreen window is onscreen. nothing else.
+
+// shaped black patches layered ABOVE the fullscreen window (a transparent
+// app would see straight through anything behind it, so above is the only
+// option). each patch is a square minus a disc — the black hugs the window
+// server's rounding arc exactly. if a wallpaper sliver ever shows, bump
+// CORNER_OVERLAP to 1 or 2.
+let CORNER_RADIUS: CGFloat = 14
+let CORNER_OVERLAP: CGFloat = 0
+
+var cornerWindows: [NSWindow] = []
+var cornersShown = false
+var cornerEval: DispatchWorkItem?
+
+final class CornerView: NSView {
+    let corner: Int // which screen corner this patch is: 0 TL, 1 TR, 2 BL, 3 BR
+
+    init(corner: Int, frame rect: NSRect) {
+        self.corner = corner
+        super.init(frame: rect)
+    }
+
+    required init?(coder: NSCoder) { fatalError("unsupported") }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let r = CORNER_RADIUS
+        let d = r - CORNER_OVERLAP
+        let w = bounds.width, h = bounds.height
+        guard let ctx = NSGraphicsContext.current else { return }
+
+        // 1. black over the whole patch…
+        NSColor.black.setFill()
+        bounds.fill()
+
+        // 2. …then erase a disc inset from the screen corner, so the black
+        //    only fills the rounded cutout and follows the arc
+        let c: NSPoint
+        switch corner {
+        case 0:  c = NSPoint(x: r,     y: h - r) // TL — screen corner at patch top-left
+        case 1:  c = NSPoint(x: w - r, y: h - r) // TR
+        case 2:  c = NSPoint(x: r,     y: r)     // BL
+        default: c = NSPoint(x: w - r, y: r)     // BR
+        }
+        ctx.compositingOperation = .clear
+        NSColor.clear.setFill()
+        NSBezierPath(ovalIn: NSRect(x: c.x - d, y: c.y - d, width: 2 * d, height: 2 * d)).fill()
+        ctx.compositingOperation = .sourceOver
+    }
+}
+
+func makeCornerFillers() {
+    for w in cornerWindows { w.orderOut(nil) }
+    cornerWindows.removeAll()
+    let s = CORNER_RADIUS + CORNER_OVERLAP
+    var corner = 0
+    for screen in NSScreen.screens {
+        let f = screen.frame
+        for rect in [
+            NSRect(x: f.minX,     y: f.maxY - s, width: s, height: s),  // top-left
+            NSRect(x: f.maxX - s, y: f.maxY - s, width: s, height: s),  // top-right
+            NSRect(x: f.minX,     y: f.minY,     width: s, height: s),  // bottom-left
+            NSRect(x: f.maxX - s, y: f.minY,     width: s, height: s),  // bottom-right
+        ] {
+            let w = NSWindow(contentRect: rect, styleMask: [.borderless], backing: .buffered, defer: false)
+            w.backgroundColor = .clear
+            w.isOpaque = false
+            w.hasShadow = false
+            w.ignoresMouseEvents = true
+            // above fullscreen windows (level 0), below the menu bar (24)
+            w.level = .floating
+            w.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
+            w.alphaValue = 0
+            w.contentView = CornerView(corner: corner, frame: NSRect(origin: .zero, size: rect.size))
+            corner += 1
+            cornerWindows.append(w)
+        }
+    }
+}
+
+func setCorners(_ shown: Bool) {
+    guard shown != cornersShown else { return }
+    cornersShown = shown
+    for w in cornerWindows {
+        if shown { w.orderFrontRegardless() }
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.25
+            w.animator().alphaValue = shown ? 1 : 0
+        }
+        if !shown {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                if !cornersShown { w.orderOut(nil) }
+            }
+        }
+    }
+}
+
+// true if any onscreen layer-0 window covers a display (i.e. fullscreen app)
+func anyFullscreenWindow() -> Bool {
+    guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else { return false }
+    let displays = NSScreen.screens.compactMap {
+        ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID).map { CGDisplayBounds($0) }
+    }
+    return list.contains { d in
+        guard (d[kCGWindowLayer as String] as? Int) == 0,
+              let b = d[kCGWindowBounds as String] as? [String: NSNumber] else { return false }
+        let r = CGRect(x: b["X"]?.doubleValue ?? 0, y: b["Y"]?.doubleValue ?? 0,
+                       width: b["Width"]?.doubleValue ?? 0, height: b["Height"]?.doubleValue ?? 0)
+        return displays.contains { db in
+            abs(r.minX - db.minX) <= 2 && abs(r.minY - db.minY) <= 2
+                && r.width >= db.width - 2 && r.height >= db.height - 2
+        }
+    }
+}
+
+func scheduleCornerUpdate() {
+    cornerEval?.cancel()
+    let item = DispatchWorkItem { setCorners(anyFullscreenWindow()) }
+    cornerEval = item
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: item)
+}
+
 // MARK: - daemon
 
 func runDaemon() -> Never {
@@ -50,7 +175,23 @@ func runDaemon() -> Never {
     NotificationCenter.default.addObserver(
         forName: NSApplication.didChangeScreenParametersNotification,
         object: nil, queue: nil
-    ) { _ in recomputeMinY() }
+    ) { _ in
+        recomputeMinY()
+        makeCornerFillers()
+        scheduleCornerUpdate()
+    }
+
+    makeCornerFillers()
+
+    // corner updates are driven by workspace events (space change, app
+    // activate/quit — entering/exiting fullscreen always fires one of these)
+    let wnc = NSWorkspace.shared.notificationCenter
+    let observers = [
+        wnc.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: nil) { _ in scheduleCornerUpdate() },
+        wnc.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: nil) { _ in scheduleCornerUpdate() },
+        wnc.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: nil) { _ in scheduleCornerUpdate() },
+    ]
+    _ = observers // keep alive for the life of the process
 
     guard let tap = CGEvent.tapCreate(
         tap: .cghidEventTap,
@@ -69,7 +210,11 @@ func runDaemon() -> Never {
     let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
     CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
     CGEvent.tapEnable(tap: tap, enable: true)
-    CFRunLoopRun()
+
+    // full app run loop — needed for workspace notifications to fire
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+    app.run()
     exit(0)
 }
 
@@ -132,6 +277,7 @@ func cmdStatus() {
 
     if running {
         print("wall:     up — cursor held \(Int(TOP_MARGIN))px below the menu bar")
+        print("corners:  black while a fullscreen app is up (\(cornerWindows.count/4) displays watched)")
     } else if loaded {
         print("wall:     down — launchd is retrying; check \(errLog)")
         if let tail = try? String(contentsOfFile: errLog, encoding: .utf8).suffix(200) {
