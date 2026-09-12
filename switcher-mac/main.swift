@@ -16,6 +16,7 @@ final class App: NSObject {
     var open = false
     var hover: Int?
     var listBusy = false
+    private var listPending = false   // a refresh arrived while one was in flight → run another when it lands
     private var movedYet = false
     private var watchdog: Timer?
 
@@ -29,15 +30,15 @@ final class App: NSObject {
     override init() {
         super.init()
         loadCache()   // disk-backed: even the FIRST open after launch has tabs
-        // warm prefetch: every time a chromium-family browser is activated,
-        // quietly refresh its tab list in the background. by the time the
-        // user presses ctrl+tab, the cache is already current — the overlay
-        // never opens blank, not even the first time after a relaunch.
-        NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
-        ) { [weak self] note in
-            guard let self, !self.open,
-                  let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+        // LIVE CACHE — while a chromium browser is frontmost and the overlay
+        // is closed, quietly poll its tab list every 200ms. the batched list
+        // query costs a few ms of apple-event time, so this is effectively
+        // free, and it means the cache is ALWAYS current: a tab added two
+        // seconds ago (or two hundred) is already in the list the instant
+        // the overlay opens. no warm-up lag, no stale first frame.
+        Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
+            guard let self, !self.open else { return }
+            guard let app = NSWorkspace.shared.frontmostApplication,
                   Browser.isChromiumFamily(app), let bid = app.bundleIdentifier else { return }
             self.bundleId = bid
             self.refreshList()
@@ -167,20 +168,42 @@ final class App: NSObject {
     }
 
     private func refreshList() {
-        guard let bid = bundleId, !listBusy else { return }
+        guard let bid = bundleId else { return }
+        // never DROP a refresh: if one is already in flight (started by end(),
+        // the activation watcher, or a close), queue a follow-up instead.
+        // dropping it meant the overlay could open on a stale list — a tab
+        // added seconds ago wouldn't appear until the NEXT session.
+        if listBusy { listPending = true; return }
         listBusy = true
         Browser.list(bundleId: bid, queue: q) { [weak self] tabs, active in
             guard let self else { return }
-            self.listBusy = false
             DispatchQueue.main.async {
+                self.listBusy = false
+                defer {
+                    if self.listPending {
+                        self.listPending = false
+                        self.refreshList()
+                    }
+                }
                 if let tabs {
                     // cache ALWAYS takes the reply — even when it lands after
                     // the session already ended. discarding it (the old
                     // behavior) meant fast sessions never warmed the cache and
                     // every open started blank.
+                    let changed = tabs != self.cache || active != nil && !self.open && active! - 1 != self.cacheSel
                     self.cache = tabs
                     self.cacheBundleId = self.bundleId
-                    self.persist()
+                    if !self.open, let a = active, a - 1 < tabs.count {
+                        // the poll runs while the overlay is closed, so this is
+                        // where mouse-driven tab changes get noticed: chrome's
+                        // real active index feeds cacheSel, keeping the cached
+                        // pointer in sync. without it, a tab switched by mouse
+                        // left cacheSel stale — the overlay opened anchored on
+                        // the WRONG tab, and the first ctrl+tab activated that
+                        // wrong tab in chrome.
+                        self.cacheSel = a - 1
+                    }
+                    if changed { self.persist() }   // skip disk writes when the poll found nothing new
                     if self.open {
                         // if the user already moved (possibly on the very
                         // first press), re-anchor the highlight to the same

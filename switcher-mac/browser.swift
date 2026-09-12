@@ -5,7 +5,7 @@ import OSAKit
 // the frontmost chromium-family app, targeted by bundle id (never by name —
 // the user's browser is a renamed Chromium.app).
 enum Browser {
-    struct Tab: Codable {
+    struct Tab: Codable, Equatable {
         var n: Int      // 1-based tab index, as chrome sees it (mutable: renumbers on close)
         let title: String
         let url: String
@@ -47,11 +47,12 @@ enum Browser {
         let s = (
             list: OSAScript(source: """
                 tell application id "\(bundleId)"
-                    set n to count of tabs of front window
                     set a to active tab index of front window
+                    set ts to title of tabs of front window
+                    set us to URL of tabs of front window
                     set out to (a as text) & (character id 31)
-                    repeat with i from 1 to n
-                        set out to out & i & (character id 31) & (title of tab i of front window) & (character id 31) & (URL of tab i of front window) & (character id 30)
+                    repeat with i from 1 to count of ts
+                        set out to out & i & (character id 31) & (item i of ts) & (character id 31) & (item i of us) & (character id 30)
                     end repeat
                 end tell
                 return out
