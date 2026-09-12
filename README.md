@@ -19,9 +19,10 @@ everything here is something **made from cobalt** — an alloy, an isotope, a co
 
 | folder | what it is | os support |
 |---|---|---|
-| [cobalt-sync/](cobalt-sync/) | bookmarks + omnibox sync CLI | macOS today — logic is portable (python), browser paths aren't yet |
+| [cobalt-sync/](cobalt-sync/) | bookmarks + omnibox sync CLI | **cross-platform** — macOS, linux, windows; auto-detects browser paths (`avatar` is macOS+chrome only) |
 | [cobalt-60/](cobalt-60/) | cursor wall daemon | **macOS only** — it exists *for* the menu bar; other desktops don't have one |
-| [elgiloy/](elgiloy/) | tab overlay daemon | **macOS only** — apple events, event taps, NSPanel; a linux port would be a different program |
+| [elgiloy-mac-arm/](elgiloy-mac-arm/) | tab overlay daemon | **macOS (arm) only** — apple events, event taps, NSPanel |
+| [elgiloy-linux/](elgiloy-linux/) | tab overlay daemon, linux port | in progress — shared design, separate code |
 | [stellite/](stellite/) | new tab page + shorts blocker extension + template theme | **anywhere chrome runs** — it's just an extension |
 
 each folder is self-contained: source + its own `install.sh`. nothing here depends on anything else in the repo. see each folder's README for the full story.
@@ -36,7 +37,7 @@ needs python 3.8+. **no special permissions** (writes browser profile files dire
 **cobalt-60** — builds with swiftc, signs, copies binary to `~/.local/bin/cobalt-60`, registers launchd agent `dev.cobalt.cobalt-60`.
 needs swiftc. **Accessibility permission** — it rewrites mouse events system-wide.
 
-**elgiloy** — same pipeline: binary to `~/.local/bin/elgiloy`, agent `dev.cobalt.elgiloy`.
+**elgiloy-mac-arm** — same pipeline as cobalt-60: binary to `~/.local/bin/elgiloy`, agent `dev.cobalt.elgiloy`.
 needs swiftc. **Accessibility + Input Monitoring** (listens for ctrl+tab) and one **Automation** prompt on first use (queries chrome's tabs).
 
 **stellite** — no install script; chrome loads unpacked extensions by folder path:
