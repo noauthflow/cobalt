@@ -29,17 +29,25 @@ intercepted, nothing is rewritten. that's why smalt needs zero permissions.
 
 ## behavior
 
+hidden everywhere by default. the strip has no steady state — visibility is
+purely a function of the cursor:
+
 | situation | strip |
 |---|---|
-| desktop | always visible, tucked directly under the native menu bar. non-negotiable. |
-| fullscreen app | slides up and away with the app |
-| fullscreen + cursor at top edge (4px) | slides down, like an auto-hidden menu bar |
-| fullscreen + cursor drops below the strip | slides away |
+| idle (desktop or fullscreen) | hidden |
+| cursor enters the top edge — 12px from screen top in fullscreen, 12px below the menu bar on desktop | slides down (0.08s) |
+| cursor drops below the strip | slides away |
 | mission control | off the stage |
 | display change | snaps to the new geometry (no slide) |
 
-between the reveal line and the hide line there's hysteresis, so cursor
-jitter at the edge can't flicker the strip.
+on the desktop the hidden strip lives above the screen, behind the menu
+bar's airspace — the summon slides it out from under the native bar. in
+fullscreen it slides in from behind the top edge. between the summon line
+and the dismiss line there's hysteresis, so cursor jitter can't flicker it.
+
+the summon zone is wider than cobalt-60's 5px wall clamp on purpose: the
+hover works whether the wall is relaxed, lagging, or not running at all —
+the wall and the reveal never fight over the same pixel.
 
 ## commands
 
@@ -74,14 +82,13 @@ survives rebuilds.)
 
 - logs: `/tmp/smalt.err`
 - main display only in v0 — secondary displays get the strip later
-- constants: `BAR_HEIGHT` (26px), `REVEAL_HEIGHT` (6px), `HIDE_MARGIN` (6px) in main.swift
+- constants: `BAR_HEIGHT` (26px), `REVEAL_HEIGHT` (12px), `HIDE_MARGIN` (6px), `SLIDE_DURATION` (0.08s) in main.swift
 - the summon zone (6px) sits just below cobalt-60's 5px wall clamp, so the
   reveal works whether or not the wall has relaxed yet
 - the strip's window ignores mouse events in v0; widgets (v1) flip that
-- coexists with cobalt-60 today: the wall relaxes while a fullscreen app is
-  frontmost — exactly when the reveal needs the top edge. on desktops the
-  wall holds the cursor 5px below the menu bar, so the strip's top 5px are
-  unreachable until the v1 handshake (the wall's job becomes guarding
-  smalt's underside once the native bar is hidden)
+- coexists with cobalt-60 today: on desktops the wall holds the cursor 5px
+  below the menu bar — exactly the summon zone's outer edge, so pushing the
+  cursor against the bar summons the strip; in fullscreen the wall relaxes
+  and the zone starts at the top edge
 - the native menu bar is untouched in v0 — hiding it (`_HIHideMenuBar`) is a
   separate, reversible step once the strip has proven itself

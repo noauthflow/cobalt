@@ -11,22 +11,21 @@ import QuartzCore
 // v0 scope is deliberately tiny. no widgets, no config — just the strip
 // and its behavior:
 //
-//   desktop            always visible, tucked directly under the native
-//                      menu bar (non-negotiable)
-//   fullscreen app     hides with the app; moving the cursor to the top
-//                      edge slides it down, like an auto-hidden menu bar;
-//                      dropping below the strip slides it away
+//   hidden everywhere by default. the cursor entering the top edge —
+//   desktop or fullscreen — summons it: on the desktop it slides out from
+//   under the native menu bar; in fullscreen it slides from behind the top
+//   edge. dropping below the strip dismisses it again.
 //   mission control    off the stage — it's not part of the expose grid
 //
 // zero permissions: the reveal is a global mouse monitor, not an event
 // tap. nothing is intercepted, nothing is rewritten, nothing is polled.
 
 let BAR_HEIGHT: CGFloat = 26
-// the summon zone is deeper than cobalt-60's wall (5px below the menu bar on
-// desktops; 0px in fullscreen once it relaxes). keeping the reveal line below
-// the wall's clamp means the summon works even if the wall is lagging, stale,
-// or not running — the wall and the reveal must never fight over the same px.
-let REVEAL_HEIGHT: CGFloat = 6
+// the summon zone: cursor within this distance of the strip's top edge.
+// desktop: the strip hides under the menu bar, so this reads as "12px below
+// the menu bar" — below cobalt-60's 5px wall clamp, so the hover always
+// lands, wall relaxed or not. fullscreen: 12px from the top edge.
+let REVEAL_HEIGHT: CGFloat = 12
 let HIDE_MARGIN: CGFloat = 6     // cursor must drop this far below the strip before it slides away
 let SLIDE_DURATION: TimeInterval = 0.08   // fast — the strip should feel like a reflex, not an animation
 
@@ -46,27 +45,23 @@ final class StripView: NSView {
 // MARK: - state
 
 var inFullscreenMode = false   // a fullscreen app owns the main display
-var stripVisible = true        // logical visibility — the window just moves; it's never ordered out
+var stripVisible = false       // hidden until the cursor hovers the top edge
 var evalItem: DispatchWorkItem?
 
 func mainScreen() -> NSScreen? {
     NSScreen.screens.first { $0.frame.origin.y == 0 } ?? NSScreen.main
 }
 
-// where the strip sits. two anchors:
-//   desktop     directly under the native menu bar (hugs the visible area)
-//   fullscreen  the very top edge — the native bar is gone, the glass takes its place
-// hidden = same anchor, pushed 2px above the screen so the slide is real movement
+// where the strip sits. three anchors:
+//   fullscreen, visible   the very top edge — the native bar is gone, the glass takes its place
+//   desktop, visible      tucked directly under the native menu bar
+//   hidden (any mode)     fully above the screen — on the desktop that's behind the menu bar's airspace, never painted over anything
 func stripFrame(visible: Bool) -> NSRect {
     guard let screen = mainScreen() else { return .zero }
     let f = screen.frame
-    let top: CGFloat
-    if inFullscreenMode {
-        top = visible ? f.maxY - BAR_HEIGHT : f.maxY + 2
-    } else {
-        top = visible ? screen.visibleFrame.maxY - BAR_HEIGHT : screen.visibleFrame.maxY + 2
-    }
-    return NSRect(x: f.minX, y: top, width: f.width, height: BAR_HEIGHT)
+    let anchor = inFullscreenMode ? f.maxY : screen.visibleFrame.maxY
+    let y = visible ? anchor - BAR_HEIGHT : f.maxY + 2
+    return NSRect(x: f.minX, y: y, width: f.width, height: BAR_HEIGHT)
 }
 
 func refreshStrip(animate: Bool) {
@@ -92,6 +87,13 @@ func applyVisibility(_ desired: Bool, animate: Bool = true) {
 // CGEvent coordinates are top-left origin.
 func cursorYFromTop() -> CGFloat {
     CGEvent(source: nil)?.location.y ?? .infinity
+}
+
+// distance from the top of the screen to the strip's visible top edge
+// (fullscreen: 0 — no menu bar. desktop: the menu bar's height.)
+func barTopFromTop() -> CGFloat {
+    guard let screen = mainScreen() else { return 0 }
+    return inFullscreenMode ? 0 : screen.frame.height - screen.visibleFrame.maxY
 }
 
 // MARK: - fullscreen + mission control detection
@@ -138,10 +140,10 @@ func updateStrip() {
 
     if mc {
         applyVisibility(false)                                 // mission control: off the stage
-    } else if inFullscreenMode {
-        applyVisibility(cursorYFromTop() <= REVEAL_HEIGHT)     // fullscreen: only when summoned
     } else {
-        applyVisibility(true)                                  // desktop: always. non-negotiable.
+        // hover decides, everywhere. the strip has no "default" state —
+        // visible iff the cursor is in the summon zone.
+        applyVisibility(cursorYFromTop() <= barTopFromTop() + REVEAL_HEIGHT)
     }
 }
 
@@ -156,16 +158,18 @@ func scheduleUpdate() {
 // MARK: - the strip (window)
 
 let strip: NSWindow = {
-    let win = NSWindow(contentRect: stripFrame(visible: true), styleMask: [.borderless], backing: .buffered, defer: false)
+    let win = NSWindow(contentRect: stripFrame(visible: false), styleMask: [.borderless], backing: .buffered, defer: false)
     win.backgroundColor = .clear
     win.isOpaque = true
     win.hasShadow = false
     win.ignoresMouseEvents = true   // v0: the glass is look-only; widgets flip this in v1
-    // the menu bar's own level, so the strip sits exactly where the bar does
-    win.level = .statusBar
+    // BELOW the menu bar (24) but above every app window — so the slide from
+    // its hidden spot never paints over the native bar, while still showing
+    // over fullscreen apps (fullScreenAuxiliary)
+    win.level = .floating
     // every desktop space, pinned to the screen, present over fullscreen apps
     win.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
-    win.contentView = StripView(frame: NSRect(origin: .zero, size: stripFrame(visible: true).size))
+    win.contentView = StripView(frame: NSRect(origin: .zero, size: stripFrame(visible: false).size))
     return win
 }()
 
@@ -180,19 +184,19 @@ func runDaemon() -> Never {
     updateStrip()
     strip.orderFrontRegardless()
 
-    // the reveal. a global mouse monitor — not an event tap — so there is
+    // the summon. a global mouse monitor — not an event tap — so there is
     // nothing to intercept and nothing to grant. the strip ignores mouse
     // events, so every move lands in some other app and passes through here.
+    // cursor into the summon zone → slide down; below the strip → slide away.
+    // hysteresis between the two lines means edge jitter can't flicker it.
     NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged, .otherMouseDragged]) { _ in
-        guard inFullscreenMode else { return }
         let y = cursorYFromTop()
-        if y <= REVEAL_HEIGHT {
+        let top = barTopFromTop()
+        if y <= top + REVEAL_HEIGHT {
             applyVisibility(true)
-        } else if y > BAR_HEIGHT + HIDE_MARGIN {
+        } else if y > top + BAR_HEIGHT + HIDE_MARGIN {
             applyVisibility(false)
         }
-        // between the reveal line and the hide line is hysteresis: do nothing,
-        // so jittering at the edge can't flicker the strip
     }
 
     let wnc = NSWorkspace.shared.notificationCenter
