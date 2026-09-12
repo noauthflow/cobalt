@@ -10,6 +10,16 @@ an event tap (`CGEventTapCreate` on the HID tap) intercepts `mouseMoved`, `leftM
 
 the boundary is computed from the screen's `visibleFrame` (which excludes the menu bar), and recomputed on display changes — resolution switches, monitor plug/unplug.
 
+## commands
+
+the installed binary is on your PATH, so it controls itself:
+
+    cobalt-60 on       start the wall
+    cobalt-60 off      stop the wall (starts again at next login — the launchd plist stays)
+    cobalt-60 status   installed / loaded / running, plus the log tail if it's struggling
+
+`install.sh` and `install.sh uninstall` remain the way to install or remove the whole thing (binary + launchd agent).
+
 ## install
 
     ./install.sh            build, sign, install, register launchd agent, start
