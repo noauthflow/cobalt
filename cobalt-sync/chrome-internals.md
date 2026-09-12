@@ -1,4 +1,4 @@
-# chrome: undocumented behavior notes
+# chrome: undocumented internals — field notes
 
 maintainer documentation for chrome internals discovered while building cobalt.
 none of this is in official documentation. findings verified against the exact

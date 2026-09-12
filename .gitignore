@@ -1,3 +1,11 @@
-cobalt-switcher
-.DS_Store
+# build artifacts — install.sh copies binaries to ~/.local/bin, never keep them here
+cobalt-60/cobalt-60
+elgiloy/elgiloy
+*.cstemp
+
+# python
 __pycache__/
+*.pyc
+
+# macOS
+.DS_Store

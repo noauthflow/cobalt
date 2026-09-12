@@ -1123,7 +1123,7 @@ def cmd_init(args):
             "GitHub | https://github.com\n[Search]\n  GitHub | gh | https://github.com/search?q=%s\n")
     print(f"wrote {DEFAULT_CONFIG} — edit it, then `cobalt push` with the browser closed")
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser(
         prog="cobalt",
         description="bookmarks bar & omnibox keyword engines from one config file")
@@ -1186,7 +1186,7 @@ def main():
     p_init = sub.add_parser("init", help="create a starter config")
     p_init.add_argument("--force", action="store_true")
 
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
     {"ls": cmd_list, "list": cmd_list, "push": cmd_push, "pull": cmd_pull,
      "seed": cmd_seed, "avatar": cmd_avatar, "reload": cmd_reload,
      "init": cmd_init}[args.cmd](args)

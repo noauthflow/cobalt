@@ -28,3 +28,11 @@ chrome regenerates it from the manifest on load.
     is absent is black, while inactive labels derive light — inverted contrast.
   - accents (omnibox/user colors) are handled by `cobalt seed`, not the theme:
     grey variant pairs with #7C4DFF, violet with #B79CFF.
+
+## install
+
+no install script and no system permissions — same as any unpacked theme:
+
+    chrome://extensions → developer mode → load unpacked → <this folder>
+
+reload the theme after switching variants.

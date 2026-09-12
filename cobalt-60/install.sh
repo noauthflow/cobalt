@@ -1,12 +1,12 @@
 #!/bin/bash
-# elgiloy — tab overlay daemon: build, sign, install to ~/.local/bin, register launchd agent
+# cobalt-60 — cursor wall daemon: build, sign, install to ~/.local/bin, register launchd agent
 #   ./install.sh            build + install + start
 #   ./install.sh uninstall  stop agent, remove plist + binary
 set -euo pipefail
 cd "$(dirname "$0")"
 
-NAME="elgiloy"
-LABEL="dev.cobalt.elgiloy"
+NAME="cobalt-60"
+LABEL="dev.cobalt.cobalt-60"
 BIN_LOCAL="$HOME/.local/bin/$NAME"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 GUI="gui/$(id -u)"
@@ -21,9 +21,10 @@ fi
 command -v swiftc >/dev/null || { echo "swiftc is required (xcode-select --install)"; exit 1; }
 
 echo "building (swiftc)"
-swiftc -O -o "$NAME" main.swift tap.swift overlay.swift browser.swift favicon.swift \
-  -framework AppKit -framework ApplicationServices -framework OSAKit
+swiftc -O -o "$NAME" main.swift -framework AppKit
 
+# sign with the persistent self-signed cert if it exists — keeps the
+# accessibility grant valid across rebuilds (ad-hoc binaries invalidate it)
 if security find-identity -v -p codesigning | grep -q "cobalt-dev"; then
   codesign --force --sign "cobalt-dev" "$NAME"
   echo "signed (cobalt-dev)"
@@ -56,5 +57,4 @@ if ! pgrep -xq "$NAME"; then
   echo "one-time setup:"
   echo "  system settings -> privacy & security -> accessibility"
   echo "  add: $BIN_LOCAL"
-  echo "  first ctrl+tab pops ONE automation prompt ('control Chromium') -> allow"
 fi

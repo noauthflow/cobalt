@@ -73,12 +73,13 @@ the overlay must never get stuck on screen, no matter what:
 ## install
 
 ```
-./install.sh
+./install.sh            build, sign, install, register launchd agent, start
+./install.sh uninstall  stop agent, remove plist + installed binary
 ```
 
-one-time permissions: accessibility (re-grant after every rebuild — the grant
-is tied to the binary's ad-hoc signature), plus one automation prompt on the
-first ctrl+tab.
+what it does: builds with swiftc, signs with the `cobalt-dev` codesign identity if present, copies the binary to `~/.local/bin/elgiloy`, writes `~/Library/LaunchAgents/dev.cobalt.elgiloy.plist`, and bootstraps the agent (starts at login, restarts on crash).
+
+permissions: **accessibility** + **input monitoring** (the event tap listens for ctrl+tab), plus one **automation** prompt ("elgiloy wants to control chromium") on the first ctrl+tab — allow it, that's the apple-event tab queries. sign with `cobalt-dev` and the accessibility grant survives rebuilds; unsigned (ad-hoc) builds invalidate it every time.
 
 logs: `tail -f /tmp/elgiloy.err`
 
