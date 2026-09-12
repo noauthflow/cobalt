@@ -143,7 +143,8 @@ final class App: NSObject {
     }
 
     // SAFETY NET — the tap is normally the only thing that ends a session
-    // (ctrl release via flagsChanged). but macOS silently disables event taps
+    // (ctrl or cmd release via flagsChanged). but macOS silently disables event
+    // taps
     // when their callback times out, and flagsChanged events can be missed:
     // either way the overlay would sit on screen forever — frozen, with no
     // way to dismiss it. so an independent run-loop timer polls the REAL
@@ -154,9 +155,10 @@ final class App: NSObject {
         watchdog?.invalidate()
         watchdog = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             guard let self, self.open else { return }
-            let ctrlDown = CGEventSource.flagsState(.combinedSessionState).contains(.maskControl)
+            let flags = CGEventSource.flagsState(.combinedSessionState)
+            let modsDown = flags.contains(.maskControl) || flags.contains(.maskCommand)
             let front = NSWorkspace.shared.frontmostApplication
-            if !ctrlDown || front?.bundleIdentifier != self.bundleId {
+            if !modsDown || front?.bundleIdentifier != self.bundleId {
                 self.end()
             }
         }

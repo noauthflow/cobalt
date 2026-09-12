@@ -2,8 +2,9 @@ import AppKit
 import ApplicationServices
 
 // the only interception point. the tap is active but deliberately passes
-// through EVERYTHING except esc-while-overlay-is-open. chrome performs every
-// tab switch itself; we just watch.
+// through EVERYTHING except esc-while-overlay-is-open and the bracket tab
+// cycle (cmd+shift+[/], swallowed so chrome never cycles on its own). chrome
+// performs every tab switch itself; we just watch.
 enum Tap {
     static var tap: CFMachPort?
 
@@ -11,17 +12,21 @@ enum Tap {
         let mask = (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.flagsChanged.rawValue)
         let callback: CGEventTapCallBack = { _, type, event, _ in
             let ctrl = event.flags.contains(.maskControl)
+            let cmd = event.flags.contains(.maskCommand)
             switch type {
             case .flagsChanged:
-                if !ctrl {
-                    // ctrl released → session over → hide. nothing to commit:
-                    // every advance already switched chrome in real time.
+                if !ctrl && !cmd {
+                    // ctrl AND cmd released → session over → hide. nothing to
+                    // commit: every advance already switched chrome in real
+                    // time. (either modifier can carry a session, so only
+                    // when BOTH are gone is the session over.)
                     App.shared.end()
                 } else if event.flags.contains(.maskShift), !App.shared.open {
-                    // ctrl+shift held together, overlay not open, ctrl still
-                    // down → just SHOW the overlay. no cycling, no key press
-                    // needed — the modifier combo itself is the trigger.
-                    // (a tab tapped afterwards does the cycling.)
+                    // ctrl+shift or cmd+shift held together, overlay not
+                    // open, modifier still down → just SHOW the overlay. no
+                    // cycling, no key press needed — the modifier combo
+                    // itself is the trigger. (a tab / bracket tapped
+                    // afterwards does the cycling.)
                     let front = NSWorkspace.shared.frontmostApplication
                     if front.map({ Browser.isChromiumFamily($0) }) == true {
                         App.shared.begin()
@@ -49,6 +54,29 @@ enum Tap {
                     }
                     // frontmost isn't chromium and no overlay open: not ours.
                     // pass it through so other apps keep ctrl+tab working.
+                    return Unmanaged.passUnretained(event)
+                }
+                if code == 33 || code == 30, cmd {   // [ / ] — chrome's native
+                    // cmd+shift+bracket tab cycling, mirrored like ctrl+tab.
+                    // swallowed in chromium apps so chrome never cycles on its
+                    // own; [ goes left/previous, ] goes right/next.
+                    let front = NSWorkspace.shared.frontmostApplication
+                    let chromium = front.map { Browser.isChromiumFamily($0) } ?? false
+                    if App.shared.open || (chromium && event.flags.contains(.maskShift)) {
+                        let back = code == 33
+                        if App.shared.open {
+                            App.shared.advance(shift: back)
+                        } else {
+                            // first bracket press: open AND cycle — the first
+                            // press is a real switch, not just "show me the
+                            // list". (cmd+shift alone is the no-cycle way in.)
+                            App.shared.begin()
+                            App.shared.advance(shift: back)
+                        }
+                        return nil
+                    }
+                    // frontmost isn't chromium and no overlay open: not ours.
+                    // pass it through so other apps keep cmd+shift+[/] working.
                     return Unmanaged.passUnretained(event)
                 }
                 if code == 13, App.shared.open {   // w — close the selected tab

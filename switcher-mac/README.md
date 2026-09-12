@@ -27,14 +27,26 @@ everything else passes through untouched.
 ```
 ctrl+shift      overlay appears, anchored on chrome's active tab — nothing
                 cycles. tap tab afterwards to move the highlight.
+                (cmd+shift does exactly the same thing.)
+cmd+shift       same as ctrl+shift: overlay appears, nothing cycles. tap
+                [ / ] afterwards to move the highlight.
 ctrl+tab        overlay appears AND cycles to the next tab — the first press
                 is a real switch, not just "show me the list"
 ctrl+shift+tab  same, but cycles backwards
+cmd+shift+[     same as ctrl+shift+tab: overlay appears AND cycles backwards
+                — the first press is a real switch. swallowed so chrome never
+                double-switches.
+cmd+shift+]     same as ctrl+tab: overlay appears AND cycles forward.
+[/] while open  with cmd still held, bare [ / ] keep cycling (shift can be
+                released). ctrl+tab / cmd+[ / cmd+] all drive the same
+                highlight.
 ctrl+tab …      keep tapping — keeps cycling, highlight follows
-release ctrl    overlay collapses (chrome already settled the tab)
+release ctrl    overlay collapses (chrome already settled the tab). if the
+and/or cmd      session was opened via cmd+shift, release cmd — the overlay
+                ends when BOTH modifiers are up.
 esc             over a row → close that tab (overlay stays open); not hovering
                 → cancel overlay
-w              close the SELECTED tab — keyboard path, overlay stays open;
+w               close the SELECTED tab — keyboard path, overlay stays open;
                 selection lands on the row above the closed one every time
 ```
 
@@ -43,9 +55,10 @@ w              close the SELECTED tab — keyboard path, overlay stays open;
 the overlay must never get stuck on screen, no matter what:
 
 - a watchdog timer (independent of the event tap) checks the real global
-  modifier state every 100ms while the overlay is open — the moment ctrl
-  isn't actually held (or the frontmost app changed), the session force-ends.
-  covers missed flagsChanged events, taps disabled by macOS, cmd-tab away.
+  modifier state every 100ms while the overlay is open — the moment neither
+  ctrl nor cmd is actually held (or the frontmost app changed), the session
+  force-ends. covers missed flagsChanged events, taps disabled by macOS,
+  cmd-tab away.
 - a dead tap self-revives every 2s (macOS disables taps on callback timeout).
 - last resort: `killall cobalt-switcher` — launchd restarts it within seconds,
   and the overlay dies with the process.
@@ -54,7 +67,7 @@ the overlay must never get stuck on screen, no matter what:
 
 | file | job |
 |---|---|
-| `tap.swift` | CGEventTap. passes everything through except esc-while-open. watches ctrl release. |
+| `tap.swift` | CGEventTap. passes everything through except esc-while-open and the bracket cycle. watches ctrl/cmd release. |
 | `main.swift` | state (`open`/`tabs`/`sel`/`hover`) + the 50ms mirror poll |
 | `overlay.swift` | NSPanel, rows rebuilt from scratch every render (no in-place mutation) |
 | `browser.swift` | apple events: list tabs / active index / close tab (by bundle id, never by name) |
