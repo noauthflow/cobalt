@@ -1,20 +1,22 @@
 #!/bin/bash
-# elgiloy — tab overlay daemon: build, sign, install to ~/.local/bin, register launchd agent
+# elgiloy — tab overlay daemon: build, sign, wrap in an .app bundle, register launchd agent
 #   ./install.sh            build + install + start
-#   ./install.sh uninstall  stop agent, remove plist + binary
+#   ./install.sh uninstall  stop agent, remove plist + bundle
 set -euo pipefail
 cd "$(dirname "$0")"
 
 NAME="elgiloy"
 LABEL="dev.cobalt.elgiloy"
-BIN_LOCAL="$HOME/.local/bin/$NAME"
+BUNDLE_ID="dev.cobalt.elgiloy"
+APP="$HOME/Applications/cobalt/Elgiloy.app"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 GUI="gui/$(id -u)"
 
 if [[ "${1:-}" == "uninstall" ]]; then
   launchctl bootout "$GUI/$LABEL" 2>/dev/null || true
-  rm -f "$PLIST" "$BIN_LOCAL"
-  echo "uninstalled: agent stopped, plist + $BIN_LOCAL removed"
+  rm -f "$PLIST"
+  rm -rf "$APP"
+  echo "uninstalled: agent stopped, plist + $APP removed"
   exit 0
 fi
 
@@ -44,8 +46,26 @@ swiftc -O -o "$NAME" main.swift tap.swift overlay.swift browser.swift favicon.sw
 codesign --force --sign "cobalt-dev" "$NAME"
 echo "signed (cobalt-dev)"
 
-mkdir -p "$HOME/.local/bin"
-cp -f "$NAME" "$BIN_LOCAL"
+# the daemon sends apple events to chromium ("control chrome") — tcc can only
+# show the automation prompt for a process with an app bundle identity; a bare
+# binary launched by launchd gets silently auto-denied (-1743, no popup).
+# so the signed binary lives inside a minimal .app bundle, and launchd runs it there.
+mkdir -p "$APP/Contents/MacOS"
+cp -f "$NAME" "$APP/Contents/MacOS/$NAME"
+cat > "$APP/Contents/Info.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
+  <key>CFBundleName</key><string>Elgiloy</string>
+  <key>CFBundleExecutable</key><string>$NAME</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleVersion</key><string>1.0</string>
+  <key>LSUIElement</key><true/>
+</dict></plist>
+EOF
+codesign --force --sign "cobalt-dev" "$APP"
+echo "bundled: $APP"
 
 launchctl bootout "$GUI/$LABEL" 2>/dev/null || true
 cat > "$PLIST" <<EOF
@@ -53,7 +73,7 @@ cat > "$PLIST" <<EOF
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>$LABEL</string>
-  <key>ProgramArguments</key><array><string>$BIN_LOCAL</string></array>
+  <key>ProgramArguments</key><array><string>$APP/Contents/MacOS/$NAME</string></array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>StandardErrorPath</key><string>/tmp/$NAME.err</string>
@@ -62,12 +82,11 @@ EOF
 launchctl bootstrap "$GUI" "$PLIST"
 
 echo
-echo "installed: $BIN_LOCAL"
+echo "installed: $APP"
 echo "launchd:   $LABEL — starts at login, restarts on crash, logs: /tmp/$NAME.err"
 echo
-if ! pgrep -xq "$NAME"; then
-  echo "one-time setup:"
-  echo "  system settings -> privacy & security -> accessibility"
-  echo "  add: $BIN_LOCAL"
-  echo "  first ctrl+tab pops ONE automation prompt ('control Chromium') -> allow"
-fi
+echo "one-time setup (both happen once, then never again — cobalt-dev signature):"
+echo "  1. system settings -> privacy & security -> accessibility -> add:"
+echo "     $APP"
+echo "  2. first ctrl+tab over chromium pops the automation prompt"
+echo "     ('Elgiloy wants to control Chromium') -> allow"

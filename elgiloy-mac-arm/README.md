@@ -73,13 +73,18 @@ the overlay must never get stuck on screen, no matter what:
 ## install
 
 ```
-./install.sh            build, sign, install, register launchd agent, start
-./install.sh uninstall  stop agent, remove plist + installed binary
+./install.sh            build, sign, bundle, register launchd agent, start
+./install.sh uninstall  stop agent, remove plist + app bundle
 ```
 
-what it does: builds with swiftc, signs with the `cobalt-dev` codesign identity if present, copies the binary to `~/.local/bin/elgiloy`, writes `~/Library/LaunchAgents/dev.cobalt.elgiloy.plist`, and bootstraps the agent (starts at login, restarts on crash).
+what it does: builds with swiftc, signs with the `cobalt-dev` codesign identity (required — the script fails without it and explains how to create it), wraps the binary in a minimal app bundle at `~/Applications/cobalt/Elgiloy.app`, signs the bundle, writes `~/Library/LaunchAgents/dev.cobalt.elgiloy.plist`, and bootstraps the agent (starts at login, restarts on crash).
 
-permissions: **accessibility** + **input monitoring** (the event tap listens for ctrl+tab), plus one **automation** prompt ("elgiloy wants to control chromium") on the first ctrl+tab — allow it, that's the apple-event tab queries. sign with `cobalt-dev` and the accessibility grant survives rebuilds; unsigned (ad-hoc) builds invalidate it every time.
+why an app bundle: the daemon talks to chromium via apple events, and macOS can only show the "control chromium" automation prompt for a process with an app-bundle identity — a bare binary launched by launchd gets **silently auto-denied** (error -1743, no popup ever appears). the bundle fixes attribution, and being signed with `cobalt-dev`, both grants survive rebuilds.
+
+permissions (both one-time):
+
+1. **accessibility** — system settings → privacy & security → accessibility → add `~/Applications/cobalt/Elgiloy.app`
+2. **automation** — first ctrl+tab over chromium pops "Elgiloy wants to control Chromium" → allow
 
 logs: `tail -f /tmp/elgiloy.err`
 
