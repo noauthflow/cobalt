@@ -49,4 +49,4 @@ notes: daemons run as launchd agents (start at login, restart on crash, logs at 
     keychain access → certificate assistant → create certificate
     name: cobalt-dev · type: code signing · self-signed root
 
-without it the daemons still work — you'll just re-grant accessibility after every rebuild. already have it? `security find-identity -p codesigning` will say so.
+without it the daemons still work — you'll just re-grant accessibility after every rebuild. already have it? `security find-identity -p codesigning` will say so. **order matters:** the binary must be signed *before* you grant it accessibility — TCC anchors to the signature it sees at approval time. running `install.sh` first guarantees this (it signs before the daemon ever starts); granting a manually-compiled unsigned binary anchors the grant to that exact build and the first re-sign kills it.
