@@ -77,14 +77,12 @@ the overlay must never get stuck on screen, no matter what:
 ./install.sh uninstall  stop agent, remove plist + app bundle
 ```
 
-what it does: builds with swiftc, signs with the `cobalt-dev` codesign identity (required — the script fails without it and explains how to create it), wraps the binary in a minimal app bundle at `~/Applications/cobalt/Elgiloy.app`, signs the bundle, writes `~/Library/LaunchAgents/dev.cobalt.elgiloy.plist`, and bootstraps the agent (starts at login, restarts on crash).
+what it does: builds with swiftc, signs with the `cobalt-dev` codesign identity (required — the script fails without it and explains how to create it), copies the binary to `~/.local/bin/elgiloy`, writes `~/Library/LaunchAgents/dev.cobalt.elgiloy.plist`, and bootstraps the agent (starts at login, restarts on crash).
 
-why an app bundle: the daemon talks to chromium via apple events, and macOS can only show the "control chromium" automation prompt for a process with an app-bundle identity — a bare binary launched by launchd gets **silently auto-denied** (error -1743, no popup ever appears). the bundle fixes attribution, and being signed with `cobalt-dev`, both grants survive rebuilds.
+permissions (one-time):
 
-permissions (both one-time):
-
-1. **accessibility** — system settings → privacy & security → accessibility → add `~/Applications/cobalt/Elgiloy.app`
-2. **automation** — first ctrl+tab over chromium pops "Elgiloy wants to control Chromium" → allow
+1. **accessibility + input monitoring** — system settings → privacy & security → accessibility → add `~/.local/bin/elgiloy`
+2. **automation** — the first ctrl+tab over chromium should pop "elgiloy wants to control Chromium" → allow. if no popup ever appears (macos suppresses it for launchd-spawned agents), run the binary once in the foreground from a terminal, press ctrl+tab, allow, ctrl+C — launchd takes it from there. the grant is recorded against the binary's `cobalt-dev` signature, so it survives rebuilds.
 
 logs: `tail -f /tmp/elgiloy.err`
 

@@ -37,7 +37,7 @@ needs python 3.8+. **no special permissions** (writes browser profile files dire
 **cobalt-60** — builds with swiftc, signs, copies binary to `~/.local/bin/cobalt-60`, registers launchd agent `dev.cobalt.cobalt-60`.
 needs swiftc. **Accessibility permission** — it rewrites mouse events system-wide.
 
-**elgiloy-mac-arm** — builds, signs, wraps in `~/Applications/cobalt/Elgiloy.app`, registers agent `dev.cobalt.elgiloy`.
+**elgiloy-mac-arm** — same pipeline as cobalt-60: binary to `~/.local/bin/elgiloy`, agent `dev.cobalt.elgiloy`.
 needs swiftc. **Accessibility + Input Monitoring** (listens for ctrl+tab) and one **Automation** prompt on first use (queries chrome's tabs).
 
 **stellite** — no install script; chrome loads unpacked extensions by folder path:

@@ -1,22 +1,20 @@
 #!/bin/bash
-# elgiloy — tab overlay daemon: build, sign, wrap in an .app bundle, register launchd agent
+# elgiloy — tab overlay daemon: build, sign, install to ~/.local/bin, register launchd agent
 #   ./install.sh            build + install + start
-#   ./install.sh uninstall  stop agent, remove plist + bundle
+#   ./install.sh uninstall  stop agent, remove plist + binary
 set -euo pipefail
 cd "$(dirname "$0")"
 
 NAME="elgiloy"
 LABEL="dev.cobalt.elgiloy"
-BUNDLE_ID="dev.cobalt.elgiloy"
-APP="$HOME/Applications/cobalt/Elgiloy.app"
+BIN_LOCAL="$HOME/.local/bin/$NAME"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 GUI="gui/$(id -u)"
 
 if [[ "${1:-}" == "uninstall" ]]; then
   launchctl bootout "$GUI/$LABEL" 2>/dev/null || true
-  rm -f "$PLIST"
-  rm -rf "$APP"
-  echo "uninstalled: agent stopped, plist + $APP removed"
+  rm -f "$PLIST" "$BIN_LOCAL"
+  echo "uninstalled: agent stopped, plist + $BIN_LOCAL removed"
   exit 0
 fi
 
@@ -46,32 +44,8 @@ swiftc -O -o "$NAME" main.swift tap.swift overlay.swift browser.swift favicon.sw
 codesign --force --sign "cobalt-dev" "$NAME"
 echo "signed (cobalt-dev)"
 
-# the daemon sends apple events to chromium ("control chrome") — tcc can only
-# show the automation prompt for a process with an app bundle identity; a bare
-# binary launched by launchd gets silently auto-denied (-1743, no popup).
-# so the signed binary lives inside a minimal .app bundle, and launchd runs it there.
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp -f "$NAME" "$APP/Contents/MacOS/$NAME"
-ICON_LINE=""
-if [[ -f "Elgiloy.icns" ]]; then
-  cp -f "Elgiloy.icns" "$APP/Contents/Resources/Elgiloy.icns"
-  ICON_LINE='<key>CFBundleIconFile</key><string>Elgiloy</string>'
-fi
-cat > "$APP/Contents/Info.plist" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
-  <key>CFBundleName</key><string>Elgiloy</string>
-  <key>CFBundleExecutable</key><string>$NAME</string>
-  <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleVersion</key><string>1.0</string>
-  $ICON_LINE
-  <key>LSUIElement</key><true/>
-</dict></plist>
-EOF
-codesign --force --sign "cobalt-dev" "$APP"
-echo "bundled: $APP"
+mkdir -p "$HOME/.local/bin"
+cp -f "$NAME" "$BIN_LOCAL"
 
 launchctl bootout "$GUI/$LABEL" 2>/dev/null || true
 cat > "$PLIST" <<EOF
@@ -79,7 +53,7 @@ cat > "$PLIST" <<EOF
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>$LABEL</string>
-  <key>ProgramArguments</key><array><string>$APP/Contents/MacOS/$NAME</string></array>
+  <key>ProgramArguments</key><array><string>$BIN_LOCAL</string></array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>StandardErrorPath</key><string>/tmp/$NAME.err</string>
@@ -87,35 +61,18 @@ cat > "$PLIST" <<EOF
 EOF
 launchctl bootstrap "$GUI" "$PLIST"
 
-# the daemon talks to chromium via apple events. normally the first send pops
-# a tcc automation prompt — but tccd suppresses that prompt for background
-# launchd agents and auto-denies (error -1743, no popup). so we pre-seed the
-# exact row the prompt would have written. requires full disk access on the
-# terminal running this script (reading/writing the system tcc db).
-TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
-if sqlite3 "$TCC_DB" "INSERT OR REPLACE INTO access
-  (service, client, client_type, auth_value, auth_reason, auth_version,
-   indirect_object_identifier_type, indirect_object_identifier, flags, last_modified)
-  VALUES ('kTCCServiceAppleEvents', '$BUNDLE_ID', 0, 2, 2, 1, 1,
-          'com.google.Chrome', 0, strftime('%s','now'));" 2>/dev/null; then
-  echo "automation: pre-granted (dev.cobalt.elgiloy -> com.google.Chrome)"
-else
-  cat <<'MSG'
-automation: could not pre-grant (tcc db not writable).
-
-the daemon needs to send apple events to chromium. if tab switching fails
-with -1743 in /tmp/elgiloy.err, grant full disk access to your terminal and
-re-run this script, or run manually:
-
-  sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, indirect_object_identifier, flags, last_modified) VALUES ('kTCCServiceAppleEvents', 'dev.cobalt.elgiloy', 0, 2, 2, 1, 1, 'com.google.Chrome', 0, strftime('%s','now'));"
-MSG
-fi
-
 echo
-echo "installed: $APP"
+echo "installed: $BIN_LOCAL"
 echo "launchd:   $LABEL — starts at login, restarts on crash, logs: /tmp/$NAME.err"
 echo
-echo "one-time setup:"
-echo "  system settings -> privacy & security -> accessibility -> add:"
-echo "     $APP"
-echo "  (automation is pre-granted by this script; a popup should never appear)"
+if ! pgrep -xq "$NAME"; then
+  echo "one-time setup:"
+  echo "  system settings -> privacy & security -> accessibility"
+  echo "  add: $BIN_LOCAL"
+  echo "  automation (tab switching): first ctrl+tab over chromium should pop an"
+  echo "  automation prompt -> allow. if no popup ever appears (macos suppresses"
+  echo "  it for launchd-spawned agents), run the binary once in the FOREGROUND"
+  echo "  from a terminal, press ctrl+tab, allow the prompt, ctrl+C, and launchd"
+  echo "  takes it from there:"
+  echo "    $BIN_LOCAL"
+fi
