@@ -84,6 +84,29 @@ permissions (one-time):
 1. **accessibility + input monitoring** — system settings → privacy & security → accessibility → add `~/.local/bin/elgiloy`
 2. **automation** — the first ctrl+tab over chromium should pop "elgiloy wants to control Chromium" → allow. if no popup ever appears (macos suppresses it for launchd-spawned agents), run the binary once in the foreground from a terminal, press ctrl+tab, allow, ctrl+C — launchd takes it from there. the grant is recorded against the binary's `cobalt-dev` signature, so it survives rebuilds.
 
+### the stale-denial trap (read if the prompt never appears)
+
+tcc matches permission records by **code signature**, and every binary this
+repo has ever installed shares the `cobalt-dev` identity — cobalt-switcher,
+cobalt-cycle, elgiloy, all of them. that means a stale **denial** left behind
+by any old version shadows the new install: tccd sees "already denied, same
+signature", skips the prompt entirely, and the daemon just gets silent
+`-1743` errors. you will never be asked. it will never work.
+
+signs you're in this hole: overlay appears but tabs never switch; log shows
+`OSAScriptErrorNumberKey = -1743`; no elgiloy row visible in the automation
+pane.
+
+the fix, scoped to this tool only:
+
+    tccutil reset AppleEvents dev.cobalt.elgiloy
+
+do NOT run a bare `tccutil reset AppleEvents` — that wipes every app's
+automation grants (raycast, screenshot tools, everything). `install.sh`
+already runs the scoped reset on every install, so fresh installs should
+never hit this trap; it's documented here for when you're debugging an
+old machine.
+
 logs: `tail -f /tmp/elgiloy.err`
 
 ## why mirror instead of intercept+commit

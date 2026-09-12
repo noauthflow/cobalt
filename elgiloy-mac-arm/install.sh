@@ -48,6 +48,15 @@ mkdir -p "$HOME/.local/bin"
 cp -f "$NAME" "$BIN_LOCAL"
 
 launchctl bootout "$GUI/$LABEL" 2>/dev/null || true
+
+# clear sticky apple-events state for OUR bundle id only. tcc matches records
+# by code signature — and every cobalt-signed binary shares 'cobalt-dev' — so
+# a stale DENIAL from any previous version shadows the new install and the
+# automation prompt never appears (silent -1743). this reset is scoped to the
+# bundle id and touches no other app's permissions. NEVER run a bare
+# `tccutil reset AppleEvents` — that wipes every app's automation grants.
+tccutil reset AppleEvents "$BUNDLE_ID" 2>/dev/null || true
+
 cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
