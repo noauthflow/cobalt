@@ -8,7 +8,6 @@ everything in this family is something **made from cobalt** — an alloy, an iso
     cobalt-60     the radioactive isotope    an invisible barrier you don't cross
     elgiloy       Co-Cr-Ni spring alloy      cycles forever without fatiguing
     stellite      Co-Cr wear-proof alloy     a coating that doesn't degrade
-    cobalt-theme  (name pending)             not yet worthy of an element
 
 ## the directories
 
@@ -17,8 +16,7 @@ everything in this family is something **made from cobalt** — an alloy, an iso
 | [cobalt-sync/](cobalt-sync/) | bookmarks + omnibox sync CLI |
 | [cobalt-60/](cobalt-60/) | cursor wall daemon |
 | [elgiloy/](elgiloy/) | tab overlay daemon |
-| [stellite/](stellite/) | new tab page + shorts blocker extension |
-| [cobalt-theme/](cobalt-theme/) | chrome theme boilerplate |
+| [stellite/](stellite/) | new tab page + shorts blocker extension + template theme |
 
 each folder is self-contained: source + its own `install.sh`. nothing here depends on anything else in the repo. see each folder's README for the full story.
 
@@ -35,7 +33,7 @@ needs swiftc. **Accessibility permission** — it rewrites mouse events system-w
 **elgiloy** — same pipeline: binary to `~/.local/bin/elgiloy`, agent `dev.cobalt.elgiloy`.
 needs swiftc. **Accessibility + Input Monitoring** (listens for ctrl+tab) and one **Automation** prompt on first use (queries chrome's tabs).
 
-**stellite / cobalt-theme** — no install script; chrome loads unpacked extensions by folder path:
-`chrome://extensions → developer mode → load unpacked → <folder>`. **no permissions** beyond chrome itself.
+**stellite** — no install script; chrome loads unpacked extensions by folder path:
+`chrome://extensions → developer mode → load unpacked → <folder>`. **no permissions** beyond chrome itself. (the `template-theme/` subfolder inside is a chrome theme, not part of the extension — load it separately.)
 
 notes: daemons run as launchd agents (start at login, restart on crash, logs at `/tmp/<name>.err`). signing with the optional `cobalt-dev` codesign identity keeps accessibility grants alive across rebuilds — see any daemon README.

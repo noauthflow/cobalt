@@ -47,7 +47,7 @@ hand-rolled material design 3 tokens/components — no libraries, no build)
 
 - MV3 rule: this manifest has chrome_url_overrides + content_scripts, so
   it can NOT also carry a theme key — chrome would silently reject it.
-  that's why the theme lives in a separate folder (cobalt-theme/).
+  that's why the theme lives in the template-theme/ subfolder here.
 
 ## install
 
