@@ -1,5 +1,7 @@
 import Foundation
 import OSAKit
+import ApplicationServices
+import Darwin
 
 // all browser contact happens here. every call runs an apple event against
 // the frontmost chromium-family app, targeted by bundle id (never by name —
@@ -24,6 +26,24 @@ enum Browser {
         let name = (app.localizedName ?? "").lowercased()
         let exec = app.executableURL?.lastPathComponent.lowercased() ?? ""
         return names.contains { name.contains($0) || exec.contains($0) }
+    }
+
+    // the pid that owns the frontmost on-screen APP window. launcher overlays
+    // (raycast, spotlight, alfred, …) float above chrome as panels — chrome
+    // may still be the "frontmost app", but the overlay's window is the
+    // frontmost window, at a floating level (raycast: layer 8). normal app
+    // windows are layer 0; system chrome (menu bar, status items, dock,
+    // notification banners) lives at layer ≥ 20 and never blocks. begin()
+    // refuses to open unless the top window belongs to the frontmost browser.
+    static func topAppWindowOwnerPID() -> pid_t? {
+        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+            as? [[String: Any]] ?? []
+        for w in list {
+            let layer = w[kCGWindowLayer as String] as? Int ?? 0
+            if layer >= 20 { continue }   // skip system chrome (menu bar, dock, …)
+            return w[kCGWindowOwnerPID as String] as? pid_t
+        }
+        return nil
     }
 
     // run a precompiled script synchronously, return its string result
@@ -121,7 +141,8 @@ enum Browser {
         }
     }
 
-    // the one write command we own for esc: hover a row, press esc, that tab dies
+    // the one write command we own for w: close the SELECTED tab while the
+    // overlay is open
     static func closeTab(bundleId: String, n: Int) {
         let script = OSAScript(source: "tell application id \"\(bundleId)\" to close tab \(n) of front window")
         _ = run(script)

@@ -29,6 +29,8 @@ final class Overlay {
         panel.backgroundColor = .clear
         panel.hasShadow = true   // system shadow follows the glass shape now
         panel.hidesOnDeactivate = false
+        panel.ignoresMouseEvents = true   // fully click-through: the mouse can't
+                                          // interact with the overlay at all
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
 
         // macOS 26+ Liquid Glass: native rounded glass, no layer masking.
@@ -68,7 +70,7 @@ final class Overlay {
         lastKey = ""
     }
 
-    func render(tabs: [Browser.Tab], sel: Int, hover: Int?) {
+    func render(tabs: [Browser.Tab], sel: Int) {
         let count = min(tabs.count, Overlay.MAX_ROWS)
         let start = tabs.isEmpty ? 0 : max(0, min(sel - Overlay.MAX_ROWS / 2, tabs.count - Overlay.MAX_ROWS))
         let visible = tabs.isEmpty ? [] : Array(tabs[start..<start + count])
@@ -98,8 +100,6 @@ final class Overlay {
             for (i, tab) in visible.enumerated() {
                 let tabIndex = start + i
                 let row = RowView(frame: rowFrame(i, height: newH), tab: tab)
-                row.onEnter = { [weak self] in App.shared.hover = tabIndex; self?.restyle(hover: tabIndex) }
-                row.onExit  = { [weak self] in App.shared.hover = nil;    self?.restyle(hover: nil) }
                 content.addSubview(row)
                 rows.append((row, tabIndex))
             }
@@ -107,21 +107,14 @@ final class Overlay {
         currentStart = start
         currentCount = visible.count
 
-        restyle(hover: hover)
         placeHighlight(index: sel, animate: false)
-
-        // mouse already sitting where the panel appeared → pick up hover instantly
-        if let hit = hitTest(NSEvent.mouseLocation) {
-            App.shared.hover = hit
-            restyle(hover: hit)
-        }
     }
 
     // per-press fast path: slide the highlight layer. if the selection left
     // the visible window, fall back to a full render (window scrolls).
     func moveHighlight(to sel: Int, tabs: [Browser.Tab]) {
         guard sel >= currentStart, sel < currentStart + currentCount else {
-            render(tabs: tabs, sel: sel, hover: App.shared.hover)
+            render(tabs: tabs, sel: sel)
             return
         }
         placeHighlight(index: sel, animate: true)
@@ -133,37 +126,17 @@ final class Overlay {
     }
 
     private func placeHighlight(index sel: Int, animate: Bool) {
-        guard let (_, tabIndex) = rows.first(where: { $0.1 == sel }) else { return }
         CATransaction.begin()
         CATransaction.setAnimationDuration(animate ? 0.05 : 0)
         highlight.frame = rows.first { $0.1 == sel }!.0.frame
         CATransaction.commit()
-        _ = tabIndex
-    }
-
-    private func hitTest(_ screenPoint: NSPoint) -> Int? {
-        guard panel.isVisible else { return nil }
-        let local = panel.convertPoint(fromScreen: screenPoint)
-        for (row, tabIndex) in rows where row.frame.contains(local) { return tabIndex }
-        return nil
-    }
-
-    // hover styling only — selection lives in the highlight layer
-    private func restyle(hover: Int?) {
-        for (row, tabIndex) in rows {
-            row.setHovered(tabIndex == hover)
-        }
     }
 }
 
 // one row: favicon (or colored letter badge fallback) + title + right-aligned
-// domain. hover = subtle wash. no selection styling — the sliding highlight
-// layer draws that.
+// domain. no hover styling, no click handling — the mouse has zero effect;
+// only the keyboard moves the highlight.
 final class RowView: NSView {
-    var onEnter: (() -> Void)?
-    var onExit: (() -> Void)?
-    private var ta: NSTrackingArea?
-
     private let badge = NSTextField(labelWithString: "")
     private let tile = NSView()
     private let iconView = NSImageView()
@@ -233,13 +206,6 @@ final class RowView: NSView {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    func setHovered(_ hovered: Bool) {
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        layer?.backgroundColor = hovered ? NSColor.white.withAlphaComponent(0.08).cgColor : NSColor.clear.cgColor
-        CATransaction.commit()
-    }
-
     private func applyIcon(_ img: NSImage) {
         iconView.image = img
         iconView.isHidden = false
@@ -253,17 +219,4 @@ final class RowView: NSView {
         let hue = CGFloat(hash % 360) / 360.0
         return NSColor(hue: hue, saturation: 0.55, brightness: 0.62, alpha: 1)
     }
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        if let ta { removeTrackingArea(ta) }
-        let area = NSTrackingArea(rect: bounds,
-                                  options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
-                                  owner: self, userInfo: nil)
-        addTrackingArea(area)
-        ta = area
-    }
-
-    override func mouseEntered(with event: NSEvent) { onEnter?() }
-    override func mouseExited(with event: NSEvent) { onExit?() }
 }

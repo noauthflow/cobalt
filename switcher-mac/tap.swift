@@ -13,16 +13,18 @@ enum Tap {
         let callback: CGEventTapCallBack = { _, type, event, _ in
             let ctrl = event.flags.contains(.maskControl)
             let cmd = event.flags.contains(.maskCommand)
+            let opt = event.flags.contains(.maskAlternate)
             switch type {
             case .flagsChanged:
-                if !ctrl && !cmd {
-                    // ctrl AND cmd released → session over → hide. nothing to
-                    // commit: every advance already switched chrome in real
-                    // time. (either modifier can carry a session, so only
-                    // when BOTH are gone is the session over.)
+                if !ctrl && !cmd && !opt {
+                    // ctrl, cmd AND option all released → session over →
+                    // hide. nothing to commit: every advance already
+                    // switched chrome in real time. (any of the three can
+                    // carry a session, so only when NONE are down is it
+                    // over.)
                     App.shared.end()
-                } else if event.flags.contains(.maskShift), !App.shared.open {
-                    // ctrl+shift or cmd+shift held together, overlay not
+                } else if event.flags.contains(.maskShift), ctrl || opt, !App.shared.open {
+                    // ctrl+shift or option+shift held together, overlay not
                     // open, modifier still down → just SHOW the overlay. no
                     // cycling, no key press needed — the modifier combo
                     // itself is the trigger. (a tab / bracket tapped
@@ -36,7 +38,7 @@ enum Tap {
 
             case .keyDown:
                 let code = event.getIntegerValueField(.keyboardEventKeycode)
-                if code == 48, ctrl {              // tab — ours only while we own the cycle
+                if code == 48, ctrl || opt {        // tab — ours only while we own the cycle
                     let front = NSWorkspace.shared.frontmostApplication
                     let chromium = front.map { Browser.isChromiumFamily($0) } ?? false
                     if App.shared.open || chromium {

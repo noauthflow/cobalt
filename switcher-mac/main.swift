@@ -14,7 +14,6 @@ final class App: NSObject {
     var tabs: [Browser.Tab] = []
     var sel = 0
     var open = false
-    var hover: Int?
     var listBusy = false
     private var listPending = false   // a refresh arrived while one was in flight → run another when it lands
     private var movedYet = false
@@ -54,15 +53,20 @@ final class App: NSObject {
         guard let app = NSWorkspace.shared.frontmostApplication,
               Browser.isChromiumFamily(app),
               let bid = app.bundleIdentifier else { return }
+        // launcher overlays (raycast, spotlight, …) float above chrome as
+        // panels — the workspace may still call chrome "frontmost", but the
+        // overlay's window is the frontmost window. if the top app-level
+        // window belongs to anyone but the browser, the user is mid-launcher
+        // and ctrl+shift / ctrl+tab must do nothing.
+        if let top = Browser.topAppWindowOwnerPID(), top != app.processIdentifier { return }
         bundleId = bid
         guard !open else { return }
         open = true
-        hover = nil
         listBusy = false
         movedYet = false
         tabs = bid == cacheBundleId ? cache : []
         sel = cacheSel < tabs.count ? cacheSel : 0
-        overlay.render(tabs: tabs, sel: sel, hover: nil)
+        overlay.render(tabs: tabs, sel: sel)
         overlay.show()
         startWatchdog()
         refreshList()   // one query on open; corrects sel if chrome moved since last time
@@ -85,26 +89,19 @@ final class App: NSObject {
     func end() {
         guard open else { return }
         open = false
-        hover = nil
         stopWatchdog()
         cacheSel = sel
         overlay.hide()
         refreshList()   // prime the cache while idle — the NEXT open is instant
     }
 
-    // esc: over a row → close that tab (overlay stays open). otherwise →
-    // cancel (nothing changed — chrome was never touched).
+    // esc: cancel (nothing changed — chrome was never touched).
     func escPressed() {
         guard open else { return }
         stopWatchdog()
-        if let h = hover, h < tabs.count {
-            closeRow(h)
-        } else {
-            open = false
-            hover = nil
-            overlay.hide()
-            refreshList()
-        }
+        open = false
+        overlay.hide()
+        refreshList()
     }
 
     // w while the overlay is open: close the SELECTED tab — keyboard path,
@@ -132,18 +129,18 @@ final class App: NSObject {
         } else if i < sel {
             sel -= 1
         }
-        hover = nil
         if tabs.isEmpty {
             open = false
             overlay.hide()
         } else {
-            overlay.render(tabs: tabs, sel: sel, hover: nil)
+            overlay.render(tabs: tabs, sel: sel)
         }
         refreshList()   // confirm against chrome — renumbers & titles settle
     }
 
     // SAFETY NET — the tap is normally the only thing that ends a session
-    // (ctrl or cmd release via flagsChanged). but macOS silently disables event
+    // (ctrl/cmd/option release via flagsChanged). but macOS silently disables
+    // event taps
     // taps
     // when their callback times out, and flagsChanged events can be missed:
     // either way the overlay would sit on screen forever — frozen, with no
@@ -157,6 +154,7 @@ final class App: NSObject {
             guard let self, self.open else { return }
             let flags = CGEventSource.flagsState(.combinedSessionState)
             let modsDown = flags.contains(.maskControl) || flags.contains(.maskCommand)
+                || flags.contains(.maskAlternate)
             let front = NSWorkspace.shared.frontmostApplication
             if !modsDown || front?.bundleIdentifier != self.bundleId {
                 self.end()
@@ -219,7 +217,7 @@ final class App: NSObject {
                         } else if let anchor, let i = tabs.firstIndex(where: { $0.n == anchor }) {
                             self.sel = i
                         }
-                        self.overlay.render(tabs: self.tabs, sel: self.sel, hover: self.hover)
+                        self.overlay.render(tabs: self.tabs, sel: self.sel)
                     }
                 }
             }

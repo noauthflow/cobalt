@@ -1,8 +1,8 @@
 # cobalt tab switcher (macOS)
 
 ctrl+tab / ctrl+shift → floating overlay lists your tabs, highlight mirrors
-chrome's real active tab, release ctrl → overlay collapses. hover a row + esc
-closes that tab. the panel is vertically centered and stays centered when it
+chrome's real active tab, release ctrl → overlay collapses. the mouse has no
+effect on the overlay at all — it's click-through and keyboard-only. the panel is vertically centered and stays centered when it
 grows/shrinks.
 
 tab lists are always warm: replies land in the cache even when they arrive
@@ -26,26 +26,24 @@ everything else passes through untouched.
 
 ```
 ctrl+shift      overlay appears, anchored on chrome's active tab — nothing
-                cycles. tap tab afterwards to move the highlight.
-                (cmd+shift does exactly the same thing.)
-cmd+shift       same as ctrl+shift: overlay appears, nothing cycles. tap
-                [ / ] afterwards to move the highlight.
+option+shift    cycles. tap tab afterwards to move the highlight.
+                (cmd+shift alone does NOT open the overlay — cmd is only
+                the bracket-cycle modifier.)
 ctrl+tab        overlay appears AND cycles to the next tab — the first press
-                is a real switch, not just "show me the list"
-ctrl+shift+tab  same, but cycles backwards
+option+tab      is a real switch, not just "show me the list"
 cmd+shift+[     same as ctrl+shift+tab: overlay appears AND cycles backwards
-                — the first press is a real switch. swallowed so chrome never
-                double-switches.
-cmd+shift+]     same as ctrl+tab: overlay appears AND cycles forward.
+ctrl+shift+tab  same, but cycles backwards
+cmd+shift+[     overlay appears AND cycles backwards — the first press is a
+                real switch. swallowed so chrome never double-switches.
+cmd+shift+]     overlay appears AND cycles forward.
 [/] while open  with cmd still held, bare [ / ] keep cycling (shift can be
-                released). ctrl+tab / cmd+[ / cmd+] all drive the same
-                highlight.
+                released). ctrl+tab / option+tab / cmd+[ / cmd+] all drive the
+                same highlight.
 ctrl+tab …      keep tapping — keeps cycling, highlight follows
-release ctrl    overlay collapses (chrome already settled the tab). if the
-and/or cmd      session was opened via cmd+shift, release cmd — the overlay
-                ends when BOTH modifiers are up.
-esc             over a row → close that tab (overlay stays open); not hovering
-                → cancel overlay
+release ctrl    overlay collapses (chrome already settled the tab). the
+and/or cmd      session can be carried by ctrl, cmd or option — it ends when
+and/or option   ALL of them are up.
+esc             cancel the overlay — nothing changed, chrome was never touched
 w               close the SELECTED tab — keyboard path, overlay stays open;
                 selection lands on the row above the closed one every time
 ```
@@ -68,7 +66,7 @@ the overlay must never get stuck on screen, no matter what:
 | file | job |
 |---|---|
 | `tap.swift` | CGEventTap. passes everything through except esc-while-open and the bracket cycle. watches ctrl/cmd release. |
-| `main.swift` | state (`open`/`tabs`/`sel`/`hover`) + the 50ms mirror poll |
+| `main.swift` | state (`open`/`tabs`/`sel`) + the 50ms mirror poll |
 | `overlay.swift` | NSPanel, rows rebuilt from scratch every render (no in-place mutation) |
 | `browser.swift` | apple events: list tabs / active index / close tab (by bundle id, never by name) |
 
