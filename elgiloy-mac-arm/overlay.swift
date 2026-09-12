@@ -10,11 +10,16 @@ final class Overlay {
     static let MARGIN: CGFloat = 8
     static let GAP: CGFloat = 2
     static let MAX_ROWS = 12
+    // how many rows stay pinned beyond the selection before the window
+    // scrolls — the selection rides 3 rows from the edge, then the list
+    // advances one row per press (infinite scroll, no pagination jump)
+    static let SCROLL_OFF = 3
 
     private let panel: NSPanel
     private let glass: NSGlassEffectView
     private let content: NSView
     private let highlight = CALayer()
+    private let scrollbar = CALayer()   // thin position thumb, right edge
     private var rows: [(RowView, Int)] = []
     private var lastKey = ""
     private var currentStart = 0
@@ -54,6 +59,10 @@ final class Overlay {
 
         highlight.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.85).cgColor
         highlight.cornerRadius = 8
+
+        scrollbar.backgroundColor = NSColor.white.withAlphaComponent(0.35).cgColor
+        scrollbar.cornerRadius = 2.5
+        scrollbar.isHidden = true
     }
 
     func show() {
@@ -70,9 +79,23 @@ final class Overlay {
         lastKey = ""
     }
 
-    func render(tabs: [Browser.Tab], sel: Int) {
+    // full rebuild. `center` (fresh open) centers the window on sel; otherwise
+    // the window keeps its position and only moves when sel comes within
+    // SCROLL_OFF rows of an edge — one row per press, no pagination jump.
+    // ALWAYS yields a window containing sel.
+    func render(tabs: [Browser.Tab], sel: Int, center: Bool = true) {
         let count = min(tabs.count, Overlay.MAX_ROWS)
-        let start = tabs.isEmpty ? 0 : max(0, min(sel - Overlay.MAX_ROWS / 2, tabs.count - Overlay.MAX_ROWS))
+        var start = center
+            ? (tabs.isEmpty ? 0 : sel - Overlay.MAX_ROWS / 2)
+            : currentStart
+        // scroll-off margin: pin SCROLL_OFF rows beyond the selection
+        if sel > start + count - 1 - Overlay.SCROLL_OFF {
+            start = sel - (count - 1 - Overlay.SCROLL_OFF)   // 3 rows below
+        }
+        if sel < start + Overlay.SCROLL_OFF {
+            start = sel - Overlay.SCROLL_OFF                 // 3 rows above
+        }
+        start = max(0, min(start, max(0, tabs.count - count)))
         let visible = tabs.isEmpty ? [] : Array(tabs[start..<start + count])
 
         // rebuild only when the visible tab set actually changed
@@ -103,18 +126,47 @@ final class Overlay {
                 content.addSubview(row)
                 rows.append((row, tabIndex))
             }
+
+            // the thumb rides ON TOP of the rows — add it after them so it
+            // survives every rebuild as the topmost layer
+            if content.layer?.sublayers?.contains(scrollbar) != true {
+                content.layer?.addSublayer(scrollbar)
+            }
         }
         currentStart = start
         currentCount = visible.count
 
-        placeHighlight(index: sel, animate: false)
+        placeHighlight(index: sel, animate: !center)
+        updateScrollbar(total: tabs.count, count: count)
     }
 
-    // per-press fast path: slide the highlight layer. if the selection left
-    // the visible window, fall back to a full render (window scrolls).
+    // position thumb: proportional to where the visible window sits inside
+    // the full tab list. hidden entirely when everything fits on screen.
+    private func updateScrollbar(total: Int, count: Int) {
+        guard total > Overlay.MAX_ROWS, count > 0, currentCount > 0 else {
+            scrollbar.isHidden = true
+            return
+        }
+        scrollbar.isHidden = false
+        let trackH = panel.frame.height - Overlay.MARGIN * 2
+        let thumbH = max(24, trackH * CGFloat(count) / CGFloat(total))
+        let frac = CGFloat(currentStart) / CGFloat(max(1, total - count))
+        let y = Overlay.MARGIN + (trackH - thumbH) * (1 - frac)   // flipped: start=0 → top
+        CATransaction.begin()
+        CATransaction.setAnimationDuration(0.05)
+        scrollbar.frame = NSRect(x: Overlay.W - 7, y: y, width: 5, height: thumbH)
+        CATransaction.commit()
+    }
+
+    // per-press fast path: slide the highlight layer. only when sel is fully
+    // interior (SCROLL_OFF margin satisfied on both edges) — anything else
+    // goes through render, which owns the window math.
     func moveHighlight(to sel: Int, tabs: [Browser.Tab]) {
-        guard sel >= currentStart, sel < currentStart + currentCount else {
-            render(tabs: tabs, sel: sel)
+        let count = min(tabs.count, Overlay.MAX_ROWS)
+        let interior = sel >= currentStart + Overlay.SCROLL_OFF
+            && sel <= currentStart + count - 1 - Overlay.SCROLL_OFF
+        guard interior else {
+            render(tabs: tabs, sel: sel, center: false)
             return
         }
         placeHighlight(index: sel, animate: true)
@@ -126,9 +178,10 @@ final class Overlay {
     }
 
     private func placeHighlight(index sel: Int, animate: Bool) {
+        guard let row = rows.first(where: { $0.1 == sel }) else { return }
         CATransaction.begin()
         CATransaction.setAnimationDuration(animate ? 0.05 : 0)
-        highlight.frame = rows.first { $0.1 == sel }!.0.frame
+        highlight.frame = row.0.frame
         CATransaction.commit()
     }
 }

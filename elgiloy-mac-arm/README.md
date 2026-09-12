@@ -20,9 +20,8 @@ event tap), shows an overlay, and polls chrome every 50ms to highlight
 whatever tab chrome actually switched to. on ctrl release it hides. there is
 no commit step because nothing was ever changed by us.
 
-the only key ever intercepted (swallowed) is **esc while the overlay is
-open** — and only so chrome doesn't also treat it as "stop loading".
-everything else passes through untouched.
+the only keys ever intercepted (swallowed) are **esc, w and 1–0 while the
+overlay is open** — everything else passes through untouched.
 
 ```
 ctrl+shift      overlay appears, anchored on chrome's active tab — nothing
@@ -46,6 +45,9 @@ and/or option   ALL of them are up.
 esc             cancel the overlay — nothing changed, chrome was never touched
 w               close the SELECTED tab — keyboard path, overlay stays open;
                 selection lands on the row above the closed one every time
+1 … 9, 0        while open: jump straight to tab 1 … 10 (0 = tab 10) — chrome
+                switches in real time and the overlay stays up so jumps can
+                chain
 ```
 
 ## safety nets

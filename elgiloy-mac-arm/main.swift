@@ -95,6 +95,19 @@ final class App: NSObject {
         refreshList()   // prime the cache while idle — the NEXT open is instant
     }
 
+    // 1-0 while the overlay is open: jump straight to that tab. same path
+    // as advance() — highlight snaps instantly (local), chrome switches in
+    // real time — and the session stays open so jumps can chain. 0 = tab 10.
+    func jump(to n: Int) {
+        guard open, !tabs.isEmpty, tabs.indices.contains(n - 1) else { return }
+        movedYet = true
+        sel = n - 1
+        overlay.moveHighlight(to: sel, tabs: tabs)
+        if let bid = bundleId {
+            Browser.activateAsync(bundleId: bid, n: tabs[sel].n)
+        }
+    }
+
     // esc: cancel (nothing changed — chrome was never touched).
     func escPressed() {
         guard open else { return }
@@ -133,7 +146,7 @@ final class App: NSObject {
             open = false
             overlay.hide()
         } else {
-            overlay.render(tabs: tabs, sel: sel)
+            overlay.render(tabs: tabs, sel: sel, center: false)
         }
         refreshList()   // confirm against chrome — renumbers & titles settle
     }
@@ -217,7 +230,7 @@ final class App: NSObject {
                         } else if let anchor, let i = tabs.firstIndex(where: { $0.n == anchor }) {
                             self.sel = i
                         }
-                        self.overlay.render(tabs: self.tabs, sel: self.sel)
+                        self.overlay.render(tabs: self.tabs, sel: self.sel, center: false)
                     }
                 }
             }

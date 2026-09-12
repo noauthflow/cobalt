@@ -7,6 +7,7 @@ cd "$(dirname "$0")"
 
 NAME="elgiloy"
 LABEL="dev.cobalt.elgiloy"
+BUNDLE_ID="$LABEL"   # tccutil wants a bundle identifier; ours == the label
 BIN_LOCAL="$HOME/.local/bin/$NAME"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 GUI="gui/$(id -u)"

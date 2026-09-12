@@ -8,6 +8,12 @@ import ApplicationServices
 enum Tap {
     static var tap: CFMachPort?
 
+    // US-ANSI number-row keycodes → digit. keycode-based so it works no
+    // matter what ctrl does to the generated character.
+    private static let digitKeycodes: [Int64: Int] = [
+        18: 1, 19: 2, 20: 3, 21: 4, 23: 5, 22: 6, 26: 7, 28: 8, 25: 9, 29: 0,
+    ]
+
     static func install() {
         let mask = (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.flagsChanged.rawValue)
         let callback: CGEventTapCallBack = { _, type, event, _ in
@@ -83,6 +89,13 @@ enum Tap {
                 }
                 if code == 13, App.shared.open {   // w — close the selected tab
                     App.shared.closeSelected()
+                    return nil
+                }
+                if App.shared.open, let n = Self.digitKeycodes[code] {
+                    // 1-9 → tab 1-9, 0 → tab 10 — direct jump, same real-time
+                    // switch path as ctrl+tab. swallowed so the browser never
+                    // sees ctrl+<digit> shortcuts mid-session.
+                    App.shared.jump(to: n == 0 ? 10 : n)
                     return nil
                 }
                 if code == 53, App.shared.open {   // esc — the ONE key we swallow
