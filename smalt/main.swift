@@ -1,73 +1,97 @@
 import AppKit
 import QuartzCore
+import ApplicationServices
+import CoreWLAN
+import IOKit
+import IOKit.ps
 
 // smalt — ground cobalt glass.
 //
 // for centuries, if you wanted a strip of cobalt blue across something —
 // stained glass, porcelain, delft tile — you ground cobalt glass into
-// powder and laid it down. smalt is that strip: a pane of cobalt glass
-// laid across the top of the screen.
+// powder and laid it down. smalt is that glass — a floating cobalt pill
+// docked at the right edge of the screen, dead center, nothing in it.
 //
-// v0 scope is deliberately tiny. no widgets, no config — just the strip
-// and its behavior:
+//   hidden by default. the cursor entering the right edge, level with the
+//   pill, summons it: it springs out with an overshoot and settles.
+//   dropping left of the pill dismisses it again.
 //
-//   hidden everywhere by default. the cursor entering the top edge —
-//   desktop or fullscreen — summons it: on the desktop it slides out from
-//   under the native menu bar; in fullscreen it slides from behind the top
-//   edge. dropping below the strip dismisses it again.
+//   the pill is deliberately empty for now — a pane of glass first,
+//   contents later.
 //   mission control    off the stage — it's not part of the expose grid
 //
 // zero permissions: the reveal is a global mouse monitor, not an event
 // tap. nothing is intercepted, nothing is rewritten, nothing is polled.
 
-let BAR_HEIGHT: CGFloat = 30
-// the summon zone: cursor within this distance of the strip's top edge.
-// desktop: the strip hides under the menu bar, so this reads as "12px below
-// the menu bar" — below cobalt-60's 5px wall clamp, so the hover always
-// lands, wall relaxed or not. fullscreen: 12px from the top edge.
-let REVEAL_HEIGHT: CGFloat = 12
-let HIDE_MARGIN: CGFloat = 6     // cursor must drop this far below the strip before it slides away
-let SLIDE_DURATION: TimeInterval = 0.22
+let PILL_WIDTH: CGFloat = 84
+let PILL_HEIGHT: CGFloat = 220
+let PILL_INSET: CGFloat = 6      // gap between pill and the right screen edge
+let PILL_RADIUS: CGFloat = 14
+let REVEAL_WIDTH: CGFloat = 12   // summon zone: cursor within this of the right edge
+let HIDE_MARGIN: CGFloat = 6     // cursor must drop this far left of the pill before it springs away
+// the spring: fast pop past the dock position, then a short settle back.
+let POP_DURATION: TimeInterval = 0.16
+let OVERSHOOT: CGFloat = 7
+let HIDE_DURATION: TimeInterval = 0.18
 
-// MARK: - the strip
+// MARK: - the pill
 
 final class StripView: NSView {
+    // the glass: soft violet (D0BCFF), rounded, one subtle border — nothing else
     override func draw(_ dirtyRect: NSRect) {
-        // the glass: soft violet (D0BCFF), nothing more
+        let path = NSBezierPath(roundedRect: bounds, xRadius: PILL_RADIUS, yRadius: PILL_RADIUS)
         NSColor(srgbRed: 0xD0/255.0, green: 0xBC/255.0, blue: 0xFF/255.0, alpha: 1).setFill()
-        bounds.fill()
+        path.fill()
+        NSColor(srgbRed: 0.13, green: 0.06, blue: 0.24, alpha: 0.15).setStroke()
+        path.lineWidth = 1
+        path.stroke()
     }
 }
 
 // MARK: - state
 
-var inFullscreenMode = false   // a fullscreen app owns the main display
-var stripVisible = false       // hidden until the cursor hovers the top edge
+var stripVisible = false       // hidden until the cursor hovers the right edge
 var evalItem: DispatchWorkItem?
 
 func mainScreen() -> NSScreen? {
     NSScreen.screens.first { $0.frame.origin.y == 0 } ?? NSScreen.main
 }
 
-// where the strip sits. three anchors:
-//   fullscreen, visible   the very top edge — the native bar is gone, the glass takes its place
-//   desktop, visible      tucked directly under the native menu bar
-//   hidden (any mode)     fully above the screen — on the desktop that's behind the menu bar's airspace, never painted over anything
-func stripFrame(visible: Bool) -> NSRect {
+// where the pill sits: docked against the right edge, vertically centered.
+// hidden = fully off-screen right.
+func pillFrame(visible: Bool) -> NSRect {
     guard let screen = mainScreen() else { return .zero }
     let f = screen.frame
-    let anchor = inFullscreenMode ? f.maxY : screen.visibleFrame.maxY
-    let y = visible ? anchor - BAR_HEIGHT : f.maxY + 2
-    return NSRect(x: f.minX, y: y, width: f.width, height: BAR_HEIGHT)
+    let x = visible ? f.maxX - PILL_WIDTH - PILL_INSET : f.maxX + 4
+    let y = f.minY + (f.height - PILL_HEIGHT) / 2
+    return NSRect(x: x, y: y, width: PILL_WIDTH, height: PILL_HEIGHT)
 }
 
+// springy: pop out fast with a small overshoot, then settle back into the
+// dock. hide is a plain ease-in retract.
 func refreshStrip(animate: Bool) {
-    let target = stripFrame(visible: stripVisible)
+    let target = pillFrame(visible: stripVisible)
     if animate {
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = SLIDE_DURATION
-            ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            strip.animator().setFrame(target, display: true)
+        if stripVisible {
+            var overshoot = target
+            overshoot.origin.x -= OVERSHOOT
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = POP_DURATION
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                strip.animator().setFrame(overshoot, display: true)
+            }, completionHandler: {
+                NSAnimationContext.runAnimationGroup { ctx in
+                    ctx.duration = POP_DURATION
+                    ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                    strip.animator().setFrame(target, display: true)
+                }
+            })
+        } else {
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = HIDE_DURATION
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
+                strip.animator().setFrame(target, display: true)
+            }
         }
     } else {
         strip.setFrame(target, display: true)
@@ -80,17 +104,23 @@ func applyVisibility(_ desired: Bool, animate: Bool = true) {
     refreshStrip(animate: animate && changed)
 }
 
-// current cursor position, as distance from the very top of the main display.
-// CGEvent coordinates are top-left origin.
+// current cursor position. CGEvent coordinates are top-left origin.
 func cursorYFromTop() -> CGFloat {
     CGEvent(source: nil)?.location.y ?? .infinity
 }
+func cursorXFromRight() -> CGFloat {
+    guard let loc = CGEvent(source: nil)?.location, let screen = mainScreen() else { return .infinity }
+    return screen.frame.width - loc.x
+}
 
-// distance from the top of the screen to the strip's visible top edge
-// (fullscreen: 0 — no menu bar. desktop: the menu bar's height.)
-func barTopFromTop() -> CGFloat {
-    guard let screen = mainScreen() else { return 0 }
-    return inFullscreenMode ? 0 : screen.frame.height - screen.visibleFrame.maxY
+// the pill's vertical band, as distances from the top of the display.
+// the summon only fires when the cursor is level with the pill — hovering
+// the right edge above or below it does nothing.
+func pillBandFromTop() -> (top: CGFloat, bottom: CGFloat) {
+    guard let screen = mainScreen() else { return (0, 0) }
+    let f = screen.frame
+    let top = (f.height + PILL_HEIGHT) / 2
+    return (top, top + PILL_HEIGHT)
 }
 
 // MARK: - fullscreen + mission control detection
@@ -132,15 +162,15 @@ func missionControlActive() -> Bool {
 // MARK: - evaluation
 
 func updateStrip() {
-    let mc = missionControlActive()
-    inFullscreenMode = !mc && mainDisplayFullscreen()
-
-    if mc {
+    if missionControlActive() {
         applyVisibility(false)                                 // mission control: off the stage
     } else {
-        // hover decides, everywhere. the strip has no "default" state —
-        // visible iff the cursor is in the summon zone.
-        applyVisibility(cursorYFromTop() <= barTopFromTop() + REVEAL_HEIGHT)
+        // hover decides: visible iff the cursor is in the summon zone —
+        // within 12px of the right edge, level with the pill.
+        let (top, bottom) = pillBandFromTop()
+        let y = cursorYFromTop()
+        let inBand = y >= top - 26 && y <= bottom + 26
+        applyVisibility(cursorXFromRight() <= REVEAL_WIDTH && inBand)
     }
 }
 
@@ -152,25 +182,21 @@ func scheduleUpdate() {
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: item)
 }
 
-// MARK: - the strip (window)
+// MARK: - the pill (window)
 
 let strip: NSWindow = {
-    let win = NSWindow(contentRect: stripFrame(visible: false), styleMask: [.borderless], backing: .buffered, defer: false)
+    let win = NSPanel(contentRect: pillFrame(visible: false), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
     win.backgroundColor = .clear
-    win.isOpaque = true
-    win.hasShadow = false
-    win.ignoresMouseEvents = true   // v0: the glass is look-only; widgets flip this in v1
-    // level 21 — same lesson cobalt-60 already learned the hard way: MUST be
-    // ≥ 20, because elgiloy's begin() guard only ignores the topmost window
-    // when it's system chrome (layer ≥ 20). a floating-level (3) strip reads
-    // as "a launcher overlay is open" and elgiloy swallows ctrl+tab entirely.
-    // 21 keeps the design constraint: above every app window and fullscreen
-    // windows, still below the menu bar (24) so the slide never paints over
-    // the native bar, and below elgiloy's overlay (25).
+    win.isOpaque = false             // rounded corners composite cleanly
+    win.hasShadow = true             // a floating pill wants a shadow
+    win.ignoresMouseEvents = false   // clickable for whatever lands in it later
+    // level 21 — above every app window and fullscreen windows, still below
+    // the native menu bar (24). the pill lives mid-right-edge, nowhere near
+    // the native bar, so there's nothing to fight with.
     win.level = NSWindow.Level(rawValue: 21)
     // every desktop space, pinned to the screen, present over fullscreen apps
     win.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
-    win.contentView = StripView(frame: NSRect(origin: .zero, size: stripFrame(visible: false).size))
+    win.contentView = StripView(frame: NSRect(origin: .zero, size: pillFrame(visible: false).size))
     return win
 }()
 
@@ -186,16 +212,17 @@ func runDaemon() -> Never {
     strip.orderFrontRegardless()
 
     // the summon. a global mouse monitor — not an event tap — so there is
-    // nothing to intercept and nothing to grant. the strip ignores mouse
-    // events, so every move lands in some other app and passes through here.
-    // cursor into the summon zone → slide down; below the strip → slide away.
-    // hysteresis between the two lines means edge jitter can't flicker it.
+    // nothing to intercept and nothing to grant. the cursor entering the
+    // right edge, level with the pill, springs it out; dropping left of the
+    // pill (or past its band) springs it away. hysteresis between the two
+    // lines means edge jitter can't flicker it.
     NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged, .otherMouseDragged]) { _ in
+        let (top, bottom) = pillBandFromTop()
         let y = cursorYFromTop()
-        let top = barTopFromTop()
-        if y <= top + REVEAL_HEIGHT {
+        let xr = cursorXFromRight()
+        if xr <= REVEAL_WIDTH, y >= top - 26, y <= bottom + 26 {
             applyVisibility(true)
-        } else if y > top + BAR_HEIGHT + HIDE_MARGIN {
+        } else if xr > PILL_WIDTH + HIDE_MARGIN || y > bottom + 26 {
             applyVisibility(false)
         }
     }
@@ -283,14 +310,14 @@ func cmdStatus() {
     print("process:  \(running ? "running" : "not running")")
 
     if running {
-        print("strip:    up — \(Int(BAR_HEIGHT))px of cobalt glass at the top (summon zone: \(Int(REVEAL_HEIGHT))px)")
+        print("pill:     up — empty cobalt glass, mid-right edge (summon zone: \(Int(REVEAL_WIDTH))px)")
     } else if loaded {
-        print("strip:    down — launchd is retrying; check \(errLog)")
+        print("pill:     down — launchd is retrying; check \(errLog)")
         if let tail = try? String(contentsOfFile: errLog, encoding: .utf8).suffix(200) {
             print("log:      \(tail.trimmingCharacters(in: .whitespacesAndNewlines))")
         }
     } else {
-        print("strip:    off (starts again at next login)")
+        print("pill:     off (starts again at next login)")
     }
 }
 
@@ -305,7 +332,7 @@ default:
     print("""
     usage: smalt [command]
 
-      (none)          daemon mode — the strip (what launchd runs)
+      (none)          daemon mode — the pill (what launchd runs)
       on, enable      start the daemon
       off, disable    stop the daemon (starts again at next login)
       status          installed / loaded / running
