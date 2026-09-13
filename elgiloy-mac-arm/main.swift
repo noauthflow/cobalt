@@ -84,6 +84,7 @@ final class App: NSObject {
         // and ctrl+shift / ctrl+tab must do nothing.
         if let top = Browser.topAppWindowOwnerPID(), top != app.processIdentifier { return }
         bundleId = bid
+        overlay.splitView = ViewPref.split   // re-read before the first render
         guard !open else { return }
         open = true
         listBusy = false
@@ -227,7 +228,11 @@ final class App: NSObject {
                     }
                 }
                 if let tabs {
-                    self.overlay.splitView = ViewPref.split   // pick up cli view changes live
+                    // pick up cli view changes live — disk read gated on open:
+                    // the idle poll runs 5×/s and re-reading a json file that
+                    // often buys nothing (begin() re-reads before its render,
+                    // so changes made while closed are picked up on open)
+                    if self.open { self.overlay.splitView = ViewPref.split }
                     // cache ALWAYS takes the reply — even when it lands after
                     // the session already ended. discarding it (the old
                     // behavior) meant fast sessions never warmed the cache and

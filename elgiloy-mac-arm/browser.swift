@@ -132,18 +132,22 @@ enum Browser {
             }
         }
         guard let tg = tabGroup else { return PinnedScan(flags: [], titles: []) }
-        var scan = PinnedScan(flags: [], titles: [])
+        // one walk: grab the tab elements in document order, then read flags.
+        // per tab this costs 2 attribute round-trips (role + description) —
+        // titles are fetched LAZILY, only if the fallback merge needs them
+        // (counts mismatch), since that's the only place they're used.
+        var tabEls: [AXUIElement] = []
         func collect(_ el: AXUIElement) {
-            if axRole(el) == "AXRadioButton" {
-                let desc = axString(el, kAXDescriptionAttribute as String) ?? ""
-                scan.flags.append(desc.range(of: "Pinned") != nil)
-                scan.titles.append(axString(el, kAXTitleAttribute as String) ?? "")
-                return
-            }
+            if axRole(el) == "AXRadioButton" { tabEls.append(el); return }
             for k in axChildren(el) { collect(k) }
         }
         collect(tg)
-        return scan
+        let flags = tabEls.map {
+            (axString($0, kAXDescriptionAttribute as String) ?? "").range(of: "Pinned") != nil
+        }
+        return PinnedScan(flags: flags, titles: flags.count == tabEls.count ? [] : tabEls.map {
+            axString($0, kAXTitleAttribute as String) ?? ""
+        })
     }
 
     private static func axChildren(_ el: AXUIElement) -> [AXUIElement] {
