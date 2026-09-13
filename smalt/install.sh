@@ -37,9 +37,6 @@ swiftc -O -o "$BIN_LOCAL" main.swift -framework AppKit -framework QuartzCore
 codesign --force --sign "$IDENTITY" "$BIN_LOCAL"
 if [[ "$IDENTITY" != "-" ]]; then echo "signed (cobalt-dev)"; fi
 
-mkdir -p "$HOME/.local/bin"
-cp -f "$NAME" "$BIN_LOCAL"
-
 launchctl bootout "$GUI/$LABEL" 2>/dev/null || true
 cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
