@@ -41,18 +41,26 @@ enum Theme {
     static let lpm     = NSColor(srgbRed: 0xCA/255.0, green: 0x8A/255.0, blue: 0x04/255.0, alpha: 1)  // #CA8A04 low-power amber — icon + percentage, one color
 
     // grid — one uniform CELL slot per widget, stacked top to bottom
-    static let cell: CGFloat = 28
+    static let cell: CGFloat = 30
     static let gap: CGFloat = 4
-    static let pad: CGFloat = 10
+    static let pad: CGFloat = 7
 
-    // icons — real heroicons: the verbatim svg `d` strings (see SVGPath
-    // below), rendered on heroicons' own 24×24 grid at their own
-    // stroke-width 1.5, scaled so the grid is iconSize points.
-    static let iconSize: CGFloat = 20
+    // icons — heroicons, verbatim svg paths on their 24×24 grid at their
+    // authored 1.5 stroke. ONE uniform scale for every glyph: the grid is
+    // the point size. no per-glyph normalization — heroicons balance their
+    // set optically on the shared grid (the battery is wide-and-short on
+    // purpose); rescaling glyphs individually breaks that tuning.
+    static let iconSize: CGFloat = 30       // grid 24 → 30pt, all icons
+    static let stroke: CGFloat = 1.5        // heroicons' authored stroke, in grid units (= pt at this scale)
+
+    // grid debug: stroke every slot + the padding bounds so the layout is
+    // visible. red = widget slots, blue = where the padding ends. flip to
+    // false when done squinting at it.
+    static let debugGrid = false
 
     // type — SF Pro tabular digits at a weight whose stems sit at the icon
-    // stroke weight (medium at 14pt ≈ 1.2pt vs 1.25pt strokes)
-    static let typeSize: CGFloat = 14     // clock digits
+    // stroke weight (medium at 15pt ≈ 1.2pt vs 1.25pt strokes)
+    static let typeSize: CGFloat = 19     // clock digits
     static let pctSize: CGFloat = 8       // battery percentage (6.5 for "100")
 
     // the pill is exactly its grid
@@ -68,24 +76,77 @@ enum Theme {
 
 let PILL_WIDTH = Theme.pillWidth
 let PILL_HEIGHT = Theme.pillHeight
-let PILL_INSET: CGFloat = 6      // gap between pill and the right screen edge
-let PILL_RADIUS: CGFloat = 14
+let PILL_INSET: CGFloat = 0      // fused to the right screen edge — no gap
+let PILL_RADIUS: CGFloat = 17
+// window ≠ glass: the window is wider than the tab by this much, with the
+// slack hanging off-screen right — the glass SUBVIEW springs out from
+// behind the screen edge inside it. the window (cursor domain) is present
+// the instant the pill summons; the pixels arrive on the spring.
+let TAB_TRAVEL: CGFloat = 50     // hidden slide distance (≥ pill width)
+let TAB_MARGIN: CGFloat = 6      // left slack so spring overshoot never clips
 let REVEAL_WIDTH: CGFloat = 12   // summon zone: cursor within this of the right edge
 let HIDE_MARGIN: CGFloat = 6     // cursor must drop this far left of the pill before it springs away
 // spring constants: ω ≈ 23.7 rad/s, ζ ≈ 0.68 — a crisp pop with ~5% overshoot
 let SPRING_K: CGFloat = 560
 let SPRING_C: CGFloat = 32
 
-// MARK: - the pill
-
 final class StripView: NSView {
     override var isFlipped: Bool { true }   // y counts down from the pill top
 
-    // the glass: #FAF6F3, rounded — no border, the shadow does the lifting
+    // the tab: rounded on the left corners, dead straight into the right
+    // screen edge — no fillets, no flare
+    private func tabPath(in bounds: NSRect) -> NSBezierPath {
+        let R = PILL_RADIUS
+        let k: CGFloat = 0.5523
+        let W = bounds.width, H = bounds.height
+        let p = NSBezierPath()
+        p.move(to: NSPoint(x: 0, y: R))
+        p.curve(to: NSPoint(x: R, y: 0),
+                controlPoint1: NSPoint(x: 0, y: R - k * R),
+                controlPoint2: NSPoint(x: R - k * R, y: 0))
+        p.line(to: NSPoint(x: W, y: 0))
+        p.line(to: NSPoint(x: W, y: H))
+        p.line(to: NSPoint(x: R, y: H))
+        p.curve(to: NSPoint(x: 0, y: H - R),
+                controlPoint1: NSPoint(x: R - k * R, y: H),
+                controlPoint2: NSPoint(x: 0, y: H - R + k * R))
+        p.line(to: NSPoint(x: 0, y: R))
+        p.close()
+        return p
+    }
+
+    // hover: which slot the cursor is over (-1 = none). tracked, not polled
+    private var hoverSlot: Int = -1 {
+        didSet { needsDisplay = true }
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        // one tracking area per slot — mouseEntered tells us which
+        for i in 0..<4 {
+            let a = NSTrackingArea(rect: Theme.slot(i, in: bounds),
+                                   options: [.mouseEnteredAndExited, .activeAlways],
+                                   owner: self, userInfo: ["slot": i])
+            addTrackingArea(a)
+        }
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        if let slot = event.trackingArea?.userInfo?["slot"] as? Int { hoverSlot = slot }
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        hoverSlot = -1
+    }
+
+    // the glass: #FAF6F3 — the caelestia tab shape: rounded on the left,
+    // fused into the right screen edge with concave fillets top and bottom
     override func draw(_ dirtyRect: NSRect) {
-        let path = NSBezierPath(roundedRect: bounds, xRadius: PILL_RADIUS, yRadius: PILL_RADIUS)
+        let path = tabPath(in: bounds)
         Theme.glass.setFill()
         path.fill()
+        window?.invalidateShadow()   // the shadow follows the tab silhouette
 
         // the grid: battery / calendar / hour / minute — one uniform slot
         // each, every widget centered in its own fixed spot
@@ -96,6 +157,28 @@ final class StripView: NSView {
             case 1: drawCalendar(in: r)
             default: drawClock(i == 2 ? .hour : .minute, in: r)
             }
+
+            // hover wash: a soft ink tint filling the whole slot, so the
+            // slot itself is the hit target — same fixed grid, nothing moves
+            if i == hoverSlot {
+                Theme.ink.withAlphaComponent(0.12).setFill()
+                NSBezierPath(roundedRect: r.insetBy(dx: 1, dy: 1),
+                             xRadius: 5, yRadius: 5).fill()
+            }
+        }
+
+        // layout x-ray: slots in red, the pad boundary in blue. the ink of
+        // every widget must sit inside its red box; the red boxes never move.
+        if Theme.debugGrid {
+            NSColor.systemRed.withAlphaComponent(0.55).setStroke()
+            for i in 0..<4 {
+                let r = Theme.slot(i, in: bounds).insetBy(dx: 0.5, dy: 0.5)
+                NSBezierPath(roundedRect: r, xRadius: 2, yRadius: 2).stroke()
+            }
+            NSColor.systemBlue.withAlphaComponent(0.55).setStroke()
+            let p = NSBezierPath(roundedRect: bounds.insetBy(dx: Theme.pad, dy: Theme.pad),
+                                 xRadius: PILL_RADIUS - Theme.pad, yRadius: PILL_RADIUS - Theme.pad)
+            p.stroke()
         }
     }
 }
@@ -254,15 +337,19 @@ enum SVGPath {
 // renders a heroicon `d` inside a slot: the 24 grid scaled to iconSize,
 // stroked at the svg's own 1.5 with round caps + joins (as authored)
 enum Heroicon {
+    // draws a heroicon `d` on its own 24 grid, uniformly scaled so the grid
+    // is `size` points — the same relation every heroicon has to every other
+    // one on heroicons.com. stroke is the authored 1.5 in grid units, so
+    // every icon carries the set's own weight, identically.
     static func draw(_ d: String, color: NSColor, in slot: NSRect) {
         let ctx = NSGraphicsContext.current!.cgContext
         ctx.saveGState()
         let s = Theme.iconSize / 24
         ctx.translateBy(x: slot.midX, y: slot.midY)
         ctx.scaleBy(x: s, y: s)
-        ctx.translateBy(x: -12, y: -12)   // flipped view + svg y-down: already aligned
+        ctx.translateBy(x: -12, y: -12)
         ctx.addPath(SVGPath.cgPath(d))
-        ctx.setLineWidth(1.5)             // the svg's own stroke-width, in grid units
+        ctx.setLineWidth(Theme.stroke)    // 1.5 grid units — the authored weight
         ctx.setLineCap(.round)
         ctx.setLineJoin(.round)
         color.setStroke()
@@ -270,7 +357,7 @@ enum Heroicon {
         ctx.restoreGState()
     }
 
-    // svg-grid rect → view rect, for text placed inside a glyph feature
+    // a rect in svg-grid coordinates → view rect, for text inside a glyph
     static func gridRect(_ r: CGRect, in slot: NSRect) -> NSRect {
         let s = Theme.iconSize / 24
         return NSRect(x: slot.midX + (r.minX - 12) * s,
@@ -296,35 +383,17 @@ func drawText(_ s: String, font: NSFont, color: NSColor, in r: NSRect) {
 
 extension NSFont {
     // SF Pro, tabular digits — the clock's voice, weight-matched to the strokes
-    static func tabular(_ size: CGFloat) -> NSFont {
-        NSFont.monospacedDigitSystemFont(ofSize: size, weight: .medium)
+    static func tabular(_ size: CGFloat, _ weight: NSFont.Weight = .medium) -> NSFont {
+        NSFont.monospacedDigitSystemFont(ofSize: size, weight: weight)
     }
 }
 
 // MARK: - widgets
 //
-// calendar + battery are SF Symbols — the same vectors the menu bar itself
-// uses (NSImage(systemSymbolName:), tinted to the palette). the heroicon
-// SVGs stay as fallbacks in case the symbol lookup ever misses. type is
-// matching tabular SF Pro, everything centered in its slot. sources are
-// permission-free: IOKit power sources, the clock, ProcessInfo LPM state.
-
-// an SF Symbol at a given point size + weight, tinted to one palette color
-func symbolImage(_ name: String, size: CGFloat, weight: NSFont.Weight, color: NSColor) -> NSImage? {
-    guard let base = NSImage(systemSymbolName: name, accessibilityDescription: nil) else { return nil }
-    return base
-        .withSymbolConfiguration(.init(pointSize: size, weight: weight))?
-        .withSymbolConfiguration(.init(paletteColors: [color]))
-}
-
-// aspect-fit an image into a rect, centered — symbols render at their own
-// glyph aspect (the battery is ~2.3:1), so they must be fitted to the slot,
-// not drawn at raw point size
-func fitted(_ img: NSImage, into box: NSRect) -> NSRect {
-    let s = min(box.width / img.size.width, box.height / img.size.height)
-    let w = img.size.width * s, h = img.size.height * s
-    return NSRect(x: box.midX - w / 2, y: box.midY - h / 2, width: w, height: h)
-}
+// heroicons, verbatim: the svg `d` strings, stroked at their authored 1.5
+// on the 24 grid — one consistent ink, weight-matched to the tabular
+// digits. sources are permission-free: IOKit power sources, the clock,
+// ProcessInfo low-power state.
 
 // IOKit power sources — the same thing the native battery item reads
 func batteryLevel() -> (pct: Int, charging: Bool)? {
@@ -339,35 +408,29 @@ func batteryLevel() -> (pct: Int, charging: Bool)? {
     return nil
 }
 
-// SF Symbols battery.0 — no fill, the percentage IS the gauge; it sits
-// optically centered in the symbol's body. low power mode: icon + number
-// in one amber.
+// heroicons battery, verbatim — no fill, just the glyph; the percentage
+// sits optically centered in the body. low power mode: icon + number in
+// one amber.
 func drawBattery(in slot: NSRect) {
     guard let (pct, _) = batteryLevel() else { return }
     let lowPower = ProcessInfo.processInfo.isLowPowerModeEnabled
     let color = lowPower ? Theme.lpm : Theme.ink
-    // the raw symbol is huge at point size — render at iconSize, fit the glyph
-    guard let img = symbolImage("battery.0", size: Theme.iconSize, weight: .regular, color: color) else {
-        Heroicon.draw(SVGPath.battery, color: color, in: slot)
-        return
-    }
-    let r = fitted(img, into: slot.insetBy(dx: 1, dy: 1))
-    img.draw(in: r)
+    Heroicon.draw(SVGPath.battery, color: color, in: slot)
 
-    // the number inside the body — the nub takes the last ~18% of the
-    // glyph's width; the body spans the full glyph height
-    let body = NSRect(x: r.minX, y: r.minY, width: r.width * 0.82, height: r.height)
-    let size: CGFloat = pct >= 100 ? Theme.pctSize - 1.5 : Theme.pctSize
-    drawText("\(pct)", font: .tabular(size), color: color, in: body)
+    // the number, inside the body (svg rect x1.5–21, y7.5–18): same tabular
+    // font as the clock, semibold so its stems match the icon's 1.5pt
+    // stroke, sized to fill the body VERTICALLY (SF Pro cap height ≈ 0.72em)
+    let body = Heroicon.gridRect(CGRect(x: 2.5, y: 8, width: 17.5, height: 9.5), in: slot)
+    var size = body.height / 0.72
+    // "100" has to fit the body width too — shrink only if it wouldn't
+    let wide = ("100" as NSString).size(withAttributes: [.font: NSFont.tabular(size, .semibold)]).width
+    if wide > body.width { size *= body.width / wide }
+    drawText("\(pct)", font: .tabular(size, .semibold), color: color, in: body)
 }
 
-// SF Symbols calendar, the same one the menu bar's date UI uses
+// heroicons calendar, verbatim
 func drawCalendar(in slot: NSRect) {
-    guard let img = symbolImage("calendar", size: Theme.iconSize, weight: .regular, color: Theme.ink) else {
-        Heroicon.draw(SVGPath.calendar, color: Theme.ink, in: slot)
-        return
-    }
-    img.draw(in: fitted(img, into: slot.insetBy(dx: 1, dy: 1)))
+    Heroicon.draw(SVGPath.calendar, color: Theme.ink, in: slot)
 }
 
 // time: hour over minute — one CELL slot each, tabular SF Pro centered
@@ -387,14 +450,16 @@ func mainScreen() -> NSScreen? {
     NSScreen.screens.first { displayID($0) == CGMainDisplayID() } ?? NSScreen.main
 }
 
-// where the pill sits: docked against the right edge, vertically centered.
-// hidden = fully off-screen right.
-func pillFrame(visible: Bool) -> NSRect {
+// where the WINDOW lives: docked, permanently, from launch. the cursor
+// always lands on smalt at the screen edge — chrome's `<>` border never
+// gets it. the window extends TAB_TRAVEL + TAB_MARGIN past the screen
+// edge; that off-screen slack is where the hidden glass parks.
+func pillFrame() -> NSRect {
     guard let screen = mainScreen() else { return .zero }
     let f = screen.frame
-    let x = visible ? f.maxX - PILL_WIDTH - PILL_INSET : f.maxX + 4
-    let y = f.minY + (f.height - PILL_HEIGHT) / 2
-    return NSRect(x: x, y: y, width: PILL_WIDTH, height: PILL_HEIGHT)
+    let w = PILL_WIDTH + 2 * TAB_MARGIN + TAB_TRAVEL
+    return NSRect(x: f.maxX - TAB_MARGIN - PILL_WIDTH, y: f.minY + (f.height - PILL_HEIGHT) / 2,
+                  width: w, height: PILL_HEIGHT)
 }
 
 // MARK: - the spring
@@ -416,10 +481,12 @@ final class SpringDriver: NSObject {
     var target: CGFloat = 0
     var last: CFTimeInterval = 0
 
+    var onSettle: (() -> Void)?
+
     func chase(_ targetX: CGFloat) {
         target = targetX
         guard !running else { return }             // already chasing — just retargeted
-        x = strip.frame.origin.x
+        x = tab.frame.origin.x
         v = 0
         last = 0
         if #available(macOS 14.0, *), let screen = mainScreen() {
@@ -459,13 +526,17 @@ final class SpringDriver: NSObject {
         let accel = -SPRING_K * (x - target) - SPRING_C * v
         v += accel * dt
         x += v * dt
-        var f = strip.frame
+        var f = tab.frame
         f.origin.x = x.rounded()               // whole pixels: no subpixel shimmer on the glass
-        strip.setFrame(f, display: false)
+        tab.setFrameSize(f.size); tab.setFrameOrigin(f.origin)
+        tab.needsDisplay = true
         if abs(x - target) < 0.25, abs(v) < 2 {
             f.origin.x = target
-            strip.setFrame(f, display: true)
+            tab.setFrameSize(f.size); tab.setFrameOrigin(f.origin)
+            tab.needsDisplay = true
             stop()
+            onSettle?()
+            onSettle = nil
         }
     }
 
@@ -485,18 +556,20 @@ func applyVisibility(_ desired: Bool, animate: Bool = true) {
     let changed = desired != stripVisible
     stripVisible = desired
     guard changed else { return }
-    let target = pillFrame(visible: desired)
-    if animate {
-        // sync y/size, then let the spring chase the x
-        var f = strip.frame
-        f.origin.y = target.origin.y
-        f.size = target.size
-        strip.setFrame(f, display: true)
-        spring.chase(target.origin.x)
-    } else {
-        spring.stop()
-        strip.setFrame(target, display: true)
+    // (visibility = glass position; see below)
+    // the window never moves — it has owned the screen edge since launch.
+    // visibility is purely where the glass sits inside it: docked, or
+    // parked in the off-screen slack. springs drive the glass either way.
+    spring.stop()
+    spring.onSettle = nil
+    if !animate {
+        var g = tab.frame
+        g.origin.x = glassX(docked: desired)
+        tab.setFrameSize(g.size); tab.setFrameOrigin(g.origin)
+        tab.needsDisplay = true
+        return
     }
+    spring.chase(glassX(docked: desired))
 }
 
 // current cursor position. CGEvent coordinates are global, top-left origin —
@@ -520,7 +593,7 @@ func cursorXFromRight() -> CGFloat {
 // display arrangement where the main display wasn't at the global origin,
 // the summon zone stopped matching the pill's real position.)
 func pillBandCG() -> (top: CGFloat, bottom: CGFloat) {
-    let fr = pillFrame(visible: true)
+    let fr = pillFrame()
     let top = globalCocoaTopY - fr.maxY
     return (top, top + fr.height)
 }
@@ -587,19 +660,35 @@ func scheduleUpdate() {
 
 // MARK: - the pill (window)
 
+// MARK: - the pill (window + glass subview)
+//
+// the window spans docked-glass + slack on both sides; the glass tab is a
+// SUBVIEW whose x the spring drives between docked (flush with the screen
+// edge) and hidden (fully off-screen). the window is only ever in one of
+// two places — docked (summon: instant, so the cursor lands on it at once)
+// or off-screen (hidden, after the exit spring settles).
+
+let tab: StripView = {
+    let v = StripView(frame: NSRect(origin: .zero, size: NSSize(width: PILL_WIDTH, height: PILL_HEIGHT)))
+    return v
+}()
+
+// where the glass sits inside the window: docked (flush at the screen edge
+// with TAB_MARGIN of overshoot slack to its left) vs hidden (past the edge)
+func glassX(docked: Bool) -> CGFloat { docked ? TAB_MARGIN : TAB_MARGIN + TAB_TRAVEL }
+
 let strip: NSWindow = {
-    let win = NSPanel(contentRect: pillFrame(visible: false), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+    let frame = pillFrame()
+    let win = NSPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
     win.backgroundColor = .clear
-    win.isOpaque = false             // rounded corners composite cleanly
-    win.hasShadow = true             // a floating pill wants a shadow
-    win.ignoresMouseEvents = false   // clickable for whatever lands in it later
-    // level 21 — above every app window and fullscreen windows, still below
-    // the native menu bar (24). the pill lives mid-right-edge, nowhere near
-    // the native bar, so there's nothing to fight with.
+    win.isOpaque = false
+    win.hasShadow = true
+    win.ignoresMouseEvents = false
     win.level = NSWindow.Level(rawValue: 21)
-    // every desktop space, pinned to the screen, present over fullscreen apps
     win.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
-    win.contentView = StripView(frame: NSRect(origin: .zero, size: pillFrame(visible: false).size))
+    let container = NSView(frame: NSRect(origin: .zero, size: frame.size))
+    container.addSubview(tab)
+    win.contentView = container
     return win
 }()
 
@@ -611,7 +700,12 @@ func runDaemon() -> Never {
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
 
-    updateStrip()
+    // the window is docked from this moment on — it owns the screen edge
+    // permanently (that's the cursor fix); only the glass ever moves
+    strip.setFrame(pillFrame(), display: true)
+    var g = tab.frame
+    g.origin.x = glassX(docked: false)   // glass parked off-screen at launch
+    tab.setFrameSize(g.size); tab.setFrameOrigin(g.origin)
     strip.orderFrontRegardless()
 
     // the summon. a global mouse monitor — not an event tap — so there is
