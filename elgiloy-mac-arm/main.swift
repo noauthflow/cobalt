@@ -39,6 +39,7 @@ final class App: NSObject {
     var open = false
     var listBusy = false
     private var listPending = false   // a refresh arrived while one was in flight → run another when it lands
+    private var lastFlagsValid = false // last reply's AX scan grounded every row (see refreshList)
     private var movedYet = false
     private var watchdog: Timer?
 
@@ -193,6 +194,7 @@ final class App: NSObject {
     // with the tap completely dead, because it never touches the tap.
     private func startWatchdog() {
         watchdog?.invalidate()
+        var ticks = 0
         watchdog = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             guard let self, self.open else { return }
             let flags = CGEventSource.flagsState(.combinedSessionState)
@@ -201,7 +203,15 @@ final class App: NSObject {
             let front = NSWorkspace.shared.frontmostApplication
             if !modsDown || front?.bundleIdentifier != self.bundleId {
                 self.end()
+                return
             }
+            // 1s heartbeat: the per-press mirror path only tracks the active
+            // index (full list + AX scan every 50ms would lag the tap), so
+            // titles, audio flags and pin state go stale while a session is
+            // open. every 10th tick pulls a fresh list — cheap once a second,
+            // and closes get their confirm beat anyway.
+            ticks += 1
+            if ticks % 10 == 0 { self.refreshList() }
         }
     }
 
@@ -218,7 +228,7 @@ final class App: NSObject {
         // added seconds ago wouldn't appear until the NEXT session.
         if listBusy { listPending = true; return }
         listBusy = true
-        Browser.list(bundleId: bid, queue: q) { [weak self] tabs, active in
+        Browser.list(bundleId: bid, queue: q) { [weak self] tabs, active, grounded in
             guard let self else { return }
             DispatchQueue.main.async {
                 self.listBusy = false
@@ -228,7 +238,38 @@ final class App: NSObject {
                         self.refreshList()
                     }
                 }
-                if let tabs {
+                if var tabs {   // mutable: the ungrounded-row path mutates flags below
+                    // UNGROUNDED ROWS — browser.list matches AX strip entries
+                    // to tabs by title PREFIX, so a grounded row's flags are
+                    // fresh truth no matter how the strip is ordered; only
+                    // rows with NO matching AX entry (mid-rebuild strip after
+                    // a close, pruned tabs) are untrustworthy, and for exactly
+                    // those the previous flags are carried across. a re-poll
+                    // 300ms later lets the settled tree correct for real.
+                    // guarded on lastFlagsValid, so browsers that never expose
+                    // the strip don't cause an infinite re-poll loop.
+                    if let grounded {
+                        self.lastFlagsValid = !grounded.isEmpty && grounded.allSatisfy { $0 }
+                        let ungrounded = grounded.indices.filter { !grounded[$0] }
+                        if !ungrounded.isEmpty {
+                            let old = self.cache
+                            for i in ungrounded {
+                                if let p = old.first(where: { $0.title == tabs[i].title && $0.url == tabs[i].url }) {
+                                    tabs[i].pinned = p.pinned
+                                    tabs[i].audible = p.audible
+                                }
+                            }
+                            if self.lastFlagsValid && self.open {
+                                // the enclosing closure already holds self
+                                // strongly, so no weak capture here (would
+                                // trip the ownership-mismatch warning)
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                                    guard self.open, !self.listBusy else { return }
+                                    self.refreshList()
+                                }
+                            }
+                        }
+                    }
                     // pick up cli view changes live — disk read gated on open:
                     // the idle poll runs 5×/s and re-reading a json file that
                     // often buys nothing (begin() re-reads before its render,
@@ -309,6 +350,20 @@ final class App: NSObject {
 // `elgiloy view [split|flat]` switches the pinned-tabs display and exits;
 // a bare invocation is the daemon itself.
 let argv = CommandLine.arguments
+if argv.count >= 2, argv[1] == "debug-strip" {
+    // raw AX strip dump — run from anywhere; the first chromium-family app
+    // wins (the browser doesn't need to be frontmost)
+    let app = NSWorkspace.shared.runningApplications.first {
+        Browser.isChromiumFamily($0) && $0.bundleIdentifier != nil
+    }
+    if let app {
+        print("target: \(app.localizedName ?? "?") pid \(app.processIdentifier)")
+        Browser.debugDumpStrip(pid: app.processIdentifier)
+    } else {
+        print("no chromium-family app running")
+    }
+    exit(0)
+}
 if argv.count >= 2, argv[1] == "view" {
     if argv.count >= 3 {
         switch argv[2] {

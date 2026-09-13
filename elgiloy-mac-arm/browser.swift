@@ -120,23 +120,32 @@ enum Browser {
 
     // ---- pinned / audible flags --------------------------------------------
     // chromium's appleScript dictionary has NO `pinned` (or `audible`) property
-    // on tab, but the accessibility tree does: every tab in the strip is an
-    // AXRadioButton whose AXDescription carries chrome's state markers —
-    // "Pinned" for pinned tabs, "audio playing" for tabs emitting sound.
-    // the strip's document order matches appleScript tab order, so the caller
-    // can zip the flags straight onto the tab list by index.
+    // on tab (verified against chrome/browser/ui/cocoa/applescript/scripting.sdef
+    // — tab exposes only id/title/URL/loading), but the accessibility tree
+    // does: every tab in the strip is an AXRadioButton whose AXDescription
+    // carries chrome's state markers — "Pinned" for pinned tabs, "audio
+    // playing" for tabs emitting sound. NOTE: the AX title is chrome's
+    // TOOLTIP — "<page title>" + optional " – Pinned" + optional
+    // " – Audio playing" + optional " - Memory usage - N MB" — and the
+    // suffixes change live, so the AX title is matched to appleScript titles
+    // by PREFIX, never by equality and never by strip position (the strip
+    // lags the appleScript list during rebuilds; positional zips attach
+    // flags to the wrong rows).
     struct StripScan {
-        var flags: [Bool]     // pinned, one per tab, in strip order
-        var audible: [Bool]   // playing audio, same order
-        var titles: [String]  // matching AX titles, for the fallback merge
+        struct Entry {
+            var title: String    // the tooltip: page title + chrome's suffixes
+            var pinned: Bool
+            var audible: Bool
+        }
+        var entries: [Entry]
     }
 
     static func stripFlags(pid: pid_t?) -> StripScan {
-        guard let pid else { return StripScan(flags: [], audible: [], titles: []) }
+        guard let pid else { return StripScan(entries: []) }
         let app = AXUIElementCreateApplication(pid)
         var winRef: CFTypeRef?
         AXUIElementCopyAttributeValue(app, kAXMainWindowAttribute as CFString, &winRef)
-        guard let w = winRef else { return StripScan(flags: [], audible: [], titles: []) }
+        guard let w = winRef else { return StripScan(entries: []) }
         // BFS down to the tab strip. prune AXWebArea — the page's accessibility
         // tree can hold thousands of nodes and this probe runs on every poll —
         // and cap depth; the strip sits a few groups under the window.
@@ -152,29 +161,29 @@ enum Browser {
                 queue.append((k, depth + 1))
             }
         }
-        guard let tg = tabGroup else { return StripScan(flags: [], audible: [], titles: []) }
-        // one walk: grab the tab elements in document order, then read flags.
-        // per tab this costs 2 attribute round-trips (role + description), and
-        // the ONE description read serves BOTH flags — chrome bakes its markers
-        // into that same string ("Pinned", "audio playing", older builds
-        // "Speaker"). titles are fetched LAZILY, only if the fallback merge
-        // needs them (counts mismatch), since that's the only place they're used.
+        guard let tg = tabGroup else { return StripScan(entries: []) }
+        // one walk: grab the tab elements in document order (AXRadioButton
+        // anywhere under the strip group), then read TWO attributes per tab
+        // (title + description). the title prefix is the identity flags ride
+        // on — position is never assumed.
         var tabEls: [AXUIElement] = []
         func collect(_ el: AXUIElement) {
             if axRole(el) == "AXRadioButton" { tabEls.append(el); return }
             for k in axChildren(el) { collect(k) }
         }
         collect(tg)
-        let descs = tabEls.map { axString($0, kAXDescriptionAttribute as String) ?? "" }
-        let flags = descs.map { $0.range(of: "Pinned") != nil }
-        let audible = descs.map {
-            $0.range(of: "audio playing", options: .caseInsensitive) != nil
-                || $0.range(of: "Speaker") != nil
+        let entries = tabEls.map { el -> StripScan.Entry in
+            let t = axString(el, kAXTitleAttribute as String) ?? ""
+            let d = axString(el, kAXDescriptionAttribute as String) ?? ""
+            // markers can appear in EITHER string depending on chrome build
+            let both = t + " \u{1f} " + d
+            return StripScan.Entry(
+                title: t,
+                pinned: both.range(of: "Pinned") != nil,
+                audible: both.range(of: "audio playing", options: .caseInsensitive) != nil
+                    || both.range(of: "Speaker") != nil)
         }
-        return StripScan(flags: flags, audible: audible,
-                         titles: flags.count == tabEls.count ? [] : tabEls.map {
-                             axString($0, kAXTitleAttribute as String) ?? ""
-                         })
+        return StripScan(entries: entries)
     }
 
     private static func axChildren(_ el: AXUIElement) -> [AXUIElement] {
@@ -195,40 +204,86 @@ enum Browser {
         return v as? String
     }
 
+    // raw strip dump for `elgiloy debug-strip` — prints exactly what the AX
+    // tree exposes per tab so the flag merge can be designed against reality
+    // instead of assumptions. does not touch the normal paths.
+    static func debugDumpStrip(pid: pid_t?) {
+        guard let pid else { print("no pid"); return }
+        let app = AXUIElementCreateApplication(pid)
+        var winRef: CFTypeRef?
+        AXUIElementCopyAttributeValue(app, kAXMainWindowAttribute as CFString, &winRef)
+        guard let w = winRef else { print("no AX main window"); return }
+        var tabGroup: AXUIElement?
+        var queue: [(AXUIElement, Int)] = [(w as! AXUIElement, 0)]
+        while tabGroup == nil, !queue.isEmpty {
+            let (el, depth) = queue.removeFirst()
+            if depth > 7 { continue }
+            for k in axChildren(el) {
+                let role = axRole(k)
+                if role == "AXTabGroup" { tabGroup = k; break }
+                if role == "AXWebArea" { continue }
+                queue.append((k, depth + 1))
+            }
+        }
+        guard let tg = tabGroup else { print("no AXTabGroup"); return }
+        var tabEls: [AXUIElement] = []
+        func collect(_ el: AXUIElement) {
+            if axRole(el) == "AXRadioButton" { tabEls.append(el); return }
+            for k in axChildren(el) { collect(k) }
+        }
+        collect(tg)
+        print("strip: \(tabEls.count) AXRadioButton(s)")
+        for (i, el) in tabEls.enumerated() {
+            let t = axString(el, kAXTitleAttribute as String) ?? "<nil>"
+            let d = axString(el, kAXDescriptionAttribute as String) ?? "<nil>"
+            let v = axString(el, kAXValueAttribute as String) ?? "<nil>"
+            print("[\(i)] title=\(t.isEmpty ? "<EMPTY>" : t)")
+            print("    desc=\(d.isEmpty ? "<EMPTY>" : d)")
+            print("    value=\(v.isEmpty ? "<EMPTY>" : v)")
+        }
+    }
+
     // everything the overlay needs in one query: active tab index (first
-    // field) + every tab's title and url — plus pinned flags from the AX tree
-    static func list(bundleId: String, queue: DispatchQueue, done: @escaping ([Tab]?, Int?) -> Void) {
+    // field), every tab's title and url — plus pinned/audible flags from the
+    // AX strip. the third argument is a per-tab "grounded" mask: true where
+    // the row's flags came from an AX entry matched by title prefix (fresh
+    // truth), false where nothing matched (mid-rebuild strip, pruned tabs)
+    // and the caller should carry the previous flags.
+    static func list(bundleId: String, queue: DispatchQueue, done: @escaping ([Tab]?, Int?, [Bool]?) -> Void) {
         // captured on the calling (main) thread: NSWorkspace is happiest there
         let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier
         queue.async {
             let s = compiled(for: bundleId)
-            guard let raw = run(s.list) else { done(nil, nil); return }
+            guard let raw = run(s.list) else { done(nil, nil, nil); return }
             var parts = raw.components(separatedBy: "\u{1f}")
-            guard parts.count >= 2, let active = Int(parts.removeFirst()) else { done(nil, nil); return }
+            guard parts.count >= 2, let active = Int(parts.removeFirst()) else { done(nil, nil, nil); return }
             var tabs: [Tab] = []
             for record in parts.joined(separator: "\u{1f}").components(separatedBy: "\u{1e}") where !record.isEmpty {
                 let f = record.components(separatedBy: "\u{1f}")
                 if f.count == 3, let n = Int(f[0]) { tabs.append(Tab(n: n, title: f[1], url: f[2])) }
             }
-            // merge pinned/audible flags. primary path: AX strip order ==
-            // appleScript order, so equal counts zip by index. fallback (AX
-            // pruned tabs from the strip): match by title — a heuristic,
-            // better than none
-            let scan = stripFlags(pid: pid)
-            if scan.flags.count == tabs.count {
-                for i in tabs.indices {
-                    tabs[i].pinned = scan.flags[i]
-                    tabs[i].audible = scan.audible[i]
-                }
-            } else if !scan.flags.isEmpty {
-                let pinnedTitles = Set(zip(scan.flags, scan.titles).filter { $0.0 }.map { $0.1 })
-                let audibleTitles = Set(zip(scan.audible, scan.titles).filter { $0.0 }.map { $0.1 })
-                for i in tabs.indices {
-                    if pinnedTitles.contains(tabs[i].title) { tabs[i].pinned = true }
-                    if audibleTitles.contains(tabs[i].title) { tabs[i].audible = true }
+            // merge: match AX strip entries to tabs by PREFIX — chrome's AX
+            // title is the tooltip: "<appleScript title>" + optional
+            // " – Pinned" + optional " – Audio playing" + optional
+            // " - Memory usage - N MB". the suffixes change live (media
+            // timers, memory readings), so the AX title is never equal to
+            // the appleScript title — only a prefix of it. prefix matching
+            // is order-free (immune to mid-rebuild strip reordering) and
+            // suffix-proof. duplicates consume in order. a row with no
+            // matching entry is left ungrounded — the caller carries its
+            // previous flags.
+            var pool = stripFlags(pid: pid).entries
+            var grounded = [Bool](repeating: false, count: tabs.count)
+            for i in tabs.indices {
+                let t = tabs[i].title
+                if let j = pool.firstIndex(where: { !$0.title.isEmpty && ($0.title == t || $0.title.hasPrefix(t + " ")) }) {
+                    tabs[i].pinned = pool[j].pinned
+                    tabs[i].audible = pool[j].audible
+                    pool.remove(at: j)
+                    grounded[i] = true
                 }
             }
-            done(tabs.isEmpty ? nil : tabs, active)
+            done(tabs.isEmpty ? nil : tabs, active, grounded)
         }
     }
 
