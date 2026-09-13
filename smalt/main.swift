@@ -163,10 +163,14 @@ let strip: NSWindow = {
     win.isOpaque = true
     win.hasShadow = false
     win.ignoresMouseEvents = true   // v0: the glass is look-only; widgets flip this in v1
-    // BELOW the menu bar (24) but above every app window — so the slide from
-    // its hidden spot never paints over the native bar, while still showing
-    // over fullscreen apps (fullScreenAuxiliary)
-    win.level = .floating
+    // level 21 — same lesson cobalt-60 already learned the hard way: MUST be
+    // ≥ 20, because elgiloy's begin() guard only ignores the topmost window
+    // when it's system chrome (layer ≥ 20). a floating-level (3) strip reads
+    // as "a launcher overlay is open" and elgiloy swallows ctrl+tab entirely.
+    // 21 keeps the design constraint: above every app window and fullscreen
+    // windows, still below the menu bar (24) so the slide never paints over
+    // the native bar, and below elgiloy's overlay (25).
+    win.level = NSWindow.Level(rawValue: 21)
     // every desktop space, pinned to the screen, present over fullscreen apps
     win.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
     win.contentView = StripView(frame: NSRect(origin: .zero, size: stripFrame(visible: false).size))
