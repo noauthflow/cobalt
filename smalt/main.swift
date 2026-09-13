@@ -147,6 +147,14 @@ final class StripView: NSView {
         NSCursor.arrow.set()
     }
 
+    // re-win the arrow on demand: apps beneath push their cursors when they
+    // REDRAW — no mouse event fires, so nothing above catches it. called from
+    // the passive cursor-defense timer in runDaemon (and the mouse monitor).
+    func reassertCursor() {
+        window?.invalidateCursorRects(for: self)   // window server re-reads resetCursorRects
+        NSCursor.arrow.set()
+    }
+
     override func mouseEntered(with event: NSEvent) {
         if let slot = event.trackingArea?.userInfo?["slot"] as? Int { hoverSlot = slot }
     }
@@ -456,6 +464,13 @@ func drawClock(_ component: Calendar.Component, in slot: NSRect) {
 
 // MARK: - state
 
+// stderr debug tracing — off unless built with -D SMALT_DEBUG (stderr → /tmp/smalt.err)
+func dbg(_ s: String) {
+#if SMALT_DEBUG
+    FileHandle.standardError.write(Data((s + "\n").utf8))
+#endif
+}
+
 var stripVisible = false       // hidden until the cursor hovers the right edge
 var evalItem: DispatchWorkItem?
 
@@ -568,8 +583,16 @@ final class SpringDriver: NSObject {
 let spring = SpringDriver()
 
 func applyVisibility(_ desired: Bool, animate: Bool = true) {
+    // click-through follows visibility: while the glass is hidden smalt is
+    // invisible at the edge, so it must not eat clicks there either — the
+    // apps beneath get their edge back. visible glass: smalt takes the
+    // click (and the keyboard — see takeAttention, hover attention).
+    let clickThrough = cmdOverride || !desired
+    if strip.ignoresMouseEvents != clickThrough { strip.ignoresMouseEvents = clickThrough }
     let changed = desired != stripVisible
     stripVisible = desired
+    if changed { dbg("applyVisibility → \(desired)") }
+    if !desired { releaseAttention() }   // off the stage → hand focus straight back
     guard changed else { return }
     // (visibility = glass position; see below)
     // the window never moves — it has owned the screen edge since launch.
@@ -624,12 +647,57 @@ var cmdOverride = false
 func setCmdOverride(_ on: Bool) {
     guard on != cmdOverride else { return }
     cmdOverride = on
-    strip.ignoresMouseEvents = on
-    if on { applyVisibility(false) }
+    applyVisibility(on ? false : stripVisible)
 }
 
 func cmdHeld() -> Bool {
     CGEventSource.flagsState(.hidSystemState).contains(.maskCommand)
+}
+
+// MARK: - hover attention
+//
+// the base macOS truth this used to fight: the cursor and the keyboard
+// belong to the ACTIVE app. a background overlay can re-assert its cursor
+// all day — any redraw from the active app (ghostty's I-beam, chrome's
+// resize arrows) wins the instant after, because the window server only
+// re-arbitrates on pointer events. and keystrokes never arrive at all.
+// the menu bar doesn't fight this because WindowServer owns it. the legal
+// equivalent: while the cursor is on the glass, smalt briefly BECOMES the
+// active app — cursor rects go live, keystrokes land on the pill (what
+// clicking used to do) — and the instant the cursor leaves, activation
+// hands straight back to the previous app. no re-click, ever.
+var attendedFrontApp: NSRunningApplication?
+
+func takeAttention() {
+    let me = ProcessInfo.processInfo.processIdentifier
+    let smaltActive = NSWorkspace.shared.frontmostApplication?.processIdentifier == me
+    dbg("takeAttention: smaltActive=\(smaltActive) attended=\(attendedFrontApp?.localizedName ?? \"nil\")")
+    // remember who to hand focus back to (first hover only)
+    if attendedFrontApp == nil, !smaltActive,
+       let front = NSWorkspace.shared.frontmostApplication {
+        attendedFrontApp = front
+    }
+    if !smaltActive {
+        NSApp.activate(ignoringOtherApps: true)   // deprecated 14+, still the reliable force-activate
+        strip.makeKey()
+        dbg("takeAttention: activated → front=\(NSWorkspace.shared.frontmostApplication?.localizedName ?? \"nil\") appActive=\(NSApp.isActive) key=\(strip.isKeyWindow)")
+    }
+}
+
+func releaseAttention() {
+    guard let saved = attendedFrontApp else { return }
+    attendedFrontApp = nil
+    dbg("releaseAttention → \(saved.localizedName ?? \"?\")")
+    // only hand back if smalt still owns attention — if the user already
+    // clicked into another app, their choice stands
+    let me = ProcessInfo.processInfo.processIdentifier
+    if NSWorkspace.shared.frontmostApplication?.processIdentifier == me {
+        if #available(macOS 14.0, *) {
+            saved.activate()
+        } else {
+            saved.activate(options: [.activateIgnoringOtherApps])
+        }
+    }
 }
 
 // MARK: - fullscreen + mission control detection
@@ -711,9 +779,17 @@ let tab: StripView = {
 // with TAB_MARGIN of overshoot slack to its left) vs hidden (past the edge)
 func glassX(docked: Bool) -> CGFloat { docked ? TAB_MARGIN : TAB_MARGIN + TAB_TRAVEL }
 
+// the panel is key-capable but never main. being KEY is the point: cursor
+// rects only go live while the window is key, so hover attention (see
+// takeAttention) makes the panel key — that is what pins the arrow cursor
+// for real instead of racing the app beneath.
+final class OverlayPanel: NSPanel {
+    override var canBecomeMain: Bool { false }
+}
+
 let strip: NSWindow = {
     let frame = pillFrame()
-    let win = NSPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+    let win = OverlayPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
     win.backgroundColor = .clear
     win.isOpaque = false
     win.hasShadow = true
@@ -740,6 +816,7 @@ func runDaemon() -> Never {
     var g = tab.frame
     g.origin.x = glassX(docked: false)   // glass parked off-screen at launch
     tab.setFrameSize(g.size); tab.setFrameOrigin(g.origin)
+    applyVisibility(false, animate: false)   // parked = click-through at the edge
     strip.orderFrontRegardless()
 
     // the summon. a global mouse monitor — not an event tap — so there is
@@ -761,8 +838,13 @@ func runDaemon() -> Never {
         // re-assert their I-beam/resize cursors on redraw, so re-win it
         // on every move. arrow regardless of modifier flags — cmd never
         // changes anything here. one NSCursor.set, no tap, no permissions.
-        if xr <= 0, y >= top, y <= bottom {
-            NSCursor.arrow.set()
+        // cursor defense, active side: while the cursor is over the glass,
+        // smalt owns the cursor — apps underneath re-assert their I-beam/
+        // resize cursors, so re-win on every move. (the old check, xr <= 0,
+        // meant "cursor past the screen edge" — it almost never fired, which
+        // is why the I-beam kept leaking through.)
+        if stripVisible, xr <= PILL_WIDTH, y >= top, y <= bottom {
+            tab.reassertCursor()
         }
         if xr <= REVEAL_WIDTH, y >= top - 26, y <= bottom + 26 {
             applyVisibility(true)
@@ -791,6 +873,38 @@ func runDaemon() -> Never {
     // (and cheap: the window only repaints on demand)
     Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { _ in
         strip.contentView?.needsDisplay = true
+    }
+
+    // the attention engine — the poll that drives the whole hover state
+    // machine. the global monitor stays as the fast path for real mouse
+    // moves, but the state itself is POSITION-driven here: summon, hide,
+    // and attention all follow the cursor whether or not an event made it
+    // to the monitor (programmatic warps, missed coalesced events, etc).
+    // cursor on the glass → take activation + key (arrow is then guaranteed:
+    // the active app's cursor rects can't be overridden by a background
+    // redraw); cursor off the glass → focus hands straight back. cmd is
+    // re-checked here too, because while smalt is active its own window
+    // swallows mouse events — the global monitor goes quiet.
+    Timer.scheduledTimer(withTimeInterval: 1 / 30, repeats: true) { _ in
+        setCmdOverride(cmdHeld())
+        if cmdOverride { releaseAttention(); return }
+        guard let loc = CGEvent(source: nil)?.location else { return }
+        let (top, bottom) = pillBandCG()
+        let y = loc.y
+        let xr = cursorXFromRight()
+        // summon / hide — same hysteresis as the monitor
+        if xr <= REVEAL_WIDTH, y >= top - 26, y <= bottom + 26 {
+            applyVisibility(true)
+        } else if xr > PILL_WIDTH + HIDE_MARGIN || y > bottom + 26 || y < top - 26 {
+            applyVisibility(false)
+        }
+        // attention — cursor on the glass owns the moment
+        if stripVisible, xr <= PILL_WIDTH, y >= top, y <= bottom {
+            takeAttention()
+            tab.reassertCursor()           // belt + suspenders during the activation handoff
+        } else {
+            releaseAttention()
+        }
     }
 
     // low power mode toggles repaint the battery instantly

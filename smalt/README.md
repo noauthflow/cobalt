@@ -94,5 +94,13 @@ anyway, so any permission a later version earns survives rebuilds.)
 - constants: `cell/gap/pad`, `iconSize`, `typeSize/pctSize` in `Theme`;
   `PILL_RADIUS`, `REVEAL_WIDTH` (12px), `HIDE_MARGIN` (6px) in main.swift
 - the pill is clickable; widgets don't do anything yet — v1 flips that
+- focus: the panel can never become key (`OverlayPanel`) — a menu bar takes
+  clicks, never keystrokes; the app beneath keeps focus hovered or clicked
+- cursor: while the cursor is over the glass, smalt owns it (arrow) —
+  defended on mouse moves AND passively re-won at 20Hz, since apps beneath
+  re-assert their I-beam/resize cursors on redraw with no mouse event
+- clicks: hidden glass = click-through (the edge belongs to the apps again);
+  visible glass = smalt takes the click. cmd-override still forces
+  click-through at any visibility
 - coexists with cobalt-60: the wall holds the cursor 5px below the menu bar,
   nowhere near the pill's mid-right-edge band — they never fight
