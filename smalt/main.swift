@@ -31,9 +31,9 @@ let PILL_INSET: CGFloat = 6      // gap between pill and the right screen edge
 let PILL_RADIUS: CGFloat = 14
 let REVEAL_WIDTH: CGFloat = 12   // summon zone: cursor within this of the right edge
 let HIDE_MARGIN: CGFloat = 6     // cursor must drop this far left of the pill before it springs away
-// spring constants: ω ≈ 22.8 rad/s, ζ ≈ 0.66 — a pop with ~8% overshoot
-let SPRING_K: CGFloat = 520
-let SPRING_C: CGFloat = 30
+// spring constants: ω ≈ 23.7 rad/s, ζ ≈ 0.68 — a crisp pop with ~5% overshoot
+let SPRING_K: CGFloat = 560
+let SPRING_C: CGFloat = 32
 
 // MARK: - the pill
 
@@ -70,20 +70,20 @@ func pillFrame(visible: Bool) -> NSRect {
     return NSRect(x: x, y: y, width: PILL_WIDTH, height: PILL_HEIGHT)
 }
 
-// MARK: - the spring (replaces NSAnimationContext entirely)
+// MARK: - the spring
 //
-// one driver, one target, retargetable mid-flight. NSAnimationContext
-// completion handlers were the flicker bug: a stale handler kept animating
-// toward an old position while a newer animation fought it. a spring has
-// no completions — retargeting is just changing the goal, which is smooth
-// by construction, no matter how fast the cursor flips in and out.
-//
-// driven by CADisplayLink (display-synced, so it ticks at the screen's real
-// refresh rate) and integrating with MEASURED dt — the old Timer version
-// assumed 120Hz but macOS coalesces timers, so physics ran at half speed.
+// one driver, one target, retargetable mid-flight. driven by a screen-
+// attached CADisplayLink — display-synced, and tied to the SCREEN rather
+// than the pill's view, so it keeps firing while the pill's window is
+// off-screen (the pill's resting state). ticks land on the main run loop.
+// a watchdog falls back to a plain timer if the link ever goes quiet (and
+// for pre-14 systems). measured dt: physics time is wall time. when the
+// spring settles, the link is stopped — zero CPU between animations.
 
 final class SpringDriver: NSObject {
-    var timer: Timer?
+    private var link: CADisplayLink?
+    private var fallbackTimer: Timer?
+    private(set) var running = false
     var x: CGFloat = 0
     var v: CGFloat = 0
     var target: CGFloat = 0
@@ -91,34 +91,51 @@ final class SpringDriver: NSObject {
 
     func chase(_ targetX: CGFloat) {
         target = targetX
-        guard timer == nil else { return }             // already chasing — just retargeted
+        guard !running else { return }             // already chasing — just retargeted
         x = strip.frame.origin.x
         v = 0
         last = 0
-        // a plain Timer with MEASURED dt. (CADisplayLink was tried first —
-        // but a view-attached display link pauses while its window is
-        // off-screen, which is exactly the pill's resting state: the spring
-        // would never tick and the pill could never appear.) with measured
-        // dt the physics is time-correct at any fire rate, and coalescing
-        // jitter just averages out in the integration.
-        let t = Timer(timeInterval: 1 / 120, repeats: true) { [weak self] _ in self?.integrate() }
-        t.tolerance = 1 / 240                          // keep macOS from coalescing hard
-        RunLoop.main.add(t, forMode: .common)
-        timer = t
+        if #available(macOS 14.0, *), let screen = mainScreen() {
+            let dl = screen.displayLink(target: self, selector: #selector(tick(_:)))
+            dl.add(to: .main, forMode: .common)
+            link = dl
+            running = true
+            // watchdog: if the link never fires (occluded-screen edge cases),
+            // fall back to a plain timer rather than freezing mid-flight
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                guard let self, self.running, self.last == 0 else { return }
+                self.link?.invalidate()
+                self.link = nil
+                self.startFallbackTimer()
+            }
+        } else {
+            startFallbackTimer()
+        }
     }
 
+    private func startFallbackTimer() {
+        let t = Timer(timeInterval: 1 / 120, repeats: true) { [weak self] _ in self?.integrate() }
+        t.tolerance = 1 / 240
+        RunLoop.main.add(t, forMode: .common)
+        fallbackTimer = t
+        running = true
+    }
+
+    @objc private func tick(_ dl: CADisplayLink) { integrate() }
+
     private func integrate() {
+        guard running else { return }
         let now = CACurrentMediaTime()
         var dt = last == 0 ? 1 / 120 : CGFloat(now - last)
         last = now
-        dt = min(dt, 1 / 30)                           // clamp huge gaps (display sleep, etc.)
+        dt = min(dt, 1 / 30)                       // clamp huge gaps (display sleep, etc.)
         let accel = -SPRING_K * (x - target) - SPRING_C * v
         v += accel * dt
         x += v * dt
         var f = strip.frame
-        f.origin.x = x
+        f.origin.x = x.rounded()               // whole pixels: no subpixel shimmer on the glass
         strip.setFrame(f, display: false)
-        if abs(x - target) < 0.5, abs(v) < 4 {
+        if abs(x - target) < 0.25, abs(v) < 2 {
             f.origin.x = target
             strip.setFrame(f, display: true)
             stop()
@@ -126,8 +143,11 @@ final class SpringDriver: NSObject {
     }
 
     func stop() {
-        timer?.invalidate()
-        timer = nil
+        link?.invalidate()
+        link = nil
+        fallbackTimer?.invalidate()
+        fallbackTimer = nil
+        running = false
         last = 0
     }
 }
