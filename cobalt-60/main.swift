@@ -90,8 +90,9 @@ let tapCallback: CGEventTapCallBack = { _, type, event, _ in
 let CORNER_RADIUS: CGFloat = 14
 let CORNER_OVERLAP: CGFloat = 0
 
-var cornerWindows: [NSWindow] = []
-var cornersShown = false
+var cornerWindows: [(window: NSWindow, display: CGDirectDisplayID)] = []
+// displays currently showing a fullscreen window — only their patches are up
+var fullscreenDisplays: Set<CGDirectDisplayID> = []
 var cornerEval: DispatchWorkItem?
 
 final class CornerView: NSView {
@@ -131,11 +132,12 @@ final class CornerView: NSView {
 }
 
 func makeCornerFillers() {
-    for w in cornerWindows { w.orderOut(nil) }
+    for (w, _) in cornerWindows { w.orderOut(nil) }
     cornerWindows.removeAll()
+    fullscreenDisplays = []
     let s = CORNER_RADIUS + CORNER_OVERLAP
-    var corner = 0
     for screen in NSScreen.screens {
+        var corner = 0 // 0 TL, 1 TR, 2 BL, 3 BR — reset per screen
         let f = screen.frame
         for rect in [
             NSRect(x: f.minX,     y: f.maxY - s, width: s, height: s),  // top-left
@@ -158,49 +160,57 @@ func makeCornerFillers() {
             w.alphaValue = 0
             w.contentView = CornerView(corner: corner, frame: NSRect(origin: .zero, size: rect.size))
             corner += 1
-            cornerWindows.append(w)
+            let display = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID ?? 0
+            cornerWindows.append((w, display))
         }
     }
 }
 
-func setCorners(_ shown: Bool) {
-    guard shown != cornersShown else { return }
-    cornersShown = shown
-    for w in cornerWindows {
+// show patches only on the displays that actually have a fullscreen window;
+// other monitors keep their wallpaper corners
+func setCorners(_ fullscreen: Set<CGDirectDisplayID>) {
+    guard fullscreen != fullscreenDisplays else { return }
+    fullscreenDisplays = fullscreen
+    for (w, display) in cornerWindows {
+        let shown = fullscreen.contains(display)
         if shown { w.orderFrontRegardless() }
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.25
             w.animator().alphaValue = shown ? 1 : 0
         }
         if !shown {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                if !cornersShown { w.orderOut(nil) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak w] in
+                if !fullscreen.contains(display) { w?.orderOut(nil) }
             }
         }
     }
 }
 
-// true if any onscreen layer-0 window covers a display (i.e. fullscreen app)
-func anyFullscreenWindow() -> Bool {
-    guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else { return false }
-    let displays = NSScreen.screens.compactMap {
-        ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID).map { CGDisplayBounds($0) }
+// the set of displays covered by an onscreen layer-0 window (fullscreen apps)
+func fullscreenWindowDisplays() -> Set<CGDirectDisplayID> {
+    guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else { return [] }
+    let displays = NSScreen.screens.compactMap { screen -> (CGDirectDisplayID, CGRect)? in
+        guard let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID else { return nil }
+        return (id, CGDisplayBounds(id))
     }
-    return list.contains { d in
-        guard (d[kCGWindowLayer as String] as? Int) == 0,
-              let b = d[kCGWindowBounds as String] as? [String: NSNumber] else { return false }
-        let r = CGRect(x: b["X"]?.doubleValue ?? 0, y: b["Y"]?.doubleValue ?? 0,
-                       width: b["Width"]?.doubleValue ?? 0, height: b["Height"]?.doubleValue ?? 0)
-        return displays.contains { db in
-            abs(r.minX - db.minX) <= 2 && abs(r.minY - db.minY) <= 2
+    var covered: Set<CGDirectDisplayID> = []
+    for (id, db) in displays {
+        let isCovered = list.contains { d in
+            guard (d[kCGWindowLayer as String] as? Int) == 0,
+                  let b = d[kCGWindowBounds as String] as? [String: NSNumber] else { return false }
+            let r = CGRect(x: b["X"]?.doubleValue ?? 0, y: b["Y"]?.doubleValue ?? 0,
+                           width: b["Width"]?.doubleValue ?? 0, height: b["Height"]?.doubleValue ?? 0)
+            return abs(r.minX - db.minX) <= 2 && abs(r.minY - db.minY) <= 2
                 && r.width >= db.width - 2 && r.height >= db.height - 2
         }
+        if isCovered { covered.insert(id) }
     }
+    return covered
 }
 
 func scheduleCornerUpdate() {
     cornerEval?.cancel()
-    let item = DispatchWorkItem { setCorners(anyFullscreenWindow()) }
+    let item = DispatchWorkItem { setCorners(fullscreenWindowDisplays()) }
     cornerEval = item
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: item)
 }
@@ -342,7 +352,7 @@ func cmdStatus() {
             print("wall:     disabled — cursor boundary inactive")
         }
         if cornersOn {
-            print("corners:  on — black while a fullscreen app is up (\(cornerWindows.count/4) displays watched)")
+            print("corners:  on — black on fullscreen displays only (\(cornerWindows.count/4) displays watched, \(fullscreenDisplays.count) currently fullscreen)")
         } else {
             print("corners:  disabled — fullscreen cutouts show wallpaper")
         }
