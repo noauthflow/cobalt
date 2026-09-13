@@ -38,12 +38,105 @@ let SPRING_C: CGFloat = 32
 // MARK: - the pill
 
 final class StripView: NSView {
+    override var isFlipped: Bool { true }   // y counts down from the pill top
+
     // the glass: soft violet (D0BCFF), rounded — no border, the shadow does the lifting
     override func draw(_ dirtyRect: NSRect) {
         let path = NSBezierPath(roundedRect: bounds, xRadius: PILL_RADIUS, yRadius: PILL_RADIUS)
         NSColor(srgbRed: 0xD0/255.0, green: 0xBC/255.0, blue: 0xFF/255.0, alpha: 1).setFill()
         path.fill()
+        drawWidgets(in: bounds)
     }
+
+    // clock / date / battery, stacked from the top, centered — permission-free
+    private func drawWidgets(in bounds: NSRect) {
+        var y: CGFloat = 12
+        y = drawCentered(Widget.timeForm.string(from: Date()), color: Widget.ink, topY: y, rowH: 20, in: bounds)
+        y = drawCentered(Widget.dateForm.string(from: Date()), color: Widget.ink, topY: y, rowH: 16, in: bounds)
+        drawBatteryVertical(centerX: bounds.midX, topY: y, rowH: 26)
+    }
+}
+
+// MARK: - widgets
+//// dark ink on the glass. all sources are permission-free: IOKit power
+// sources, clock. (CoreWLAN rssi could join later.)
+
+enum Widget {
+    static let ink = NSColor(srgbRed: 0.13, green: 0.06, blue: 0.24, alpha: 1)
+    static let inkDim = NSColor(srgbRed: 0.13, green: 0.06, blue: 0.24, alpha: 0.45)
+    static let glass = NSColor(srgbRed: 0xD0/255.0, green: 0xBC/255.0, blue: 0xFF/255.0, alpha: 1)
+
+    static let timeForm: DateFormatter = {
+        let f = DateFormatter()
+        f.timeStyle = .short
+        return f
+    }()
+
+    static let dateForm: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "EEE d MMM"
+        return f
+    }()
+}
+
+// centered text; returns the y below the row
+func drawCentered(_ s: String, color: NSColor, topY: CGFloat, rowH: CGFloat,
+                  in bounds: NSRect, font: NSFont = NSFont.systemFont(ofSize: 13, weight: .medium)) -> CGFloat {
+    let a: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color]
+    let size = (s as NSString).size(withAttributes: a)
+    (s as NSString).draw(at: NSPoint(x: bounds.midX - size.width / 2, y: topY + (rowH - size.height) / 2),
+                         withAttributes: a)
+    return topY + rowH
+}
+
+// IOKit power sources — the same thing the native battery item reads
+func batteryLevel() -> (pct: Int, charging: Bool)? {
+    guard let blob = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
+          let list = IOPSCopyPowerSourcesList(blob)?.takeRetainedValue() as? [CFTypeRef] else { return nil }
+    for ps in list {
+        guard let d = IOPSGetPowerSourceDescription(blob, ps)?.takeUnretainedValue() as? [String: Any],
+              let cap = d[kIOPSCurrentCapacityKey] as? Int,
+              let max = d[kIOPSMaxCapacityKey] as? Int, max > 0 else { continue }
+        return (Int((Double(cap) / Double(max) * 100).rounded()), d[kIOPSIsChargingKey] as? Bool == true)
+    }
+    return nil
+}
+
+// battery glyph + percentage, centered as one row
+func drawBatteryVertical(centerX: CGFloat, topY: CGFloat, rowH: CGFloat) {
+    guard let (pct, charging) = batteryLevel() else { return }
+    let label = "\(pct)%"
+    let a: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 13, weight: .medium), .foregroundColor: Widget.ink]
+    let ts = (label as NSString).size(withAttributes: a)
+    let glyphW: CGFloat = 22
+    let total = glyphW + 5 + ts.width
+    let x0 = centerX - total / 2
+    let gy = topY + (rowH - 12) / 2
+
+    let g = NSRect(x: x0, y: gy, width: glyphW, height: 12)
+    Widget.ink.setStroke()
+    let outline = NSBezierPath(roundedRect: g, xRadius: 3, yRadius: 3)
+    outline.lineWidth = 1
+    outline.stroke()
+    Widget.ink.setFill()
+    NSRect(x: g.maxX + 1, y: gy + 3.5, width: 2, height: 5).fill() // nub
+    let fillW = (glyphW - 4) * CGFloat(pct) / 100
+    NSRect(x: g.minX + 2, y: g.minY + 2, width: max(fillW, 2), height: g.height - 4).fill()
+
+    if charging {
+        // bolt knocked out of the fill in glass color
+        Widget.glass.setFill()
+        let bolt = NSBezierPath()
+        bolt.move(to: NSPoint(x: g.midX + 2, y: g.maxY - 1))
+        bolt.line(to: NSPoint(x: g.midX - 3, y: g.minY + 3.5))
+        bolt.line(to: NSPoint(x: g.midX - 0.5, y: g.minY + 3.5))
+        bolt.line(to: NSPoint(x: g.midX - 2, y: g.maxY - 1))
+        bolt.line(to: NSPoint(x: g.midX + 3, y: g.minY + 3.5))
+        bolt.line(to: NSPoint(x: g.midX + 0.5, y: g.minY + 3.5))
+        bolt.close()
+        bolt.fill()
+    }
+    (label as NSString).draw(at: NSPoint(x: g.maxX + 5, y: topY + (rowH - ts.height) / 2), withAttributes: a)
 }
 
 // MARK: - state
@@ -310,6 +403,12 @@ func runDaemon() -> Never {
     ) { _ in
         updateStrip()
         applyVisibility(stripVisible, animate: false)   // snap to the new geometry, don't slide
+    }
+
+    // widgets tick — the clock is minute-grade, a 10s repaint is plenty
+    // (and cheap: the window only repaints on demand)
+    Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { _ in
+        strip.contentView?.needsDisplay = true
     }
 
     app.run() // full app run loop — runs the monitors and notifications
