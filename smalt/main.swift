@@ -25,8 +25,26 @@ import IOKit.ps
 // zero permissions: the reveal is a global mouse monitor, not an event
 // tap. nothing is intercepted, nothing is rewritten, nothing is polled.
 
-let PILL_WIDTH: CGFloat = 60
-let PILL_HEIGHT: CGFloat = 144
+// the design system: palette + grid. the ONLY place colors and sizes exist.
+enum Theme {
+    // palette
+    static let bg = NSColor(srgbRed: 0xFA/255.0, green: 0xF6/255.0, blue: 0xF3/255.0, alpha: 1)    // #FAF6F3 pill glass
+    static let icon = NSColor(srgbRed: 0x99/255.0, green: 0x94/255.0, blue: 0x7F/255.0, alpha: 1)  // #99947F icon ink
+    static let lowPower = NSColor(srgbRed: 1.0, green: 0.84, blue: 0.0, alpha: 1)                   // LPM battery fill
+    static let onFill = NSColor(srgbRed: 0.24/255.0, green: 0.22/255.0, blue: 0.16/255.0, alpha: 1) // text over the yellow fill
+    // grid — every widget lives in one uniform CELL × CELL slot, stacked
+    static let cell: CGFloat = 36
+    static let gap: CGFloat = 10
+    static let pad: CGFloat = 12
+    static let stroke: CGFloat = 1.6      // heroicon-style outline weight
+    static let iconRadius: CGFloat = 6
+    // derived — the pill is exactly its grid, nothing hand-placed
+    static var pillWidth: CGFloat { cell + 2 * pad }
+    static var pillHeight: CGFloat { 2 * pad + 4 * cell + 3 * gap }
+}
+
+let PILL_WIDTH = Theme.pillWidth
+let PILL_HEIGHT = Theme.pillHeight
 let PILL_INSET: CGFloat = 6      // gap between pill and the right screen edge
 let PILL_RADIUS: CGFloat = 16
 let REVEAL_WIDTH: CGFloat = 12   // summon zone: cursor within this of the right edge
@@ -40,38 +58,43 @@ let SPRING_C: CGFloat = 32
 final class StripView: NSView {
     override var isFlipped: Bool { true }   // y counts down from the pill top
 
-    // the glass: cream, rounded — no border, the shadow does the lifting
+    // the glass: #FAF6F3, rounded — no border, the shadow does the lifting
     override func draw(_ dirtyRect: NSRect) {
         let path = NSBezierPath(roundedRect: bounds, xRadius: PILL_RADIUS, yRadius: PILL_RADIUS)
-        NSColor(srgbRed: 0xF8/255.0, green: 0xF3/255.0, blue: 0xE6/255.0, alpha: 1).setFill()
+        Theme.bg.setFill()
         path.fill()
         drawWidgets(in: bounds)
     }
 
-    // iPhone-style widget stack: battery, date, time — permission-free
+    // the grid: battery / calendar / hour / minute — one uniform slot each.
+    // nothing is hand-placed; every widget is centered inside its cell.
     private func drawWidgets(in bounds: NSRect) {
-        var y: CGFloat = 10
-        drawBatteryIcon(centerX: bounds.midX, topY: y)
-        y += 16 + 12
-        drawDateIcon(centerX: bounds.midX, topY: y)
-        y += 26 + 12
-        drawTime(centerX: bounds.midX, topY: y)
+        var y = Theme.pad
+        for slot in 0..<4 {
+            let rect = NSRect(x: Theme.pad, y: y, width: Theme.cell, height: Theme.cell)
+            switch slot {
+            case 0: drawBatteryIcon(in: rect)
+            case 1: drawCalendarIcon(in: rect)
+            default: drawTimeDigit(slot == 2 ? .hour : .minute, in: rect)
+            }
+            y += Theme.cell + Theme.gap
+        }
     }
 }
 
 // MARK: - widgets
 //
-// dark ink on cream. all sources are permission-free: IOKit power sources,
-// clock, ProcessInfo low-power state.
+// heroicon-style outline icons in #99947F, uniform stroke, uniform slots.
+// sources are permission-free: IOKit power sources, clock, ProcessInfo
+// low-power state.
 
-enum Widget {
-    static let ink = NSColor(srgbRed: 0.13, green: 0.06, blue: 0.24, alpha: 1)
-
-    // battery fill: white — yellow while Low Power Mode is on
-    static var batteryFill: NSColor {
-        ProcessInfo.processInfo.isLowPowerModeEnabled
-            ? NSColor(srgbRed: 1.0, green: 0.84, blue: 0.0, alpha: 1)
-            : .white
+extension NSFont {
+    // SF Pro Rounded, monospaced digits — the clock's voice
+    static func roundedMono(_ size: CGFloat, _ weight: NSFont.Weight) -> NSFont {
+        let base = NSFont.monospacedDigitSystemFont(ofSize: size, weight: weight)
+        guard let desc = base.fontDescriptor.withDesign(.rounded),
+              let f = NSFont(descriptor: desc, size: size) else { return base }
+        return f
     }
 }
 
@@ -88,75 +111,69 @@ func batteryLevel() -> (pct: Int, charging: Bool)? {
     return nil
 }
 
-// iPhone-style battery: outline glyph, proportional fill, the number INSIDE
-// the icon. fill is white — yellow while Low Power Mode is on.
-func drawBatteryIcon(centerX: CGFloat, topY: CGFloat) {
+// battery: heroicon-style outline glyph in the icon color, proportional fill
+// (same color; yellow in low power mode), the number INSIDE — iPhone style
+func drawBatteryIcon(in slot: NSRect) {
     guard let (pct, _) = batteryLevel() else { return }
-    let label = "\(pct)"
-    let g = NSRect(x: centerX - 16, y: topY, width: 32, height: 15)
-    let ink = NSColor(srgbRed: 0.13, green: 0.06, blue: 0.24, alpha: 1)
+    let lowPower = ProcessInfo.processInfo.isLowPowerModeEnabled
+    let g = NSRect(x: slot.midX - 15, y: slot.midY - 7.5, width: 30, height: 15)
 
-    ink.setStroke()
+    Theme.icon.setStroke()
     let outline = NSBezierPath(roundedRect: g, xRadius: 4.5, yRadius: 4.5)
-    outline.lineWidth = 1
+    outline.lineWidth = Theme.stroke
     outline.stroke()
-    ink.setFill()
+    Theme.icon.setFill()
     NSRect(x: g.maxX + 1.5, y: g.midY - 2.5, width: 2, height: 5).fill() // nub
 
-    Widget.batteryFill.setFill()
+    let fillColor = lowPower ? Theme.lowPower : Theme.icon
+    fillColor.setFill()
     let fillW = (g.width - 3) * CGFloat(pct) / 100
     if fillW > 0.5 {
         NSBezierPath(roundedRect: NSRect(x: g.minX + 1.5, y: g.minY + 1.5,
                                          width: fillW, height: g.height - 3),
-                     xRadius: 3, yRadius: 3).fill()
+                     xRadius: 2.5, yRadius: 2.5).fill()
     }
 
-    let a: [NSAttributedString.Key: Any] = [
-        .font: NSFont.monospacedDigitSystemFont(ofSize: 9.5, weight: .semibold),
-        .foregroundColor: ink]
+    // number inside: dark over the yellow fill; over the icon-color fill it
+    // reads in the bg color once the fill reaches it, else in the icon color
+    let label = "\(pct)"
+    let textColor: NSColor = lowPower ? Theme.onFill : (pct >= 40 ? Theme.bg : Theme.icon)
+    let a: [NSAttributedString.Key: Any] = [.font: NSFont.roundedMono(9.5, .semibold), .foregroundColor: textColor]
     let ts = (label as NSString).size(withAttributes: a)
     (label as NSString).draw(at: NSPoint(x: g.midX - ts.width / 2, y: g.midY - ts.height / 2), withAttributes: a)
 }
 
-// iOS-calendar-style date icon — static for now (non-functional)
-func drawDateIcon(centerX: CGFloat, topY: CGFloat) {
-    let s: CGFloat = 26
-    let r = NSRect(x: centerX - s / 2, y: topY, width: s, height: s)
-    NSColor.white.setFill()
-    NSBezierPath(roundedRect: r, xRadius: 7, yRadius: 7).fill()
+// heroicons "calendar": outline body, header line, two binder ticks
+func drawCalendarIcon(in slot: NSRect) {
+    Theme.icon.setStroke()
+    let box = NSRect(x: slot.midX - 12, y: slot.minY + (Theme.cell - 26) / 2, width: 24, height: 26)
+    let p = NSBezierPath(roundedRect: box, xRadius: Theme.iconRadius, yRadius: Theme.iconRadius)
+    p.lineWidth = Theme.stroke
+    p.lineCapStyle = .round
+    p.stroke()
 
-    // red header band, clipped to the icon's rounded corners
-    if let ctx = NSGraphicsContext.current?.cgContext {
-        ctx.saveGState()
-        NSBezierPath(roundedRect: r, xRadius: 7, yRadius: 7).addClip()
-        NSColor(srgbRed: 1.0, green: 0.23, blue: 0.19, alpha: 1).setFill()
-        NSRect(x: r.minX, y: r.minY, width: s, height: 8).fill()
-        ctx.restoreGState()
+    let header = NSBezierPath()
+    header.move(to: NSPoint(x: box.minX, y: box.minY + 9))
+    header.line(to: NSPoint(x: box.maxX, y: box.minY + 9))
+    header.lineWidth = Theme.stroke
+    header.stroke()
+
+    for dx in [6.5, 17.5] {
+        let t = NSBezierPath()
+        t.move(to: NSPoint(x: box.minX + dx, y: box.minY - 2))
+        t.line(to: NSPoint(x: box.minX + dx, y: box.minY + 5))
+        t.lineWidth = Theme.stroke
+        t.stroke()
     }
-
-    let day = Calendar.current.component(.day, from: Date())
-    let a: [NSAttributedString.Key: Any] = [
-        .font: NSFont.systemFont(ofSize: 12, weight: .semibold),
-        .foregroundColor: NSColor(srgbRed: 0.13, green: 0.06, blue: 0.24, alpha: 1)]
-    let ds = ("\(day)" as NSString).size(withAttributes: a)
-    ("\(day)" as NSString).draw(at: NSPoint(x: r.midX - ds.width / 2, y: topY + 9 + (16 - ds.height) / 2),
-                                withAttributes: a)
 }
 
-// the time takes two spots: hour over minute, like a flip clock
-func drawTime(centerX: CGFloat, topY: CGFloat) {
-    let dc = Calendar.current.dateComponents([.hour, .minute], from: Date())
-    let a: [NSAttributedString.Key: Any] = [
-        .font: NSFont.monospacedDigitSystemFont(ofSize: 21, weight: .semibold),
-        .foregroundColor: NSColor(srgbRed: 0.13, green: 0.06, blue: 0.24, alpha: 1)]
-    let hs = String(format: "%02d", dc.hour ?? 0)
-    let ms = String(format: "%02d", dc.minute ?? 0)
-    for (i, s) in [hs, ms].enumerated() {
-        let sz = (s as NSString).size(withAttributes: a)
-        (s as NSString).draw(at: NSPoint(x: centerX - sz.width / 2,
-                                         y: topY + CGFloat(i * 26) + (26 - sz.height) / 2),
-                             withAttributes: a)
-    }
+// time: hour over minute — one CELL slot each, flip-clock style
+func drawTimeDigit(_ component: Calendar.Component, in slot: NSRect) {
+    let value = Calendar.current.component(component, from: Date())
+    let s = String(format: "%02d", value)
+    let a: [NSAttributedString.Key: Any] = [.font: NSFont.roundedMono(19, .semibold), .foregroundColor: Theme.icon]
+    let sz = (s as NSString).size(withAttributes: a)
+    (s as NSString).draw(at: NSPoint(x: slot.midX - sz.width / 2, y: slot.midY - sz.height / 2), withAttributes: a)
 }
 
 // MARK: - state
