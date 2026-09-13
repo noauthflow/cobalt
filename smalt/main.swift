@@ -13,8 +13,10 @@ import IOKit.ps
 // docked at the right edge of the screen, dead center, nothing in it.
 //
 //   hidden by default. the cursor entering the right edge, level with the
-//   pill, summons it: it springs out with an overshoot and settles.
-//   dropping left of the pill dismisses it again.
+//   pill, summons it: a real spring drives it out (underdamped — it pops
+//   past the dock and settles). dropping left of the pill dismisses it.
+//   the spring retargets mid-flight, so fast in-out just reverses it
+//   smoothly — no completion-handler races, no flicker.
 //
 //   the pill is deliberately empty for now — a pane of glass first,
 //   contents later.
@@ -29,10 +31,10 @@ let PILL_INSET: CGFloat = 6      // gap between pill and the right screen edge
 let PILL_RADIUS: CGFloat = 14
 let REVEAL_WIDTH: CGFloat = 12   // summon zone: cursor within this of the right edge
 let HIDE_MARGIN: CGFloat = 6     // cursor must drop this far left of the pill before it springs away
-// the spring: fast pop past the dock position, then a short settle back.
-let POP_DURATION: TimeInterval = 0.16
-let OVERSHOOT: CGFloat = 7
-let HIDE_DURATION: TimeInterval = 0.18
+// spring constants: ω ≈ 19.5 rad/s, ζ ≈ 0.66 — a pop with ~6% overshoot
+let SPRING_K: CGFloat = 380
+let SPRING_C: CGFloat = 26
+let SPRING_DT: CGFloat = 1 / 120
 
 // MARK: - the pill
 
@@ -54,7 +56,9 @@ var stripVisible = false       // hidden until the cursor hovers the right edge
 var evalItem: DispatchWorkItem?
 
 func mainScreen() -> NSScreen? {
-    NSScreen.screens.first { $0.frame.origin.y == 0 } ?? NSScreen.main
+    // the CG main display — cursor global coordinates are relative to THIS
+    // screen's arrangement, so the pill must anchor to the same one.
+    NSScreen.screens.first { displayID($0) == CGMainDisplayID() } ?? NSScreen.main
 }
 
 // where the pill sits: docked against the right edge, vertically centered.
@@ -67,60 +71,81 @@ func pillFrame(visible: Bool) -> NSRect {
     return NSRect(x: x, y: y, width: PILL_WIDTH, height: PILL_HEIGHT)
 }
 
-// springy: pop out fast with a small overshoot, then settle back into the
-// dock. hide is a plain ease-in retract.
-func refreshStrip(animate: Bool) {
-    let target = pillFrame(visible: stripVisible)
-    if animate {
-        if stripVisible {
-            var overshoot = target
-            overshoot.origin.x -= OVERSHOOT
-            NSAnimationContext.runAnimationGroup({ ctx in
-                ctx.duration = POP_DURATION
-                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                strip.animator().setFrame(overshoot, display: true)
-            }, completionHandler: {
-                NSAnimationContext.runAnimationGroup { ctx in
-                    ctx.duration = POP_DURATION
-                    ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                    strip.animator().setFrame(target, display: true)
-                }
-            })
-        } else {
-            NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = HIDE_DURATION
-                ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
-                strip.animator().setFrame(target, display: true)
-            }
-        }
-    } else {
-        strip.setFrame(target, display: true)
+// MARK: - the spring (replaces NSAnimationContext entirely)
+//
+// one driver, one target, retargetable mid-flight. NSAnimationContext
+// completion handlers were the flicker bug: a stale handler kept animating
+// toward an old position while a newer animation fought it. a spring has
+// no completions — retargeting is just changing the goal, which is smooth
+// by construction, no matter how fast the cursor flips in and out.
+
+var springTimer: Timer?
+var springX: CGFloat = 0
+var springV: CGFloat = 0
+var springTargetX: CGFloat = 0
+
+func springTo(_ targetX: CGFloat) {
+    springTargetX = targetX
+    guard springTimer == nil else { return }   // already chasing — just retargeted
+    springX = strip.frame.origin.x
+    springV = 0
+    let t = Timer(timeInterval: SPRING_DT, repeats: true) { _ in springTick() }
+    RunLoop.main.add(t, forMode: .common)
+    springTimer = t
+}
+
+func springTick() {
+    let accel = -SPRING_K * (springX - springTargetX) - SPRING_C * springV
+    springV += accel * SPRING_DT
+    springX += springV * SPRING_DT
+    var f = strip.frame
+    f.origin.x = springX
+    strip.setFrame(f, display: true)
+    if abs(springX - springTargetX) < 0.5, abs(springV) < 4 {
+        f.origin.x = springTargetX
+        strip.setFrame(f, display: true)
+        springTimer?.invalidate()
+        springTimer = nil
     }
 }
 
 func applyVisibility(_ desired: Bool, animate: Bool = true) {
     let changed = desired != stripVisible
     stripVisible = desired
-    refreshStrip(animate: animate && changed)
+    guard changed else { return }
+    let target = pillFrame(visible: desired)
+    if animate {
+        // sync y/size, then let the spring chase the x
+        var f = strip.frame
+        f.origin.y = target.origin.y
+        f.size = target.size
+        strip.setFrame(f, display: true)
+        springTo(target.origin.x)
+    } else {
+        springTimer?.invalidate()
+        springTimer = nil
+        strip.setFrame(target, display: true)
+    }
 }
 
-// current cursor position. CGEvent coordinates are top-left origin.
-func cursorYFromTop() -> CGFloat {
-    CGEvent(source: nil)?.location.y ?? .infinity
+// current cursor position. CGEvent coordinates are global, top-left origin —
+// NOT relative to any screen. cocoa x == cg x; cg y = globalTop − cocoa y.
+var globalCocoaTopY: CGFloat {
+    NSScreen.screens.map { $0.frame.maxY }.max() ?? 0
 }
 func cursorXFromRight() -> CGFloat {
     guard let loc = CGEvent(source: nil)?.location, let screen = mainScreen() else { return .infinity }
-    return screen.frame.width - loc.x
+    return screen.frame.maxX - loc.x
 }
 
-// the pill's vertical band, as distances from the top of the display.
-// the summon only fires when the cursor is level with the pill — hovering
-// the right edge above or below it does nothing.
-func pillBandFromTop() -> (top: CGFloat, bottom: CGFloat) {
-    guard let screen = mainScreen() else { return (0, 0) }
-    let f = screen.frame
-    let top = (f.height + PILL_HEIGHT) / 2
-    return (top, top + PILL_HEIGHT)
+// the pill's vertical band, in CG top-left coordinates — the same space the
+// cursor reports in. (the old version mixed coordinate spaces: on any
+// display arrangement where the main display wasn't at the global origin,
+// the summon zone stopped matching the pill's real position.)
+func pillBandCG() -> (top: CGFloat, bottom: CGFloat) {
+    let fr = pillFrame(visible: true)
+    let top = globalCocoaTopY - fr.maxY
+    return (top, top + fr.height)
 }
 
 // MARK: - fullscreen + mission control detection
@@ -167,10 +192,11 @@ func updateStrip() {
     } else {
         // hover decides: visible iff the cursor is in the summon zone —
         // within 12px of the right edge, level with the pill.
-        let (top, bottom) = pillBandFromTop()
-        let y = cursorYFromTop()
-        let inBand = y >= top - 26 && y <= bottom + 26
-        applyVisibility(cursorXFromRight() <= REVEAL_WIDTH && inBand)
+        let (top, bottom) = pillBandCG()
+        guard let loc = CGEvent(source: nil)?.location else { return }
+        let inBand = loc.y >= top - 26 && loc.y <= bottom + 26
+        let xr = cursorXFromRight()
+        applyVisibility(xr <= REVEAL_WIDTH && inBand)
     }
 }
 
@@ -215,14 +241,16 @@ func runDaemon() -> Never {
     // nothing to intercept and nothing to grant. the cursor entering the
     // right edge, level with the pill, springs it out; dropping left of the
     // pill (or past its band) springs it away. hysteresis between the two
-    // lines means edge jitter can't flicker it.
+    // lines means edge jitter can't flicker it — and the spring retargets,
+    // so even fast in-out is a smooth reversal, never a glitch.
     NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged, .otherMouseDragged]) { _ in
-        let (top, bottom) = pillBandFromTop()
-        let y = cursorYFromTop()
+        let (top, bottom) = pillBandCG()
+        guard let loc = CGEvent(source: nil)?.location else { return }
+        let y = loc.y
         let xr = cursorXFromRight()
         if xr <= REVEAL_WIDTH, y >= top - 26, y <= bottom + 26 {
             applyVisibility(true)
-        } else if xr > PILL_WIDTH + HIDE_MARGIN || y > bottom + 26 {
+        } else if xr > PILL_WIDTH + HIDE_MARGIN || y > bottom + 26 || y < top - 26 {
             applyVisibility(false)
         }
     }
@@ -240,7 +268,7 @@ func runDaemon() -> Never {
         object: nil, queue: .main
     ) { _ in
         updateStrip()
-        refreshStrip(animate: false)   // snap to the new geometry, don't slide
+        applyVisibility(stripVisible, animate: false)   // snap to the new geometry, don't slide
     }
 
     app.run() // full app run loop — runs the monitors and notifications
