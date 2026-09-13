@@ -38,8 +38,7 @@ enum Theme {
     static let glass   = NSColor(srgbRed: 0xFA/255.0, green: 0xF6/255.0, blue: 0xF3/255.0, alpha: 1)  // #FAF6F3 pill glass
     static let ink     = NSColor(srgbRed: 0x99/255.0, green: 0x94/255.0, blue: 0x7F/255.0, alpha: 1)  // #99947F strokes + labels
     static let inkDeep = NSColor(srgbRed: 0x3D/255.0, green: 0x38/255.0, blue: 0x29/255.0, alpha: 1)  // #3D3829 the darker on-palette ink
-    static let lpm     = NSColor(srgbRed: 1.0, green: 0.84, blue: 0.0, alpha: 1)                       // low-power battery stroke
-    static let lpmInk  = NSColor(srgbRed: 0xA1/255.0, green: 0x62/255.0, blue: 0x07/255.0, alpha: 1)  // #A16207 dark amber — LPM percentage, same warmth, readable on the glass
+    static let lpm     = NSColor(srgbRed: 0xCA/255.0, green: 0x8A/255.0, blue: 0x04/255.0, alpha: 1)  // #CA8A04 low-power amber — icon + percentage, one color
 
     // grid — one uniform CELL slot per widget, stacked top to bottom
     static let cell: CGFloat = 28
@@ -332,7 +331,7 @@ func drawBattery(in slot: NSRect) {
     // the number, inside the body (svg rect x1.5–21, y7.5–18), ink-centered,
     // icon color normally; in LPM a darker amber — yellow family like the
     // stroke, but readable on the cream glass
-    let iconColor = lowPower ? Theme.lpmInk : Theme.ink
+    let iconColor = lowPower ? Theme.lpm : Theme.ink
     let size: CGFloat = pct >= 100 ? Theme.pctSize - 1.5 : Theme.pctSize
     drawText("\(pct)", font: .tabular(size), color: iconColor,
              in: Heroicon.gridRect(CGRect(x: 2.5, y: 8, width: 17.5, height: 9.5), in: slot))
