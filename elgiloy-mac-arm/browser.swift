@@ -85,7 +85,13 @@ enum Browser {
                     set ts to title of tabs of front window
                     set us to URL of tabs of front window
                     set out to (a as text) & (character id 31)
-                    repeat with i from 1 to count of ts
+                    -- title and url lists can momentarily disagree (tab mid-
+                    -- load, chrome's applescript model wedged): bound the loop
+                    -- by the shorter list so a mismatch degrades to a partial
+                    -- row instead of a -1700 crash of the whole query
+                    set tc to count of ts
+                    if (count of us) < tc then set tc to count of us
+                    repeat with i from 1 to tc
                         set out to out & i & (character id 31) & (item i of ts) & (character id 31) & (item i of us) & (character id 30)
                     end repeat
                 end tell
