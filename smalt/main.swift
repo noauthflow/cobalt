@@ -20,25 +20,22 @@ import QuartzCore
 // zero permissions: the reveal is a global mouse monitor, not an event
 // tap. nothing is intercepted, nothing is rewritten, nothing is polled.
 
-let BAR_HEIGHT: CGFloat = 26
+let BAR_HEIGHT: CGFloat = 36
 // the summon zone: cursor within this distance of the strip's top edge.
 // desktop: the strip hides under the menu bar, so this reads as "12px below
 // the menu bar" — below cobalt-60's 5px wall clamp, so the hover always
 // lands, wall relaxed or not. fullscreen: 12px from the top edge.
 let REVEAL_HEIGHT: CGFloat = 12
 let HIDE_MARGIN: CGFloat = 6     // cursor must drop this far below the strip before it slides away
-let SLIDE_DURATION: TimeInterval = 0.08   // fast — the strip should feel like a reflex, not an animation
+let SLIDE_DURATION: TimeInterval = 0.22
 
 // MARK: - the strip
 
 final class StripView: NSView {
     override func draw(_ dirtyRect: NSRect) {
-        // ground cobalt glass: near-black pane, one cobalt-blue hairline
-        // along the bottom edge — the seam where the glass meets the screen
-        NSColor(srgbRed: 0.055, green: 0.065, blue: 0.085, alpha: 1).setFill()
+        // the glass: soft violet (D0BCFF), nothing more
+        NSColor(srgbRed: 0xD0/255.0, green: 0xBC/255.0, blue: 0xFF/255.0, alpha: 1).setFill()
         bounds.fill()
-        NSColor(srgbRed: 0.0, green: 0.28, blue: 0.67, alpha: 1).setFill()
-        NSRect(x: 0, y: 0, width: bounds.width, height: 1).fill()
     }
 }
 
