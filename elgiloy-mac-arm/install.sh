@@ -40,13 +40,12 @@ MSG
 fi
 
 echo "building (swiftc)"
-swiftc -O -o "$NAME" main.swift tap.swift overlay.swift browser.swift favicon.swift \
-  -framework AppKit -framework ApplicationServices -framework OSAKit
-codesign --force --sign "cobalt-dev" "$NAME"
-echo "signed (cobalt-dev)"
-
 mkdir -p "$HOME/.local/bin"
-cp -f "$NAME" "$BIN_LOCAL"
+# build straight to the install target — nothing lands in the repo folder
+swiftc -O -o "$BIN_LOCAL" main.swift tap.swift overlay.swift browser.swift favicon.swift \
+  -framework AppKit -framework ApplicationServices -framework OSAKit
+codesign --force --sign "cobalt-dev" "$BIN_LOCAL"
+echo "signed (cobalt-dev)"
 
 launchctl bootout "$GUI/$LABEL" 2>/dev/null || true
 
