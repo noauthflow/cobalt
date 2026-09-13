@@ -2,7 +2,12 @@
 
 the radioactive isotope of cobalt
 
-a daemon that keeps the mouse cursor from entering the top 5px of the screen (the menu bar area).
+two independent features in one agent:
+
+- **the wall** — keeps the mouse cursor from entering the top 5px of the screen (the menu bar area)
+- **the corner filler** — tiny black squares in the screen corners while a fullscreen app is up, hiding the wallpaper slivers the window server's rounding leaves behind
+
+each can be toggled independently and the switches persist (see commands).
 
 ## how it works
 
@@ -16,9 +21,14 @@ the boundary is computed from the screen's `visibleFrame` (which excludes the me
 
 the installed binary is on your PATH, so it controls itself:
 
-    cobalt-60 on       start the wall
-    cobalt-60 off      stop the wall (starts again at next login — the launchd plist stays)
-    cobalt-60 status   installed / loaded / running, plus the log tail if it's struggling
+    cobalt-60 on            start the agent
+    cobalt-60 off           stop the agent (starts again at next login — the launchd plist stays)
+    cobalt-60 status        installed / loaded / running + per-feature state
+    cobalt-60 wall on|off   toggle the cursor boundary on its own
+    cobalt-60 corners on|off
+                            toggle the fullscreen corner filler on its own
+
+the feature switches persist in the defaults domain `dev.cobalt.cobalt-60` (they survive logins and daemon restarts — stopping the agent with `off` does not reset them). toggling a switch bounces the daemon so it re-reads the state instantly. both default to **on**.
 
 `install.sh` and `install.sh uninstall` remain the way to install or remove the whole thing (binary + launchd agent).
 
@@ -38,5 +48,6 @@ the binary is installed to `~/.local/bin/cobalt-60` — that exact path is what 
 ## notes
 
 - logs: `/tmp/cobalt-60.err`
-- the margin is 5px — constant `TOP_MARGIN` in main.swift if you want to change it; the top-right exemption width is `CORNER_EXEMPT` (5px)
+- the margin is 5px — constant `TOP_MARGIN` in main.swift if you want to change it; the top-right exemption width is `CORNER_EXEMPT` (5px); the corner arc is `CORNER_RADIUS` (14px)
+- switch storage: `defaults write dev.cobalt.cobalt-60 wallEnabled -bool false` and `cornersEnabled` do the same as the CLI toggles
 - shows up in system settings → general → login items → "allow in the background"

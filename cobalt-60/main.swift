@@ -17,6 +17,19 @@ let TOP_MARGIN: CGFloat = 5
 // cursor can enter the menu bar like normal. outside the zone the 5px wall
 // applies as before.
 let CORNER_EXEMPT: CGFloat = 5
+
+// feature switches — persisted via `defaults` (domain dev.cobalt.cobalt-60),
+// read by the daemon at startup. the CLI flips them and kickstarts the
+// agent, so a toggle takes effect immediately and survives logins.
+let defaultsSuite = "dev.cobalt.cobalt-60"
+var wallOn = true
+var cornersOn = true
+
+func loadFeatures() {
+    let d = UserDefaults(suiteName: defaultsSuite) ?? .standard
+    wallOn = d.object(forKey: "wallEnabled") as? Bool ?? true
+    cornersOn = d.object(forKey: "cornersEnabled") as? Bool ?? true
+}
 let label = "dev.cobalt.cobalt-60"
 let name = "cobalt-60"
 let errLog = "/tmp/cobalt-60.err"
@@ -41,10 +54,12 @@ func recomputeMinY() {
 let tapCallback: CGEventTapCallBack = { _, type, event, _ in
     switch type {
     case .mouseMoved, .leftMouseDragged, .otherMouseDragged:
-        let loc = event.location
-        // top-right exemption: clock / control center stay reachable
-        if loc.y < minYFromTop && loc.x < exemptFromX {
-            event.location = CGPoint(x: loc.x, y: minYFromTop)
+        if wallOn {
+            let loc = event.location
+            // top-right exemption: clock / control center stay reachable
+            if loc.y < minYFromTop && loc.x < exemptFromX {
+                event.location = CGPoint(x: loc.x, y: minYFromTop)
+            }
         }
     default:
         break
@@ -184,6 +199,7 @@ func scheduleCornerUpdate() {
 // MARK: - daemon
 
 func runDaemon() -> Never {
+    loadFeatures()
     recomputeMinY()
     // recompute on display changes (resolution switch, monitor plug/unplug)
     NotificationCenter.default.addObserver(
@@ -191,21 +207,26 @@ func runDaemon() -> Never {
         object: nil, queue: nil
     ) { _ in
         recomputeMinY()
-        makeCornerFillers()
-        scheduleCornerUpdate()
+        if cornersOn {
+            makeCornerFillers()
+            scheduleCornerUpdate()
+        }
     }
 
-    makeCornerFillers()
+    if cornersOn { makeCornerFillers() }
 
     // corner updates are driven by workspace events (space change, app
-    // activate/quit — entering/exiting fullscreen always fires one of these)
-    let wnc = NSWorkspace.shared.notificationCenter
-    let observers = [
-        wnc.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: nil) { _ in scheduleCornerUpdate() },
-        wnc.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: nil) { _ in scheduleCornerUpdate() },
-        wnc.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: nil) { _ in scheduleCornerUpdate() },
-    ]
-    _ = observers // keep alive for the life of the process
+    // activate/quit — entering/exiting fullscreen always fires one of these).
+    // only observed when the corner filler is enabled.
+    if cornersOn {
+        let wnc = NSWorkspace.shared.notificationCenter
+        let observers = [
+            wnc.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: nil) { _ in scheduleCornerUpdate() },
+            wnc.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: nil) { _ in scheduleCornerUpdate() },
+            wnc.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: nil) { _ in scheduleCornerUpdate() },
+        ]
+        _ = observers // keep alive for the life of the process
+    }
 
     guard let tap = CGEvent.tapCreate(
         tap: .cghidEventTap,
@@ -267,7 +288,7 @@ func cmdOn() {
     }
     sh("launchctl kickstart -k \(gui)/\(label)")
     print(daemonRunning()
-        ? "wall is up — \(Int(TOP_MARGIN))px below the menu bar"
+        ? "agent is up — wall: \(wallOn ? "on" : "off"), corners: \(cornersOn ? "on" : "off")"
         : "starting… if it won't stay up, check \(errLog) (usually a missing accessibility grant)")
 }
 
@@ -277,7 +298,23 @@ func cmdOff() {
     }
     sh("launchctl bootout \(gui)/\(label)")
     sh("pkill -x \(name) 2>/dev/null")
-    print("wall is down (starts again at next login — plist kept)")
+    print("agent is down (starts again at next login — plist kept; wall/corner switches are kept too)")
+}
+
+// flip one feature switch and bounce the daemon so it re-reads it
+func toggleFeature(key: String, enable: Bool, name: String) {
+    guard FileManager.default.fileExists(atPath: plistPath) else {
+        print("not installed — run install.sh first"); exit(1)
+    }
+    let d = UserDefaults(suiteName: defaultsSuite) ?? .standard
+    d.set(enable, forKey: key)
+    if agentLoaded() {
+        sh("launchctl kickstart -k \(gui)/\(label)")
+    }
+    print("\(name): \(enable ? "on" : "off")")
+    print(daemonRunning()
+        ? "  daemon reloaded"
+        : "  note: daemon not running — switch applies at next start")
 }
 
 func cmdStatus() {
@@ -290,33 +327,60 @@ func cmdStatus() {
     print("process:  \(running ? "running" : "not running")")
 
     if running {
-        print("wall:     up — cursor held \(Int(TOP_MARGIN))px below the menu bar (top \(Int(CORNER_EXEMPT))px exempt)")
-        print("corners:  black while a fullscreen app is up (\(cornerWindows.count/4) displays watched)")
+        if wallOn {
+            print("wall:     up — cursor held \(Int(TOP_MARGIN))px below the menu bar (top \(Int(CORNER_EXEMPT))px exempt)")
+        } else {
+            print("wall:     disabled — cursor boundary inactive")
+        }
+        if cornersOn {
+            print("corners:  on — black while a fullscreen app is up (\(cornerWindows.count/4) displays watched)")
+        } else {
+            print("corners:  disabled — fullscreen cutouts show wallpaper")
+        }
     } else if loaded {
-        print("wall:     down — launchd is retrying; check \(errLog)")
+        print("state:    down — launchd is retrying; check \(errLog)")
         if let tail = try? String(contentsOfFile: errLog, encoding: .utf8).suffix(200) {
             print("log:      \(tail.trimmingCharacters(in: .whitespacesAndNewlines))")
         }
     } else {
-        print("wall:     off (starts again at next login)")
+        print("state:    off (starts again at next login)")
     }
+    print("switches: wall \(wallOn ? "on" : "off") · corners \(cornersOn ? "on" : "off") (persisted)")
 }
 
 // MARK: - entry
 
-switch CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "run" {
+let args = CommandLine.arguments
+switch args.count > 1 ? args[1] : "run" {
 case "run":              runDaemon()
-case "on", "enable":     cmdOn()
-case "off", "disable":   cmdOff()
-case "status":           cmdStatus()
+case "on", "enable":     loadFeatures(); cmdOn()
+case "off", "disable":   loadFeatures(); cmdOff()
+case "status":           loadFeatures(); cmdStatus()
+case "wall":
+    loadFeatures()
+    guard args.count > 2, ["on", "off"].contains(args[2]) else {
+        print("usage: cobalt-60 wall on|off"); exit(1)
+    }
+    toggleFeature(key: "wallEnabled", enable: args[2] == "on", name: "wall")
+case "corners", "corner":
+    loadFeatures()
+    guard args.count > 2, ["on", "off"].contains(args[2]) else {
+        print("usage: cobalt-60 corners on|off"); exit(1)
+    }
+    toggleFeature(key: "cornersEnabled", enable: args[2] == "on", name: "corners")
 default:
     print("""
     usage: cobalt-60 [command]
 
-      (none)          daemon mode — hold the wall (what launchd runs)
-      on, enable      start the wall
-      off, disable    stop the wall (starts again at next login)
-      status          installed / loaded / running
+      (none)              daemon mode (what launchd runs)
+      on, enable          start the agent
+      off, disable        stop the agent (starts again at next login)
+      status              installed / loaded / running + per-feature state
+      wall on|off         toggle the cursor boundary on its own
+      corners on|off      toggle the fullscreen corner filler on its own
+
+    switches persist across logins (defaults domain \(defaultsSuite));
+    the daemon re-reads them on start, so toggling restarts it instantly.
 
     install & uninstall: ./install.sh in the repo folder
     """)
