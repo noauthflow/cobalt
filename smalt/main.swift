@@ -656,48 +656,40 @@ func cmdHeld() -> Bool {
 
 // MARK: - hover attention
 //
-// the base macOS truth this used to fight: the cursor and the keyboard
-// belong to the ACTIVE app. a background overlay can re-assert its cursor
-// all day — any redraw from the active app (ghostty's I-beam, chrome's
-// resize arrows) wins the instant after, because the window server only
-// re-arbitrates on pointer events. and keystrokes never arrive at all.
-// the menu bar doesn't fight this because WindowServer owns it. the legal
-// equivalent: while the cursor is on the glass, smalt briefly BECOMES the
-// active app — cursor rects go live, keystrokes land on the pill (what
-// clicking used to do) — and the instant the cursor leaves, activation
-// hands straight back to the previous app. no re-click, ever.
-var attendedFrontApp: NSRunningApplication?
+// the base macOS truth this used to fight: a window's cursor rects (what
+// pins the arrow) only go live while that window is KEY — and keystrokes
+// flow to the key window. a background overlay's rects can be overridden
+// by any redraw of the active app, and its windows never see keystrokes.
+// the menu bar doesn't fight this because WindowServer owns it.
+//
+// the escape hatch smalt already had: a .nonactivatingPanel can hold KEY
+// status without its app ever becoming active — floating-palette rules.
+// that is exactly what clicking the pill used to do (fixing the cursor
+// AND taking the keystrokes) — the catch was the panel held key forever
+// after, which is where the re-click-everything tax came from.
+//
+// so attention is now just that, automated:
+//   hover-enter  → strip.makeKey()   — arrow is law, keys land on the pill
+//   hover-exit   → drop key (orderOut + orderFront, no activation) and
+//                  the active app's window regains key on its own
+// no activation anywhere: no menu-bar flash, no cooperative-activation
+// denial, nothing to hand back — the app beneath stays active the whole
+// time and simply gets its key window back when smalt lets go.
 
 func takeAttention() {
-    let me = ProcessInfo.processInfo.processIdentifier
-    let smaltActive = NSWorkspace.shared.frontmostApplication?.processIdentifier == me
-    dbg("takeAttention: smaltActive=\(smaltActive) attended=\(attendedFrontApp?.localizedName ?? \"nil\")")
-    // remember who to hand focus back to (first hover only)
-    if attendedFrontApp == nil, !smaltActive,
-       let front = NSWorkspace.shared.frontmostApplication {
-        attendedFrontApp = front
-    }
-    if !smaltActive {
-        NSApp.activate(ignoringOtherApps: true)   // deprecated 14+, still the reliable force-activate
-        strip.makeKey()
-        dbg("takeAttention: activated → front=\(NSWorkspace.shared.frontmostApplication?.localizedName ?? \"nil\") appActive=\(NSApp.isActive) key=\(strip.isKeyWindow)")
-    }
+    guard !strip.isKeyWindow else { return }
+    strip.makeKey()
+    dbg("attention taken: key=\(strip.isKeyWindow)")
 }
 
 func releaseAttention() {
-    guard let saved = attendedFrontApp else { return }
-    attendedFrontApp = nil
-    dbg("releaseAttention → \(saved.localizedName ?? \"?\")")
-    // only hand back if smalt still owns attention — if the user already
-    // clicked into another app, their choice stands
-    let me = ProcessInfo.processInfo.processIdentifier
-    if NSWorkspace.shared.frontmostApplication?.processIdentifier == me {
-        if #available(macOS 14.0, *) {
-            saved.activate()
-        } else {
-            saved.activate(options: [.activateIgnoringOtherApps])
-        }
-    }
+    guard strip.isKeyWindow else { return }
+    // drop key without a visible blink: out + front in the same pass.
+    // the active app's main window regains key on its own the instant
+    // ours resigns — that's the automatic un-re-click.
+    strip.orderOut(nil)
+    strip.orderFrontRegardless()
+    dbg("attention released: key=\(strip.isKeyWindow)")
 }
 
 // MARK: - fullscreen + mission control detection
@@ -738,8 +730,11 @@ func missionControlActive() -> Bool {
 
 // MARK: - evaluation
 
+var mcActive = false              // cached mission-control state (re-checked on space/app changes)
+
 func updateStrip() {
-    if missionControlActive() {
+    mcActive = missionControlActive()
+    if mcActive {
         applyVisibility(false)                                 // mission control: off the stage
     } else {
         // hover decides: visible iff the cursor is in the summon zone —
@@ -780,10 +775,12 @@ let tab: StripView = {
 func glassX(docked: Bool) -> CGFloat { docked ? TAB_MARGIN : TAB_MARGIN + TAB_TRAVEL }
 
 // the panel is key-capable but never main. being KEY is the point: cursor
-// rects only go live while the window is key, so hover attention (see
-// takeAttention) makes the panel key — that is what pins the arrow cursor
-// for real instead of racing the app beneath.
+// rects only go live while the window is key, and keystrokes flow to the
+// key window — hover attention (takeAttention) makes the panel key while
+// the cursor is on the glass. borderless panels refuse key status by
+// default, so this override is what makes the whole attention model legal.
 final class OverlayPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
 }
 
@@ -888,6 +885,7 @@ func runDaemon() -> Never {
     Timer.scheduledTimer(withTimeInterval: 1 / 30, repeats: true) { _ in
         setCmdOverride(cmdHeld())
         if cmdOverride { releaseAttention(); return }
+        if mcActive { applyVisibility(false); releaseAttention(); return }
         guard let loc = CGEvent(source: nil)?.location else { return }
         let (top, bottom) = pillBandCG()
         let y = loc.y

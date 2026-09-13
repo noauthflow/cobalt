@@ -94,11 +94,15 @@ anyway, so any permission a later version earns survives rebuilds.)
 - constants: `cell/gap/pad`, `iconSize`, `typeSize/pctSize` in `Theme`;
   `PILL_RADIUS`, `REVEAL_WIDTH` (12px), `HIDE_MARGIN` (6px) in main.swift
 - the pill is clickable; widgets don't do anything yet — v1 flips that
-- focus: the panel can never become key (`OverlayPanel`) — a menu bar takes
-  clicks, never keystrokes; the app beneath keeps focus hovered or clicked
-- cursor: while the cursor is over the glass, smalt owns it (arrow) —
-  defended on mouse moves AND passively re-won at 20Hz, since apps beneath
-  re-assert their I-beam/resize cursors on redraw with no mouse event
+- focus: hover = attention. while the cursor is on the glass the panel
+  takes KEY status (`OverlayPanel` canBecomeKey + `strip.makeKey()`) —
+  cursor rects go live (the arrow is law, no redraw race) and keystrokes
+  land on the pill. when the cursor leaves, the panel drops key (orderOut
+  + orderFront, no activation anywhere) and the active app's window
+  regains key on its own — no re-click. the app beneath stays frontmost
+  the entire time; no menu-bar flash, no activation denial.
+- cursor: pinned by key-window cursor rects while hovered, reasserted on
+  mouse moves and passively at 30Hz as a fallback during handoffs
 - clicks: hidden glass = click-through (the edge belongs to the apps again);
   visible glass = smalt takes the click. cmd-override still forces
   click-through at any visibility
