@@ -86,6 +86,9 @@ let TAB_TRAVEL: CGFloat = 50     // hidden slide distance (≥ pill width)
 let TAB_MARGIN: CGFloat = 6      // left slack so spring overshoot never clips
 let REVEAL_WIDTH: CGFloat = 12   // summon zone: cursor within this of the right edge
 let HIDE_MARGIN: CGFloat = 6     // cursor must drop this far left of the pill before it springs away
+let HIDE_BAND: CGFloat = 40      // vertical hysteresis: summon at ±26px, dismiss only past ±40px —
+                                 // without it, 1px of hand jitter at the band edge flips the
+                                 // state every poll and the pill flaps itself to death
 // spring constants: ω ≈ 23.7 rad/s, ζ ≈ 0.68 — a crisp pop with ~5% overshoot
 let SPRING_K: CGFloat = 560
 let SPRING_C: CGFloat = 32
@@ -224,8 +227,8 @@ final class StripView: NSView {
 // parser renders the same vectors synchronously, in-process.)
 
 enum SVGPath {
-    // heroicons "calendar" (outline)
-    static let calendar = "M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 0 1 2.25-2.25h13.5A2.25 2.25 0 0 1 21 7.5v11.25m-18 0A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75m-18 0v-7.5A2.25 2.25 0 0 1 5.25 9h13.5A2.25 2.25 0 0 1 21 11.25v7.5"
+    // heroicons "calendar-days" (outline) — the frame + date dots
+    static let calendar = "M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 0 1 2.25-2.25h13.5A2.25 2.25 0 0 1 21 7.5v11.25m-18 0A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75m-18 0v-7.5A2.25 2.25 0 0 1 5.25 9h13.5A2.25 2.25 0 0 1 21 11.25v7.5m-9-6h.008v.008H12v-.008ZM12 15h.008v.008H12V15Zm0 2.25h.008v.008H12v-.008ZM9.75 15h.008v.008H9.75V15Zm0 2.25h.008v.008H9.75v-.008ZM7.5 15h.008v.008H7.5V15Zm0 2.25h.008v.008H7.5v-.008Zm6.75-4.5h.008v.008h-.008v-.008Zm0 2.25h.008v.008h-.008V15Zm0 2.25h.008v.008h-.008v-.008Zm2.25-4.5h.008v.008H16.5v-.008Zm0 2.25h.008v.008H16.5V15Z"
     // heroicons "battery" (outline)
     static let battery = "M21 10.5h.375c.621 0 1.125.504 1.125 1.125v2.25c0 .621-.504 1.125-1.125 1.125H21M3.75 18h15A2.25 2.25 0 0 0 21 15.75v-6a2.25 2.25 0 0 0-2.25-2.25h-15A2.25 2.25 0 0 0 1.5 9.75v6A2.25 2.25 0 0 0 3.75 18Z"
 
@@ -451,7 +454,7 @@ func drawBattery(in slot: NSRect) {
     drawText("\(pct)", font: .tabular(size, .semibold), color: color, in: body)
 }
 
-// heroicons calendar, verbatim
+// heroicons calendar-days, verbatim
 func drawCalendar(in slot: NSRect) {
     Heroicon.draw(SVGPath.calendar, color: Theme.ink, in: slot)
 }
@@ -473,6 +476,7 @@ func dbg(_ s: String) {
 
 var stripVisible = false       // hidden until the cursor hovers the right edge
 var evalItem: DispatchWorkItem?
+var pendingRelease = false     // key-drop deferred until the exit spring parks the glass
 
 func mainScreen() -> NSScreen? {
     // the CG main display — cursor global coordinates are relative to THIS
@@ -592,7 +596,8 @@ func applyVisibility(_ desired: Bool, animate: Bool = true) {
     let changed = desired != stripVisible
     stripVisible = desired
     if changed { dbg("applyVisibility → \(desired)") }
-    if !desired { releaseAttention() }   // off the stage → hand focus straight back
+    if desired { pendingRelease = false }   // back on stage — attention wanted again
+    else { releaseAttention() }             // off the stage → hand focus back (deferred till parked)
     guard changed else { return }
     // (visibility = glass position; see below)
     // the window never moves — it has owned the screen edge since launch.
@@ -605,9 +610,11 @@ func applyVisibility(_ desired: Bool, animate: Bool = true) {
         g.origin.x = glassX(docked: desired)
         tab.setFrameSize(g.size); tab.setFrameOrigin(g.origin)
         tab.needsDisplay = true
+        if !desired { flushPendingRelease() }   // parked instantly — release now
         return
     }
     spring.chase(glassX(docked: desired))
+    if !desired { spring.onSettle = { flushPendingRelease() } }   // release after the exit spring lands
 }
 
 // current cursor position. CGEvent coordinates are global, top-left origin —
@@ -677,16 +684,30 @@ func cmdHeld() -> Bool {
 // time and simply gets its key window back when smalt lets go.
 
 func takeAttention() {
+    pendingRelease = false   // attending again — cancel any deferred release
     guard !strip.isKeyWindow else { return }
     strip.makeKey()
     dbg("attention taken: key=\(strip.isKeyWindow)")
 }
 
 func releaseAttention() {
+    // HOLD key while the glass is anywhere on stage — docked or mid-spring.
+    // dropping key orderOuts the window, and doing that mid-animation is
+    // what made the pill flicker itself to death near the band edges: the
+    // exit spring gets murdered, the glass blinks out instead of animating
+    // outwards, the poll re-summons, repeat. the release lands the moment
+    // the glass is parked (spring settle / snap / immediate when parked).
+    if tab.frame.origin.x < glassX(docked: false) - 1 { pendingRelease = true; return }
+    flushPendingRelease()
+}
+
+func flushPendingRelease() {
+    pendingRelease = false
     guard strip.isKeyWindow else { return }
-    // drop key without a visible blink: out + front in the same pass.
-    // the active app's main window regains key on its own the instant
-    // ours resigns — that's the automatic un-re-click.
+    // drop key without a visible blink: out + front in the same pass —
+    // and only ever while the glass is parked off-screen, so there is
+    // nothing to see. the active app's main window regains key on its own
+    // the instant ours resigns — that's the automatic un-re-click.
     strip.orderOut(nil)
     strip.orderFrontRegardless()
     dbg("attention released: key=\(strip.isKeyWindow)")
@@ -743,7 +764,11 @@ func updateStrip() {
         guard let loc = CGEvent(source: nil)?.location else { return }
         let inBand = loc.y >= top - 26 && loc.y <= bottom + 26
         let xr = cursorXFromRight()
-        applyVisibility(xr <= REVEAL_WIDTH && inBand)
+        // a hovered glass stays on stage even if a notification lands here
+        // (app switch, quit, space change) — the summon zone only decides
+        // the hidden → visible transition, never "you were hovering, bye"
+        let hovered = stripVisible && xr <= PILL_WIDTH && inBand
+        applyVisibility(xr <= REVEAL_WIDTH && inBand || hovered)
     }
 }
 
@@ -845,7 +870,7 @@ func runDaemon() -> Never {
         }
         if xr <= REVEAL_WIDTH, y >= top - 26, y <= bottom + 26 {
             applyVisibility(true)
-        } else if xr > PILL_WIDTH + HIDE_MARGIN || y > bottom + 26 || y < top - 26 {
+        } else if xr > PILL_WIDTH + HIDE_MARGIN || y > bottom + HIDE_BAND || y < top - HIDE_BAND {
             applyVisibility(false)
         }
     }
@@ -890,10 +915,11 @@ func runDaemon() -> Never {
         let (top, bottom) = pillBandCG()
         let y = loc.y
         let xr = cursorXFromRight()
-        // summon / hide — same hysteresis as the monitor
+        // summon / hide — same hysteresis as the monitor (and wider on y:
+        // dismiss only past ±HIDE_BAND, so band-edge jitter can't flap it)
         if xr <= REVEAL_WIDTH, y >= top - 26, y <= bottom + 26 {
             applyVisibility(true)
-        } else if xr > PILL_WIDTH + HIDE_MARGIN || y > bottom + 26 || y < top - 26 {
+        } else if xr > PILL_WIDTH + HIDE_MARGIN || y > bottom + HIDE_BAND || y < top - HIDE_BAND {
             applyVisibility(false)
         }
         // attention — cursor on the glass owns the moment
