@@ -130,6 +130,21 @@ final class StripView: NSView {
                                    owner: self, userInfo: ["slot": i])
             addTrackingArea(a)
         }
+        // cursor defense: apps UNDER the glass (ghostty, chrome) re-assert
+        // their I-beam/resize cursors when they redraw. smalt's window is
+        // topmost here, so it re-wins the cursor on every cursorUpdate —
+        // and resetCursorRects declares arrow for the whole window.
+        addTrackingArea(NSTrackingArea(rect: bounds,
+                                       options: [.cursorUpdate, .activeAlways],
+                                       owner: self, userInfo: nil))
+    }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .arrow)
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        NSCursor.arrow.set()
     }
 
     override func mouseEntered(with event: NSEvent) {
@@ -598,6 +613,25 @@ func pillBandCG() -> (top: CGFloat, bottom: CGFloat) {
     return (top, top + fr.height)
 }
 
+// cmd override: while command is held, smalt gets out of the way
+// entirely — the window goes click-through ("ignores mouse events") so
+// anything underneath is reachable right up to the screen edge, and the
+// glass hides. checked on every mouse event via the event source's flag
+// state (no key monitoring, no permissions); a bool cache avoids
+// re-toggling the window on every move.
+var cmdOverride = false
+
+func setCmdOverride(_ on: Bool) {
+    guard on != cmdOverride else { return }
+    cmdOverride = on
+    strip.ignoresMouseEvents = on
+    if on { applyVisibility(false) }
+}
+
+func cmdHeld() -> Bool {
+    CGEventSource.flagsState(.hidSystemState).contains(.maskCommand)
+}
+
 // MARK: - fullscreen + mission control detection
 // same trick as cobalt-60: a layer-0 window matching a display's bounds
 // means that display is owned by a fullscreen app. mission control fakes
@@ -715,10 +749,21 @@ func runDaemon() -> Never {
     // lines means edge jitter can't flicker it — and the spring retargets,
     // so even fast in-out is a smooth reversal, never a glitch.
     NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged, .otherMouseDragged]) { _ in
+        // cmd held: the edge is yours — no window, no glass, no cursor take-over
+        setCmdOverride(cmdHeld())
+        if cmdOverride { return }
         let (top, bottom) = pillBandCG()
         guard let loc = CGEvent(source: nil)?.location else { return }
         let y = loc.y
         let xr = cursorXFromRight()
+        // cursor defense: while the cursor is over smalt's window (the tab
+        // band, at the edge), smalt owns the cursor — apps underneath
+        // re-assert their I-beam/resize cursors on redraw, so re-win it
+        // on every move. arrow regardless of modifier flags — cmd never
+        // changes anything here. one NSCursor.set, no tap, no permissions.
+        if xr <= 0, y >= top, y <= bottom {
+            NSCursor.arrow.set()
+        }
         if xr <= REVEAL_WIDTH, y >= top - 26, y <= bottom + 26 {
             applyVisibility(true)
         } else if xr > PILL_WIDTH + HIDE_MARGIN || y > bottom + 26 || y < top - 26 {
