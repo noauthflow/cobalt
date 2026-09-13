@@ -12,9 +12,11 @@ BIN_LOCAL="$HOME/.local/bin/$NAME"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 GUI="gui/$(id -u)"
 
+FONT_LOCAL="$HOME/.local/share/elgiloy/material-symbols-volume-up.ttf"
+
 if [[ "${1:-}" == "uninstall" ]]; then
   launchctl bootout "$GUI/$LABEL" 2>/dev/null || true
-  rm -f "$PLIST" "$BIN_LOCAL"
+  rm -f "$PLIST" "$BIN_LOCAL" "$FONT_LOCAL"
   echo "uninstalled: agent stopped, plist + $BIN_LOCAL removed"
   exit 0
 fi
@@ -40,12 +42,17 @@ MSG
 fi
 
 echo "building (swiftc)"
-mkdir -p "$HOME/.local/bin"
+mkdir -p "$HOME/.local/bin" "$HOME/.local/share/elgiloy"
 # build straight to the install target — nothing lands in the repo folder
 swiftc -O -o "$BIN_LOCAL" main.swift tap.swift overlay.swift browser.swift favicon.swift \
   -framework AppKit -framework ApplicationServices -framework OSAKit
 codesign --force --sign "cobalt-dev" "$BIN_LOCAL"
 echo "signed (cobalt-dev)"
+
+# material symbols subset (single glyph: volume_up) for the audio-playing
+# indicator — installed next to the binary's data dir; the daemon registers
+# it as a process font at startup
+cp assets/material-symbols-volume-up.ttf "$FONT_LOCAL"
 
 launchctl bootout "$GUI/$LABEL" 2>/dev/null || true
 

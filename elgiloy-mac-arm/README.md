@@ -5,6 +5,12 @@ chrome's real active tab, release ctrl → overlay collapses. the mouse has no
 effect on the overlay at all — it's click-through and keyboard-only. the panel is vertically centered and stays centered when it
 grows/shrinks.
 
+tabs playing audio show a Material Symbols `volume_up` glyph (#CFCFCF) in
+place of their favicon, so the noisy row is identifiable at a glance
+(chrome's own audio marker, read from the same accessibility scan that
+detects pinned tabs; falls back to the SF Symbol speaker if the font subset
+is missing).
+
 tab lists are always warm: replies land in the cache even when they arrive
 after the overlay closed (fast sessions used to discard them → blank opens),
 the cache is re-primed after every session, and it persists to disk
@@ -72,6 +78,7 @@ the overlay must never get stuck on screen, no matter what:
 | `main.swift` | state (`open`/`tabs`/`sel`) + the 50ms mirror poll |
 | `overlay.swift` | NSPanel, rows rebuilt from scratch every render (no in-place mutation) |
 | `browser.swift` | apple events: list tabs / active index / close tab (by bundle id, never by name) |
+| `assets/material-symbols-volume-up.ttf` | 2KB google-fonts subset (single `volume_up` glyph) — install.sh copies it to `~/.local/share/elgiloy/` |
 
 ## install
 

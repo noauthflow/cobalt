@@ -1,4 +1,5 @@
 import AppKit
+import CoreText
 
 // the overlay: frosted-glass HUD. when the browser has pinned tabs there are
 // TWO pills — pinned tabs in the top pill, regular tabs in the bottom one,
@@ -167,7 +168,7 @@ final class Overlay {
         // rebuild only when the visible tab set actually changed (pinned flags
         // AND view mode are part of the key — either changing redraws)
         let key = (splitView ? "s\u{1f}" : "f\u{1f}")
-            + visible.map { "\($0.n):\($0.pinned ? 1 : 0):\($0.title)" }.joined(separator: "\u{1e}")
+            + visible.map { "\($0.n):\($0.pinned ? 1 : 0):\($0.audible ? 1 : 0):\($0.title)" }.joined(separator: "\u{1e}")
         if key != lastKey {
             lastKey = key
             let pinH = Self.height(for: pinVisible.count)
@@ -262,10 +263,13 @@ final class Overlay {
 }
 
 // one row: favicon (or colored letter badge fallback) + title + right-aligned
-// domain. `showPin` adds a small pin glyph between title and domain for
-// pinned tabs — used in flat view (in split view the pills already separate
-// them, so the icon would be redundant). no hover styling, no click handling
-// — the mouse has zero effect; only the keyboard moves the highlight.
+// domain. a tab that's PLAYING AUDIO shows a speaker glyph in place of its
+// favicon — chrome's own audio marker, mirrored into the AX description, so
+// one glance says which row is making noise. `showPin` adds a small pin glyph
+// between title and domain for pinned tabs — used in flat view (in split view
+// the pills already separate them, so the icon would be redundant). no hover
+// styling, no click handling — the mouse has zero effect; only the keyboard
+// moves the highlight.
 final class RowView: NSView {
     private let badge = NSTextField(labelWithString: "")
     private let tile = NSView()
@@ -273,6 +277,7 @@ final class RowView: NSView {
     private let title = NSTextField(labelWithString: "")
     private let domain = NSTextField(labelWithString: "")
     private let pinIcon = NSImageView()
+    private let audioIcon = NSTextField(labelWithString: "")
 
     init(frame: NSRect, tab: Browser.Tab, showPin: Bool = false) {
         super.init(frame: frame)
@@ -308,7 +313,32 @@ final class RowView: NSView {
         iconView.imageScaling = .scaleProportionallyDown
         iconView.isHidden = true
         addSubview(iconView)
-        if let img = Favicons.shared.cached(d) {
+        if tab.audible {
+            // speaker REPLACES the favicon in the same slot — a favicon can't
+            // compete with a symbol that means exactly one thing. #CFCFCF:
+            // near-white, stands out against the title text's pure white
+            // without breaking the overlay's monochrome language.
+            tile.isHidden = true
+            badge.isHidden = true
+            if let f = Self.materialFont(15) {
+                audioIcon.stringValue = "\u{e050}"   // material: volume_up
+                audioIcon.font = f
+                audioIcon.textColor = Self.audioTint
+                // the glyph's visual center coincides with its line center,
+                // so centering the intrinsic size lands it on the mid-line
+                let asz = audioIcon.intrinsicContentSize
+                audioIcon.frame = NSRect(x: 19 - asz.width / 2, y: 19 - asz.height / 2,
+                                         width: asz.width, height: asz.height)
+                addSubview(audioIcon)
+            } else {
+                // subset font missing (installed by hand, not via
+                // ./install.sh): fall back to the SF Symbol speaker
+                iconView.image = NSImage(systemSymbolName: "speaker.wave.2.fill", accessibilityDescription: "playing audio")?
+                    .withSymbolConfiguration(.init(pointSize: 11, weight: .semibold))
+                iconView.contentTintColor = Self.audioTint
+                iconView.isHidden = false
+            }
+        } else if let img = Favicons.shared.cached(d) {
             applyIcon(img)
         } else {
             Favicons.shared.fetch(d) { [weak self] img in
@@ -317,33 +347,42 @@ final class RowView: NSView {
             }
         }
 
+        // vertical alignment: EVERYTHING centers on the row's optical
+        // mid-line (19) — icon, title, domain. NSTextField labels top-align
+        // text inside a taller frame, so the old 20/16pt-tall frames left
+        // title and domain riding ~2pt low against the icon. frames are now
+        // exactly the text's line height, y = 19 - h/2. single-line mode is
+        // also required for truncatesLastVisibleLine to apply at all.
         let textW = frame.width - 46
         title.stringValue = tab.title
-        title.frame = NSRect(x: 38, y: 9, width: textW * 0.68, height: 20)
         title.font = .systemFont(ofSize: 13)
         title.textColor = .white
+        title.usesSingleLineMode = true
         title.lineBreakMode = .byTruncatingMiddle
         title.cell?.truncatesLastVisibleLine = true
+        let th = ceil(title.intrinsicContentSize.height)
+        title.frame = NSRect(x: 38, y: 19 - th / 2, width: textW * 0.68, height: th)
         addSubview(title)
 
         domain.stringValue = d
         domain.font = .systemFont(ofSize: 11)
         domain.textColor = NSColor.white.withAlphaComponent(0.45)
         domain.alignment = .right
+        domain.usesSingleLineMode = true
         domain.lineBreakMode = .byTruncatingHead
         addSubview(domain)
+        let dh = ceil(domain.intrinsicContentSize.height)
         if showPin {
             // flat view: the pin hugs the domain text's left edge. size the
             // domain to its text and right-align it (right edge stays at the
             // same spot for every row); the pin sits immediately before it.
             // the 16pt reserve keeps the pin from ever crowding the title.
-            domain.sizeToFit()
             let maxDW = textW * 0.32 - 8 - 16
-            let dw = min(domain.frame.width, maxDW)
-            domain.frame = NSRect(x: frame.width - 10 - dw, y: 11, width: dw, height: 16)
-            pinIcon.frame = NSRect(x: domain.frame.minX - 15, y: 12, width: 13, height: 13)
+            let dw = min(domain.intrinsicContentSize.width, maxDW)
+            domain.frame = NSRect(x: frame.width - 10 - dw, y: 19 - dh / 2, width: dw, height: dh)
+            pinIcon.frame = NSRect(x: domain.frame.minX - 15, y: 12.5, width: 13, height: 13)
         } else {
-            domain.frame = NSRect(x: 38 + textW * 0.68 + 6, y: 11, width: textW * 0.32 - 8, height: 16)
+            domain.frame = NSRect(x: 38 + textW * 0.68 + 6, y: 19 - dh / 2, width: textW * 0.32 - 8, height: dh)
         }
         pinIcon.image = NSImage(systemSymbolName: "pin.fill", accessibilityDescription: "pinned")?
             .withSymbolConfiguration(.init(pointSize: 10, weight: .semibold))
@@ -353,6 +392,24 @@ final class RowView: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    // the material "volume_up" glyph (U+E050), from the 2KB google-fonts
+    // subset installed to ~/.local/share/elgiloy/ by install.sh. registered
+    // once per process; nil (→ SF Symbol fallback) if the file is gone.
+    private static var materialRegistered = false
+    // the audio indicator's tint, shared by both renderings: #CFCFCF
+    private static let audioTint = NSColor(srgbRed: 0xCF / 255.0, green: 0xCF / 255.0, blue: 0xCF / 255.0, alpha: 1)
+    private static func materialFont(_ size: CGFloat) -> NSFont? {
+        if !materialRegistered {
+            materialRegistered = true
+            let url = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".local/share/elgiloy/material-symbols-volume-up.ttf")
+            if FileManager.default.fileExists(atPath: url.path) {
+                _ = CTFontManagerRegisterFontsForURL(url as CFURL, .process, nil)
+            }
+        }
+        return NSFont(name: "Material Symbols Outlined", size: size)
+    }
 
     private func applyIcon(_ img: NSImage) {
         iconView.image = img

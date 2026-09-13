@@ -11,10 +11,12 @@ enum Browser {
         var n: Int      // 1-based tab index, as chrome sees it (mutable: renumbers on close)
         let title: String
         let url: String
-        var pinned: Bool = false   // from the AX tree (see pinnedFlags)
+        var pinned: Bool = false   // from the AX tree (see stripFlags)
+        var audible: Bool = false  // playing audio — same AX tree, "audio playing" baked into the tab description
 
-        init(n: Int, title: String, url: String, pinned: Bool = false) {
-            self.n = n; self.title = title; self.url = url; self.pinned = pinned
+        init(n: Int, title: String, url: String, pinned: Bool = false, audible: Bool = false) {
+            self.n = n; self.title = title; self.url = url
+            self.pinned = pinned; self.audible = audible
         }
 
         // hand-rolled decode so cache files from before `pinned` still load
@@ -24,6 +26,7 @@ enum Browser {
             title = try c.decode(String.self, forKey: .title)
             url = try c.decode(String.self, forKey: .url)
             pinned = try c.decodeIfPresent(Bool.self, forKey: .pinned) ?? false
+            audible = try c.decodeIfPresent(Bool.self, forKey: .audible) ?? false
         }
 
         // "https://github.com/…" → "github.com"
@@ -115,23 +118,25 @@ enum Browser {
         return s
     }
 
-    // ---- pinned tabs -------------------------------------------------------
-    // chromium's appleScript dictionary has NO `pinned` property on tab, but
-    // the accessibility tree does: every tab in the strip is an AXRadioButton
-    // whose AXDescription contains " – Pinned " when the tab is pinned. the
-    // strip's document order matches appleScript tab order, so the caller can
-    // zip the flags straight onto the tab list by index.
-    struct PinnedScan {
-        var flags: [Bool]     // one per tab, in strip order
+    // ---- pinned / audible flags --------------------------------------------
+    // chromium's appleScript dictionary has NO `pinned` (or `audible`) property
+    // on tab, but the accessibility tree does: every tab in the strip is an
+    // AXRadioButton whose AXDescription carries chrome's state markers —
+    // "Pinned" for pinned tabs, "audio playing" for tabs emitting sound.
+    // the strip's document order matches appleScript tab order, so the caller
+    // can zip the flags straight onto the tab list by index.
+    struct StripScan {
+        var flags: [Bool]     // pinned, one per tab, in strip order
+        var audible: [Bool]   // playing audio, same order
         var titles: [String]  // matching AX titles, for the fallback merge
     }
 
-    static func pinnedFlags(pid: pid_t?) -> PinnedScan {
-        guard let pid else { return PinnedScan(flags: [], titles: []) }
+    static func stripFlags(pid: pid_t?) -> StripScan {
+        guard let pid else { return StripScan(flags: [], audible: [], titles: []) }
         let app = AXUIElementCreateApplication(pid)
         var winRef: CFTypeRef?
         AXUIElementCopyAttributeValue(app, kAXMainWindowAttribute as CFString, &winRef)
-        guard let w = winRef else { return PinnedScan(flags: [], titles: []) }
+        guard let w = winRef else { return StripScan(flags: [], audible: [], titles: []) }
         // BFS down to the tab strip. prune AXWebArea — the page's accessibility
         // tree can hold thousands of nodes and this probe runs on every poll —
         // and cap depth; the strip sits a few groups under the window.
@@ -147,23 +152,29 @@ enum Browser {
                 queue.append((k, depth + 1))
             }
         }
-        guard let tg = tabGroup else { return PinnedScan(flags: [], titles: []) }
+        guard let tg = tabGroup else { return StripScan(flags: [], audible: [], titles: []) }
         // one walk: grab the tab elements in document order, then read flags.
-        // per tab this costs 2 attribute round-trips (role + description) —
-        // titles are fetched LAZILY, only if the fallback merge needs them
-        // (counts mismatch), since that's the only place they're used.
+        // per tab this costs 2 attribute round-trips (role + description), and
+        // the ONE description read serves BOTH flags — chrome bakes its markers
+        // into that same string ("Pinned", "audio playing", older builds
+        // "Speaker"). titles are fetched LAZILY, only if the fallback merge
+        // needs them (counts mismatch), since that's the only place they're used.
         var tabEls: [AXUIElement] = []
         func collect(_ el: AXUIElement) {
             if axRole(el) == "AXRadioButton" { tabEls.append(el); return }
             for k in axChildren(el) { collect(k) }
         }
         collect(tg)
-        let flags = tabEls.map {
-            (axString($0, kAXDescriptionAttribute as String) ?? "").range(of: "Pinned") != nil
+        let descs = tabEls.map { axString($0, kAXDescriptionAttribute as String) ?? "" }
+        let flags = descs.map { $0.range(of: "Pinned") != nil }
+        let audible = descs.map {
+            $0.range(of: "audio playing", options: .caseInsensitive) != nil
+                || $0.range(of: "Speaker") != nil
         }
-        return PinnedScan(flags: flags, titles: flags.count == tabEls.count ? [] : tabEls.map {
-            axString($0, kAXTitleAttribute as String) ?? ""
-        })
+        return StripScan(flags: flags, audible: audible,
+                         titles: flags.count == tabEls.count ? [] : tabEls.map {
+                             axString($0, kAXTitleAttribute as String) ?? ""
+                         })
     }
 
     private static func axChildren(_ el: AXUIElement) -> [AXUIElement] {
@@ -199,15 +210,23 @@ enum Browser {
                 let f = record.components(separatedBy: "\u{1f}")
                 if f.count == 3, let n = Int(f[0]) { tabs.append(Tab(n: n, title: f[1], url: f[2])) }
             }
-            // merge pinned flags. primary path: AX strip order == appleScript
-            // order, so equal counts zip by index. fallback (AX pruned tabs
-            // from the strip): match by title — a heuristic, better than none
-            let scan = pinnedFlags(pid: pid)
+            // merge pinned/audible flags. primary path: AX strip order ==
+            // appleScript order, so equal counts zip by index. fallback (AX
+            // pruned tabs from the strip): match by title — a heuristic,
+            // better than none
+            let scan = stripFlags(pid: pid)
             if scan.flags.count == tabs.count {
-                for i in tabs.indices { tabs[i].pinned = scan.flags[i] }
+                for i in tabs.indices {
+                    tabs[i].pinned = scan.flags[i]
+                    tabs[i].audible = scan.audible[i]
+                }
             } else if !scan.flags.isEmpty {
                 let pinnedTitles = Set(zip(scan.flags, scan.titles).filter { $0.0 }.map { $0.1 })
-                for i in tabs.indices where pinnedTitles.contains(tabs[i].title) { tabs[i].pinned = true }
+                let audibleTitles = Set(zip(scan.audible, scan.titles).filter { $0.0 }.map { $0.1 })
+                for i in tabs.indices {
+                    if pinnedTitles.contains(tabs[i].title) { tabs[i].pinned = true }
+                    if audibleTitles.contains(tabs[i].title) { tabs[i].audible = true }
+                }
             }
             done(tabs.isEmpty ? nil : tabs, active)
         }
