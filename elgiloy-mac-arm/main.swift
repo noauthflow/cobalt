@@ -78,11 +78,12 @@ final class App: NSObject {
               Browser.isChromiumFamily(app),
               let bid = app.bundleIdentifier else { return }
         // launcher overlays (raycast, spotlight, …) float above chrome as
-        // panels — the workspace may still call chrome "frontmost", but the
-        // overlay's window is the frontmost window. if the top app-level
-        // window belongs to anyone but the browser, the user is mid-launcher
-        // and ctrl+shift / ctrl+tab must do nothing.
-        if let top = Browser.topAppWindowOwnerPID(), top != app.processIdentifier { return }
+        // panels — the workspace may still call chrome "frontmost", but a
+        // panel-level (≥ 5) window from another app is on top. if one is up,
+        // the user is mid-launcher and ctrl+shift / ctrl+tab must do nothing.
+        // ordinary app windows (steam sits at layer 1) never block — see
+        // floatingPanelOwnerPID().
+        if let top = Browser.floatingPanelOwnerPID(), top != app.processIdentifier { return }
         bundleId = bid
         overlay.splitView = ViewPref.split   // re-read before the first render
         guard !open else { return }

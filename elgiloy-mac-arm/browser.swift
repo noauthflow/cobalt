@@ -42,19 +42,23 @@ enum Browser {
         return names.contains { name.contains($0) || exec.contains($0) }
     }
 
-    // the pid that owns the frontmost on-screen APP window. launcher overlays
-    // (raycast, spotlight, alfred, …) float above chrome as panels — chrome
-    // may still be the "frontmost app", but the overlay's window is the
-    // frontmost window, at a floating level (raycast: layer 8). normal app
-    // windows are layer 0; system chrome (menu bar, status items, dock,
-    // notification banners) lives at layer ≥ 20 and never blocks. begin()
-    // refuses to open unless the top window belongs to the frontmost browser.
-    static func topAppWindowOwnerPID() -> pid_t? {
+    // the pid that owns the topmost FLOATING panel on screen, if any. this is
+    // a launcher check only: raycast/spotlight/alfred float above chrome as
+    // panels (raycast: layer 8) while chrome stays the "frontmost app" — when
+    // one is up, the user is mid-launch and ctrl+tab must do nothing.
+    // anything at layer ≤ 4 is a normal app window and NEVER blocks: while the
+    // browser is frontmost its window tops layer 0, so a foreign window above
+    // it at low layer is just a persistent float — steam keeps its main window
+    // at layer 1, and treating that as "a launcher is up" refused to open the
+    // overlay for as long as steam's window was visible anywhere. system
+    // chrome (menu bar, dock, banners) lives at layer ≥ 20 and never blocks.
+    static func floatingPanelOwnerPID() -> pid_t? {
         let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
             as? [[String: Any]] ?? []
         for w in list {
             let layer = w[kCGWindowLayer as String] as? Int ?? 0
             if layer >= 20 { continue }   // skip system chrome (menu bar, dock, …)
+            if layer < 5 { return nil }   // normal app window — not a launcher
             return w[kCGWindowOwnerPID as String] as? pid_t
         }
         return nil
@@ -81,9 +85,15 @@ enum Browser {
         let s = (
             list: OSAScript(source: """
                 tell application id "\(bundleId)"
-                    set a to active tab index of front window
-                    set ts to title of tabs of front window
-                    set us to URL of tabs of front window
+                    -- window 1, never "front window": chromium resolves
+                    -- "front window" through its last-active-window pointer,
+                    -- which dies the moment another app takes a click (steam,
+                    -- ghostty, anything) and throws -1719 until the browser is
+                    -- re-activated. window 1 is front-to-back order — the same
+                    -- window — and never wedges.
+                    set a to active tab index of window 1
+                    set ts to title of tabs of window 1
+                    set us to URL of tabs of window 1
                     set out to (a as text) & (character id 31)
                     -- title and url lists can momentarily disagree (tab mid-
                     -- load, chrome's applescript model wedged): bound the loop
@@ -98,7 +108,7 @@ enum Browser {
                 return out
                 """),
             active: OSAScript(source: """
-                tell application id "\(bundleId)" to get active tab index of front window
+                tell application id "\(bundleId)" to get active tab index of window 1
                 """)
         )
         scripts[bundleId] = s
@@ -234,7 +244,7 @@ enum Browser {
             var cache = activateScripts[p.bundleId] ?? [:]
             if cache[p.n] == nil {
                 cache[p.n] = OSAScript(source: """
-                    tell application id "\(p.bundleId)" to set active tab index of front window to \(p.n)
+                    tell application id "\(p.bundleId)" to set active tab index of window 1 to \(p.n)
                     """)
             }
             activateScripts[p.bundleId] = cache
@@ -245,7 +255,7 @@ enum Browser {
     // the one write command we own for w: close the SELECTED tab while the
     // overlay is open
     static func closeTab(bundleId: String, n: Int) {
-        let script = OSAScript(source: "tell application id \"\(bundleId)\" to close tab \(n) of front window")
+        let script = OSAScript(source: "tell application id \"\(bundleId)\" to close tab \(n) of window 1")
         _ = run(script)
         fputs("elgiloy: closed tab \(n)\n", stderr)
     }
