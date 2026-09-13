@@ -20,7 +20,7 @@ import QuartzCore
 // zero permissions: the reveal is a global mouse monitor, not an event
 // tap. nothing is intercepted, nothing is rewritten, nothing is polled.
 
-let BAR_HEIGHT: CGFloat = 36
+let BAR_HEIGHT: CGFloat = 30
 // the summon zone: cursor within this distance of the strip's top edge.
 // desktop: the strip hides under the menu bar, so this reads as "12px below
 // the menu bar" — below cobalt-60's 5px wall clamp, so the hover always

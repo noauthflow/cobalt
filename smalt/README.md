@@ -35,7 +35,7 @@ purely a function of the cursor:
 | situation | strip |
 |---|---|
 | idle (desktop or fullscreen) | hidden |
-| cursor enters the top edge — 12px from screen top in fullscreen, 12px below the menu bar on desktop | slides down (0.08s) |
+| cursor enters the top edge — 12px from screen top in fullscreen, 12px below the menu bar on desktop | slides down (0.22s) |
 | cursor drops below the strip | slides away |
 | mission control | off the stage |
 | display change | snaps to the new geometry (no slide) |
@@ -82,7 +82,7 @@ survives rebuilds.)
 
 - logs: `/tmp/smalt.err`
 - main display only in v0 — secondary displays get the strip later
-- constants: `BAR_HEIGHT` (26px), `REVEAL_HEIGHT` (12px), `HIDE_MARGIN` (6px), `SLIDE_DURATION` (0.08s) in main.swift
+- constants: `BAR_HEIGHT` (30px — matches the native menu bar), `REVEAL_HEIGHT` (12px), `HIDE_MARGIN` (6px), `SLIDE_DURATION` (0.22s) in main.swift
 - the summon zone (6px) sits just below cobalt-60's 5px wall clamp, so the
   reveal works whether or not the wall has relaxed yet
 - the strip's window ignores mouse events in v0; widgets (v1) flip that

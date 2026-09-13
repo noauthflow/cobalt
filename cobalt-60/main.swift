@@ -11,6 +11,12 @@ import CoreGraphics
 //   cobalt-60 status   installed / loaded / running
 
 let TOP_MARGIN: CGFloat = 5
+// the wall keeps its hands off the top-right corner so the native menu bar
+// stays usable (clock, control center, status items): within this many px of
+// the main screen's right edge, mouse events pass through unclamped and the
+// cursor can enter the menu bar like normal. outside the zone the 5px wall
+// applies as before.
+let CORNER_EXEMPT: CGFloat = 5
 let label = "dev.cobalt.cobalt-60"
 let name = "cobalt-60"
 let errLog = "/tmp/cobalt-60.err"
@@ -21,19 +27,23 @@ let plistPath = FileManager.default.homeDirectoryForCurrentUser.path
 // and cannot capture local context)
 
 var minYFromTop: CGFloat = 0
+// events right of this x pass through unclamped (recomputed with minY)
+var exemptFromX: CGFloat = .greatestFiniteMagnitude
 
 func recomputeMinY() {
     guard let mainScreen = NSScreen.screens.first(where: { $0.frame.origin.y == 0 }) ?? NSScreen.main else { return }
     let screenHeight = mainScreen.frame.height
     // bottom edge of the menu bar, as distance from the top of the screen
     minYFromTop = screenHeight - mainScreen.visibleFrame.maxY + TOP_MARGIN
+    exemptFromX = mainScreen.frame.maxX - CORNER_EXEMPT
 }
 
 let tapCallback: CGEventTapCallBack = { _, type, event, _ in
     switch type {
     case .mouseMoved, .leftMouseDragged, .otherMouseDragged:
         let loc = event.location
-        if loc.y < minYFromTop {
+        // top-right exemption: clock / control center stay reachable
+        if loc.y < minYFromTop && loc.x < exemptFromX {
             event.location = CGPoint(x: loc.x, y: minYFromTop)
         }
     default:
@@ -280,7 +290,7 @@ func cmdStatus() {
     print("process:  \(running ? "running" : "not running")")
 
     if running {
-        print("wall:     up — cursor held \(Int(TOP_MARGIN))px below the menu bar")
+        print("wall:     up — cursor held \(Int(TOP_MARGIN))px below the menu bar (top \(Int(CORNER_EXEMPT))px exempt)")
         print("corners:  black while a fullscreen app is up (\(cornerWindows.count/4) displays watched)")
     } else if loaded {
         print("wall:     down — launchd is retrying; check \(errLog)")

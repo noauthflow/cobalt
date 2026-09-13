@@ -10,6 +10,8 @@ an event tap (`CGEventTapCreate` on the HID tap) intercepts `mouseMoved`, `leftM
 
 the boundary is computed from the screen's `visibleFrame` (which excludes the menu bar), and recomputed on display changes — resolution switches, monitor plug/unplug.
 
+**top-right exemption:** the wall keeps its hands off the rightmost 5px of the top edge (`CORNER_EXEMPT` in main.swift). inside that zone mouse events pass through unclamped, so the clock, control center and other menu bar items stay reachable. moving left out of the zone while above the line snaps the cursor back down to the wall — that's expected.
+
 ## commands
 
 the installed binary is on your PATH, so it controls itself:
@@ -36,5 +38,5 @@ the binary is installed to `~/.local/bin/cobalt-60` — that exact path is what 
 ## notes
 
 - logs: `/tmp/cobalt-60.err`
-- the margin is 5px — constant `TOP_MARGIN` in main.swift if you want to change it
+- the margin is 5px — constant `TOP_MARGIN` in main.swift if you want to change it; the top-right exemption width is `CORNER_EXEMPT` (5px)
 - shows up in system settings → general → login items → "allow in the background"
