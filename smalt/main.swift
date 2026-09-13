@@ -25,10 +25,10 @@ import IOKit.ps
 // zero permissions: the reveal is a global mouse monitor, not an event
 // tap. nothing is intercepted, nothing is rewritten, nothing is polled.
 
-let PILL_WIDTH: CGFloat = 84
-let PILL_HEIGHT: CGFloat = 220
+let PILL_WIDTH: CGFloat = 60
+let PILL_HEIGHT: CGFloat = 144
 let PILL_INSET: CGFloat = 6      // gap between pill and the right screen edge
-let PILL_RADIUS: CGFloat = 14
+let PILL_RADIUS: CGFloat = 16
 let REVEAL_WIDTH: CGFloat = 12   // summon zone: cursor within this of the right edge
 let HIDE_MARGIN: CGFloat = 6     // cursor must drop this far left of the pill before it springs away
 // spring constants: ω ≈ 23.7 rad/s, ζ ≈ 0.68 — a crisp pop with ~5% overshoot
@@ -40,53 +40,39 @@ let SPRING_C: CGFloat = 32
 final class StripView: NSView {
     override var isFlipped: Bool { true }   // y counts down from the pill top
 
-    // the glass: soft violet (D0BCFF), rounded — no border, the shadow does the lifting
+    // the glass: cream, rounded — no border, the shadow does the lifting
     override func draw(_ dirtyRect: NSRect) {
         let path = NSBezierPath(roundedRect: bounds, xRadius: PILL_RADIUS, yRadius: PILL_RADIUS)
-        NSColor(srgbRed: 0xD0/255.0, green: 0xBC/255.0, blue: 0xFF/255.0, alpha: 1).setFill()
+        NSColor(srgbRed: 0xF8/255.0, green: 0xF3/255.0, blue: 0xE6/255.0, alpha: 1).setFill()
         path.fill()
         drawWidgets(in: bounds)
     }
 
-    // clock / date / battery, stacked from the top, centered — permission-free
+    // iPhone-style widget stack: battery, date, time — permission-free
     private func drawWidgets(in bounds: NSRect) {
-        var y: CGFloat = 12
-        y = drawCentered(Widget.timeForm.string(from: Date()), color: Widget.ink, topY: y, rowH: 20, in: bounds)
-        y = drawCentered(Widget.dateForm.string(from: Date()), color: Widget.ink, topY: y, rowH: 16, in: bounds)
-        drawBatteryVertical(centerX: bounds.midX, topY: y, rowH: 26)
+        var y: CGFloat = 10
+        drawBatteryIcon(centerX: bounds.midX, topY: y)
+        y += 16 + 12
+        drawDateIcon(centerX: bounds.midX, topY: y)
+        y += 26 + 12
+        drawTime(centerX: bounds.midX, topY: y)
     }
 }
 
 // MARK: - widgets
-//// dark ink on the glass. all sources are permission-free: IOKit power
-// sources, clock. (CoreWLAN rssi could join later.)
+//
+// dark ink on cream. all sources are permission-free: IOKit power sources,
+// clock, ProcessInfo low-power state.
 
 enum Widget {
     static let ink = NSColor(srgbRed: 0.13, green: 0.06, blue: 0.24, alpha: 1)
-    static let inkDim = NSColor(srgbRed: 0.13, green: 0.06, blue: 0.24, alpha: 0.45)
-    static let glass = NSColor(srgbRed: 0xD0/255.0, green: 0xBC/255.0, blue: 0xFF/255.0, alpha: 1)
 
-    static let timeForm: DateFormatter = {
-        let f = DateFormatter()
-        f.timeStyle = .short
-        return f
-    }()
-
-    static let dateForm: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "EEE d MMM"
-        return f
-    }()
-}
-
-// centered text; returns the y below the row
-func drawCentered(_ s: String, color: NSColor, topY: CGFloat, rowH: CGFloat,
-                  in bounds: NSRect, font: NSFont = NSFont.systemFont(ofSize: 13, weight: .medium)) -> CGFloat {
-    let a: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color]
-    let size = (s as NSString).size(withAttributes: a)
-    (s as NSString).draw(at: NSPoint(x: bounds.midX - size.width / 2, y: topY + (rowH - size.height) / 2),
-                         withAttributes: a)
-    return topY + rowH
+    // battery fill: white — yellow while Low Power Mode is on
+    static var batteryFill: NSColor {
+        ProcessInfo.processInfo.isLowPowerModeEnabled
+            ? NSColor(srgbRed: 1.0, green: 0.84, blue: 0.0, alpha: 1)
+            : .white
+    }
 }
 
 // IOKit power sources — the same thing the native battery item reads
@@ -102,41 +88,75 @@ func batteryLevel() -> (pct: Int, charging: Bool)? {
     return nil
 }
 
-// battery glyph + percentage, centered as one row
-func drawBatteryVertical(centerX: CGFloat, topY: CGFloat, rowH: CGFloat) {
-    guard let (pct, charging) = batteryLevel() else { return }
-    let label = "\(pct)%"
-    let a: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 13, weight: .medium), .foregroundColor: Widget.ink]
-    let ts = (label as NSString).size(withAttributes: a)
-    let glyphW: CGFloat = 22
-    let total = glyphW + 5 + ts.width
-    let x0 = centerX - total / 2
-    let gy = topY + (rowH - 12) / 2
+// iPhone-style battery: outline glyph, proportional fill, the number INSIDE
+// the icon. fill is white — yellow while Low Power Mode is on.
+func drawBatteryIcon(centerX: CGFloat, topY: CGFloat) {
+    guard let (pct, _) = batteryLevel() else { return }
+    let label = "\(pct)"
+    let g = NSRect(x: centerX - 16, y: topY, width: 32, height: 15)
+    let ink = NSColor(srgbRed: 0.13, green: 0.06, blue: 0.24, alpha: 1)
 
-    let g = NSRect(x: x0, y: gy, width: glyphW, height: 12)
-    Widget.ink.setStroke()
-    let outline = NSBezierPath(roundedRect: g, xRadius: 3, yRadius: 3)
+    ink.setStroke()
+    let outline = NSBezierPath(roundedRect: g, xRadius: 4.5, yRadius: 4.5)
     outline.lineWidth = 1
     outline.stroke()
-    Widget.ink.setFill()
-    NSRect(x: g.maxX + 1, y: gy + 3.5, width: 2, height: 5).fill() // nub
-    let fillW = (glyphW - 4) * CGFloat(pct) / 100
-    NSRect(x: g.minX + 2, y: g.minY + 2, width: max(fillW, 2), height: g.height - 4).fill()
+    ink.setFill()
+    NSRect(x: g.maxX + 1.5, y: g.midY - 2.5, width: 2, height: 5).fill() // nub
 
-    if charging {
-        // bolt knocked out of the fill in glass color
-        Widget.glass.setFill()
-        let bolt = NSBezierPath()
-        bolt.move(to: NSPoint(x: g.midX + 2, y: g.maxY - 1))
-        bolt.line(to: NSPoint(x: g.midX - 3, y: g.minY + 3.5))
-        bolt.line(to: NSPoint(x: g.midX - 0.5, y: g.minY + 3.5))
-        bolt.line(to: NSPoint(x: g.midX - 2, y: g.maxY - 1))
-        bolt.line(to: NSPoint(x: g.midX + 3, y: g.minY + 3.5))
-        bolt.line(to: NSPoint(x: g.midX + 0.5, y: g.minY + 3.5))
-        bolt.close()
-        bolt.fill()
+    Widget.batteryFill.setFill()
+    let fillW = (g.width - 3) * CGFloat(pct) / 100
+    if fillW > 0.5 {
+        NSBezierPath(roundedRect: NSRect(x: g.minX + 1.5, y: g.minY + 1.5,
+                                         width: fillW, height: g.height - 3),
+                     xRadius: 3, yRadius: 3).fill()
     }
-    (label as NSString).draw(at: NSPoint(x: g.maxX + 5, y: topY + (rowH - ts.height) / 2), withAttributes: a)
+
+    let a: [NSAttributedString.Key: Any] = [
+        .font: NSFont.monospacedDigitSystemFont(ofSize: 9.5, weight: .semibold),
+        .foregroundColor: ink]
+    let ts = (label as NSString).size(withAttributes: a)
+    (label as NSString).draw(at: NSPoint(x: g.midX - ts.width / 2, y: g.midY - ts.height / 2), withAttributes: a)
+}
+
+// iOS-calendar-style date icon — static for now (non-functional)
+func drawDateIcon(centerX: CGFloat, topY: CGFloat) {
+    let s: CGFloat = 26
+    let r = NSRect(x: centerX - s / 2, y: topY, width: s, height: s)
+    NSColor.white.setFill()
+    NSBezierPath(roundedRect: r, xRadius: 7, yRadius: 7).fill()
+
+    // red header band, clipped to the icon's rounded corners
+    if let ctx = NSGraphicsContext.current?.cgContext {
+        ctx.saveGState()
+        NSBezierPath(roundedRect: r, xRadius: 7, yRadius: 7).addClip()
+        NSColor(srgbRed: 1.0, green: 0.23, blue: 0.19, alpha: 1).setFill()
+        NSRect(x: r.minX, y: r.minY, width: s, height: 8).fill()
+        ctx.restoreGState()
+    }
+
+    let day = Calendar.current.component(.day, from: Date())
+    let a: [NSAttributedString.Key: Any] = [
+        .font: NSFont.systemFont(ofSize: 12, weight: .semibold),
+        .foregroundColor: NSColor(srgbRed: 0.13, green: 0.06, blue: 0.24, alpha: 1)]
+    let ds = ("\(day)" as NSString).size(withAttributes: a)
+    ("\(day)" as NSString).draw(at: NSPoint(x: r.midX - ds.width / 2, y: topY + 9 + (16 - ds.height) / 2),
+                                withAttributes: a)
+}
+
+// the time takes two spots: hour over minute, like a flip clock
+func drawTime(centerX: CGFloat, topY: CGFloat) {
+    let dc = Calendar.current.dateComponents([.hour, .minute], from: Date())
+    let a: [NSAttributedString.Key: Any] = [
+        .font: NSFont.monospacedDigitSystemFont(ofSize: 21, weight: .semibold),
+        .foregroundColor: NSColor(srgbRed: 0.13, green: 0.06, blue: 0.24, alpha: 1)]
+    let hs = String(format: "%02d", dc.hour ?? 0)
+    let ms = String(format: "%02d", dc.minute ?? 0)
+    for (i, s) in [hs, ms].enumerated() {
+        let sz = (s as NSString).size(withAttributes: a)
+        (s as NSString).draw(at: NSPoint(x: centerX - sz.width / 2,
+                                         y: topY + CGFloat(i * 26) + (26 - sz.height) / 2),
+                             withAttributes: a)
+    }
 }
 
 // MARK: - state
@@ -411,6 +431,13 @@ func runDaemon() -> Never {
         strip.contentView?.needsDisplay = true
     }
 
+    // low power mode toggles repaint the battery instantly
+    NotificationCenter.default.addObserver(
+        forName: NSNotification.Name("NSProcessInfoPowerStateDidChangeNotification"), object: nil, queue: .main
+    ) { _ in
+        strip.contentView?.needsDisplay = true
+    }
+
     app.run() // full app run loop — runs the monitors and notifications
     exit(0)
 }
@@ -478,7 +505,7 @@ func cmdStatus() {
     print("process:  \(running ? "running" : "not running")")
 
     if running {
-        print("pill:     up — empty cobalt glass, mid-right edge (summon zone: \(Int(REVEAL_WIDTH))px)")
+        print("pill:     up — cream glass, mid-right edge (summon zone: \(Int(REVEAL_WIDTH))px)")
     } else if loaded {
         print("pill:     down — launchd is retrying; check \(errLog)")
         if let tail = try? String(contentsOfFile: errLog, encoding: .utf8).suffix(200) {
