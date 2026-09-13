@@ -303,9 +303,25 @@ extension NSFont {
 
 // MARK: - widgets
 //
-// heroicon glyphs in `ink`, type in the matching tabular SF Pro, everything
-// centered in its slot. sources are permission-free: IOKit power sources,
-// the clock, ProcessInfo low-power state.
+// calendar + battery are SF Symbols — the same vectors the menu bar itself
+// uses (NSImage(systemSymbolName:), tinted to the palette). the heroicon
+// SVGs stay as fallbacks in case the symbol lookup ever misses. type is
+// matching tabular SF Pro, everything centered in its slot. sources are
+// permission-free: IOKit power sources, the clock, ProcessInfo LPM state.
+
+// an SF Symbol at a given point size, tinted to one palette color
+func symbolImage(_ name: String, size: CGFloat, color: NSColor) -> NSImage? {
+    guard let base = NSImage(systemSymbolName: name, accessibilityDescription: nil) else { return nil }
+    return base
+        .withSymbolConfiguration(.init(pointSize: size, weight: .regular))?
+        .withSymbolConfiguration(.init(paletteColors: [color]))
+}
+
+// an image rect of the image's own size, centered in the slot
+func centered(_ size: NSSize, in slot: NSRect) -> NSRect {
+    NSRect(x: slot.midX - size.width / 2, y: slot.midY - size.height / 2,
+           width: size.width, height: size.height)
+}
 
 // IOKit power sources — the same thing the native battery item reads
 func batteryLevel() -> (pct: Int, charging: Bool)? {
@@ -320,26 +336,34 @@ func batteryLevel() -> (pct: Int, charging: Bool)? {
     return nil
 }
 
-// heroicons battery, verbatim — no fill, just the glyph; the percentage
-// sits optically centered in the body. low power mode: the whole icon
-// strokes in yellow.
+// SF Symbols battery.0 — no fill, the percentage IS the gauge; it sits
+// optically centered in the symbol's body. low power mode: icon + number
+// in one amber.
 func drawBattery(in slot: NSRect) {
     guard let (pct, _) = batteryLevel() else { return }
     let lowPower = ProcessInfo.processInfo.isLowPowerModeEnabled
-    Heroicon.draw(SVGPath.battery, color: lowPower ? Theme.lpm : Theme.ink, in: slot)
+    let color = lowPower ? Theme.lpm : Theme.ink
+    guard let img = symbolImage("battery.0", size: Theme.iconSize, color: color) else {
+        Heroicon.draw(SVGPath.battery, color: color, in: slot)
+        return
+    }
+    let r = centered(img.size, in: slot)
+    img.draw(in: r)
 
-    // the number, inside the body (svg rect x1.5–21, y7.5–18), ink-centered,
-    // icon color normally; in LPM a darker amber — yellow family like the
-    // stroke, but readable on the cream glass
-    let iconColor = lowPower ? Theme.lpm : Theme.ink
+    // the number inside the body — the nub takes the last ~18% of the
+    // glyph's width; the body spans the full glyph height
+    let body = NSRect(x: r.minX, y: r.minY, width: r.width * 0.82, height: r.height)
     let size: CGFloat = pct >= 100 ? Theme.pctSize - 1.5 : Theme.pctSize
-    drawText("\(pct)", font: .tabular(size), color: iconColor,
-             in: Heroicon.gridRect(CGRect(x: 2.5, y: 8, width: 17.5, height: 9.5), in: slot))
+    drawText("\(pct)", font: .tabular(size), color: color, in: body)
 }
 
-// heroicons calendar, verbatim
+// SF Symbols calendar, the same one the menu bar's date UI uses
 func drawCalendar(in slot: NSRect) {
-    Heroicon.draw(SVGPath.calendar, color: Theme.ink, in: slot)
+    guard let img = symbolImage("calendar", size: Theme.iconSize, color: Theme.ink) else {
+        Heroicon.draw(SVGPath.calendar, color: Theme.ink, in: slot)
+        return
+    }
+    img.draw(in: centered(img.size, in: slot))
 }
 
 // time: hour over minute — one CELL slot each, tabular SF Pro centered
