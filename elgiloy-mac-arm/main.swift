@@ -40,6 +40,7 @@ final class App: NSObject {
     var listBusy = false
     private var listPending = false   // a refresh arrived while one was in flight → run another when it lands
     private var lastFlagsValid = false // last reply's AX scan grounded every row (see refreshList)
+    private var pendingNewTab = false  // 'a' fired; next refresh should land sel on the appended tab
     private var movedYet = false
     private var watchdog: Timer?
 
@@ -149,6 +150,18 @@ final class App: NSObject {
     func closeSelected() {
         guard open else { return }
         closeRow(sel)
+    }
+
+    // a while the overlay is open: create a new tab. chrome makes AND
+    // activates it natively; the next refresh (already queued behind the
+    // make on the serial apple-event queue) sees it appended at the end and
+    // the highlight lands on it. chaining 'a a a' works — each refresh
+    // anchors on the newest tab.
+    func addTab() {
+        guard open, let bid = bundleId else { return }
+        pendingNewTab = true
+        q.async { Browser.newTab(bundleId: bid) }
+        refreshList()   // runs after the make on q — the reply already has the new tab
     }
 
     // close row i: fires the close in the background, drops the row locally,
@@ -300,7 +313,18 @@ final class App: NSObject {
                         let anchor = self.movedYet && self.sel < self.tabs.count
                             ? self.tabs[self.sel].n : nil
                         self.tabs = tabs
-                        if !self.movedYet, let a = active, a - 1 < tabs.count {
+                        if self.pendingNewTab {
+                            // 'a' just made a tab: it's appended at the END
+                            // (highest n) and chrome already activated it —
+                            // land the highlight on it and anchor there so
+                            // racing refreshes can't move it
+                            self.pendingNewTab = false
+                            if let maxN = tabs.map(\.n).max(),
+                               let i = tabs.firstIndex(where: { $0.n == maxN }) {
+                                self.sel = i
+                                self.movedYet = true
+                            }
+                        } else if !self.movedYet, let a = active, a - 1 < tabs.count {
                             // user hasn't moved: land on chrome's real tab
                             self.sel = a - 1
                         } else if let anchor, let i = tabs.firstIndex(where: { $0.n == anchor }) {

@@ -52,6 +52,9 @@ esc             cancel the overlay — nothing changed, chrome was never touched
 w               close the SELECTED tab — keyboard path, overlay stays open;
                 selection lands on the row below the closed one (the last tab
                 falls back to the row above)
+a               new tab — chrome creates AND switches to it (new tab page);
+                the overlay stays open with the highlight on the new row, so
+                a a a chains new tabs
 1 … 9, 0        while open: jump straight to tab 1 … 10 (0 = tab 10) — chrome
                 switches in real time and the overlay stays up so jumps can
                 chain

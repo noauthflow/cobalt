@@ -260,7 +260,11 @@ enum Browser {
             var tabs: [Tab] = []
             for record in parts.joined(separator: "\u{1f}").components(separatedBy: "\u{1e}") where !record.isEmpty {
                 let f = record.components(separatedBy: "\u{1f}")
-                if f.count == 3, let n = Int(f[0]) { tabs.append(Tab(n: n, title: f[1], url: f[2])) }
+                if f.count == 3, let n = Int(f[0]) {
+                    // chrome can report an empty title mid-load (fresh 'a'
+                    // tabs land here briefly) — rows must never render blank
+                    tabs.append(Tab(n: n, title: f[1].isEmpty ? "New Tab" : f[1], url: f[2]))
+                }
             }
             // merge: match AX strip entries to tabs by PREFIX — chrome's AX
             // title is the tooltip: "<appleScript title>" + optional
@@ -332,5 +336,36 @@ enum Browser {
         let script = OSAScript(source: "tell application id \"\(bundleId)\" to close tab \(n) of window 1")
         _ = run(script)
         fputs("elgiloy: closed tab \(n)\n", stderr)
+    }
+
+    // a while the overlay is open: make a new tab. chrome CREATES AND
+    // ACTIVATES it natively (make new tab selects it — no separate activate
+    // step), landing on the new tab page.
+    static func newTab(bundleId: String) {
+        let script = OSAScript(source: """
+            tell application id "\(bundleId)" to tell window 1 to make new tab
+            """)
+        _ = run(script)
+        fputs("elgiloy: new tab\n", stderr)
+    }
+
+    // recursive AX tree dump (role + title + description per node) — debug
+    // only, called from the pin failure path (kept for future AX spelunking)
+    private static func dumpAXTree(_ el: AXUIElement, label: String, depth: Int) {
+        func walk(_ e: AXUIElement, _ d: Int, _ path: String) {
+            guard depth >= 0 else { return }
+            let r = axRole(e)
+            let t = axString(e, kAXTitleAttribute as String) ?? ""
+            let d = axString(e, kAXDescriptionAttribute as String) ?? ""
+            fputs("[\(path)] role=\(r) title=\(t.isEmpty ? "-" : t) desc=\(d.isEmpty ? "-" : d)\n", stderr)
+            guard depth > 0 else { return }
+            for (i, k) in axChildren(e).enumerated() {
+                guard i < 25 else { fputs("[\(path)] … (children truncated)\n", stderr); break }
+                walk(k, depth - 1, "\(path)/\(i)")
+            }
+        }
+        fputs("---- AX dump: \(label) ----\n", stderr)
+        walk(el, depth, "root")
+        fputs("---- end \(label) ----\n", stderr)
     }
 }

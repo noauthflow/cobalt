@@ -91,6 +91,10 @@ enum Tap {
                     App.shared.closeSelected()
                     return nil
                 }
+                if code == 0, App.shared.open {    // a — new tab, chrome switches
+                    App.shared.addTab()            // to it natively; overlay follows
+                    return nil
+                }
                 if App.shared.open, let n = Self.digitKeycodes[code] {
                     // 1-9 → tab 1-9, 0 → tab 10 — direct jump, same real-time
                     // switch path as ctrl+tab. swallowed so the browser never
