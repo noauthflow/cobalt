@@ -11,11 +11,11 @@ import CoreGraphics
 //   cobalt-60 status   installed / loaded / running
 
 let TOP_MARGIN: CGFloat = 5
-// the wall keeps its hands off the top-right corner so the native menu bar
-// stays usable (clock, control center, status items): within this many px of
-// the main screen's right edge, mouse events pass through unclamped and the
-// cursor can enter the menu bar like normal. outside the zone the 5px wall
-// applies as before.
+// the wall keeps its hands off the top corners so the native menu bar stays
+// usable (apple menu / app menus on the left, clock / control center / status
+// items on the right): within this many px of the main screen's left or right
+// edge, mouse events pass through unclamped and the cursor can enter the menu
+// bar like normal. outside those zones the 5px wall applies as before.
 let CORNER_EXEMPT: CGFloat = 5
 
 // feature switches — persisted via `defaults` (domain dev.cobalt.cobalt-60),
@@ -40,8 +40,13 @@ let plistPath = FileManager.default.homeDirectoryForCurrentUser.path
 // and cannot capture local context)
 
 var minYFromTop: CGFloat = 0
-// events right of this x pass through unclamped (recomputed with minY)
+// events right of exemptFromX — or left of exemptToX — pass through
+// unclamped (recomputed with minY)
 var exemptFromX: CGFloat = .greatestFiniteMagnitude
+var exemptToX: CGFloat = .greatestFiniteMagnitude
+// left edge of the main screen — bounds the left exemption so displays
+// further left (negative x) don't get exempted wholesale
+var mainScreenMinX: CGFloat = 0
 
 func recomputeMinY() {
     guard let mainScreen = NSScreen.screens.first(where: { $0.frame.origin.y == 0 }) ?? NSScreen.main else { return }
@@ -49,6 +54,8 @@ func recomputeMinY() {
     // bottom edge of the menu bar, as distance from the top of the screen
     minYFromTop = screenHeight - mainScreen.visibleFrame.maxY + TOP_MARGIN
     exemptFromX = mainScreen.frame.maxX - CORNER_EXEMPT
+    exemptToX = mainScreen.frame.minX + CORNER_EXEMPT
+    mainScreenMinX = mainScreen.frame.minX
 }
 
 let tapCallback: CGEventTapCallBack = { _, type, event, _ in
@@ -56,8 +63,10 @@ let tapCallback: CGEventTapCallBack = { _, type, event, _ in
     case .mouseMoved, .leftMouseDragged, .otherMouseDragged:
         if wallOn {
             let loc = event.location
-            // top-right exemption: clock / control center stay reachable
-            if loc.y < minYFromTop && loc.x < exemptFromX {
+            // top-corner exemptions: menu bar stays reachable at both edges
+            // (apple/app menus on the left, clock/control center on the right)
+            let inLeftZone = loc.x >= mainScreenMinX && loc.x < exemptToX
+            if loc.y < minYFromTop && loc.x < exemptFromX && !inLeftZone {
                 event.location = CGPoint(x: loc.x, y: minYFromTop)
             }
         }
@@ -328,7 +337,7 @@ func cmdStatus() {
 
     if running {
         if wallOn {
-            print("wall:     up — cursor held \(Int(TOP_MARGIN))px below the menu bar (top \(Int(CORNER_EXEMPT))px exempt)")
+            print("wall:     up — cursor held \(Int(TOP_MARGIN))px below the menu bar (top \(Int(CORNER_EXEMPT))px exempt at both screen edges)")
         } else {
             print("wall:     disabled — cursor boundary inactive")
         }

@@ -1,6 +1,29 @@
 import AppKit
 import ApplicationServices
 
+// view mode: "split" = pinned tabs get their own pill above the regular ones;
+// "flat" = one pill, pinned tabs marked with a pin icon next to the title.
+// persisted to a tiny json file so the launchd daemon picks up changes made
+// through the cli without a restart (it re-reads on every refresh).
+enum ViewPref {
+    static var url: URL {
+        let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        return dir.appendingPathComponent("elgiloy-view.json")
+    }
+
+    static var split: Bool {
+        guard let d = try? Data(contentsOf: url),
+              let v = try? JSONDecoder().decode([String: String].self, from: d) else { return true }
+        return v["view"] != "flat"
+    }
+
+    static func set(split: Bool) {
+        let payload = ["view": split ? "split" : "flat"]
+        guard let data = try? JSONEncoder().encode(payload) else { return }
+        try? data.write(to: url, options: .atomic)
+    }
+}
+
 // WE ARE THE CYCLE. ctrl+tab is swallowed — chrome never sees it and never
 // cycles on its own. the selection is plain local state (instant, one actor,
 // nothing to flicker between). exactly ONE apple event happens per session:
@@ -29,6 +52,7 @@ final class App: NSObject {
     override init() {
         super.init()
         loadCache()   // disk-backed: even the FIRST open after launch has tabs
+        overlay.splitView = ViewPref.split
         // LIVE CACHE — while a chromium browser is frontmost and the overlay
         // is closed, quietly poll its tab list every 200ms. the batched list
         // query costs a few ms of apple-event time, so this is effectively
@@ -203,6 +227,7 @@ final class App: NSObject {
                     }
                 }
                 if let tabs {
+                    self.overlay.splitView = ViewPref.split   // pick up cli view changes live
                     // cache ALWAYS takes the reply — even when it lands after
                     // the session already ended. discarding it (the old
                     // behavior) meant fast sessions never warmed the cache and
@@ -274,7 +299,28 @@ final class App: NSObject {
     }
 }
 
-// entry — accessory app, no dock icon, runs forever from the LaunchAgent
+// entry — accessory app, no dock icon, runs forever from the LaunchAgent.
+// `elgiloy view [split|flat]` switches the pinned-tabs display and exits;
+// a bare invocation is the daemon itself.
+let argv = CommandLine.arguments
+if argv.count >= 2, argv[1] == "view" {
+    if argv.count >= 3 {
+        switch argv[2] {
+        case "split":
+            ViewPref.set(split: true)
+            print("view: split — pinned tabs in their own pill above the regular ones")
+        case "flat":
+            ViewPref.set(split: false)
+            print("view: flat — one pill, pin icon next to pinned tab titles")
+        case let other:
+            print("unknown view '\(other)' — usage: elgiloy view [split|flat]")
+        }
+    } else {
+        print("current view: \(ViewPref.split ? "split" : "flat")")
+        print("usage: elgiloy view [split|flat]")
+    }
+    exit(0)
+}
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 _ = App.shared

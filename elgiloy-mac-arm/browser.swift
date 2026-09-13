@@ -11,6 +11,20 @@ enum Browser {
         var n: Int      // 1-based tab index, as chrome sees it (mutable: renumbers on close)
         let title: String
         let url: String
+        var pinned: Bool = false   // from the AX tree (see pinnedFlags)
+
+        init(n: Int, title: String, url: String, pinned: Bool = false) {
+            self.n = n; self.title = title; self.url = url; self.pinned = pinned
+        }
+
+        // hand-rolled decode so cache files from before `pinned` still load
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            n = try c.decode(Int.self, forKey: .n)
+            title = try c.decode(String.self, forKey: .title)
+            url = try c.decode(String.self, forKey: .url)
+            pinned = try c.decodeIfPresent(Bool.self, forKey: .pinned) ?? false
+        }
 
         // "https://github.com/…" → "github.com"
         var domain: String {
@@ -85,9 +99,76 @@ enum Browser {
         return s
     }
 
+    // ---- pinned tabs -------------------------------------------------------
+    // chromium's appleScript dictionary has NO `pinned` property on tab, but
+    // the accessibility tree does: every tab in the strip is an AXRadioButton
+    // whose AXDescription contains " – Pinned " when the tab is pinned. the
+    // strip's document order matches appleScript tab order, so the caller can
+    // zip the flags straight onto the tab list by index.
+    struct PinnedScan {
+        var flags: [Bool]     // one per tab, in strip order
+        var titles: [String]  // matching AX titles, for the fallback merge
+    }
+
+    static func pinnedFlags(pid: pid_t?) -> PinnedScan {
+        guard let pid else { return PinnedScan(flags: [], titles: []) }
+        let app = AXUIElementCreateApplication(pid)
+        var winRef: CFTypeRef?
+        AXUIElementCopyAttributeValue(app, kAXMainWindowAttribute as CFString, &winRef)
+        guard let w = winRef else { return PinnedScan(flags: [], titles: []) }
+        // BFS down to the tab strip. prune AXWebArea — the page's accessibility
+        // tree can hold thousands of nodes and this probe runs on every poll —
+        // and cap depth; the strip sits a few groups under the window.
+        var tabGroup: AXUIElement?
+        var queue: [(AXUIElement, Int)] = [(w as! AXUIElement, 0)]
+        while tabGroup == nil, !queue.isEmpty {
+            let (el, depth) = queue.removeFirst()
+            if depth > 7 { continue }
+            for k in axChildren(el) {
+                let role = axRole(k)
+                if role == "AXTabGroup" { tabGroup = k; break }
+                if role == "AXWebArea" { continue }
+                queue.append((k, depth + 1))
+            }
+        }
+        guard let tg = tabGroup else { return PinnedScan(flags: [], titles: []) }
+        var scan = PinnedScan(flags: [], titles: [])
+        func collect(_ el: AXUIElement) {
+            if axRole(el) == "AXRadioButton" {
+                let desc = axString(el, kAXDescriptionAttribute as String) ?? ""
+                scan.flags.append(desc.range(of: "Pinned") != nil)
+                scan.titles.append(axString(el, kAXTitleAttribute as String) ?? "")
+                return
+            }
+            for k in axChildren(el) { collect(k) }
+        }
+        collect(tg)
+        return scan
+    }
+
+    private static func axChildren(_ el: AXUIElement) -> [AXUIElement] {
+        var v: CFTypeRef?
+        AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &v)
+        return (v as? [AXUIElement]) ?? []
+    }
+
+    private static func axRole(_ el: AXUIElement) -> String {
+        var v: CFTypeRef?
+        AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &v)
+        return v as? String ?? ""
+    }
+
+    private static func axString(_ el: AXUIElement, _ name: String) -> String? {
+        var v: CFTypeRef?
+        AXUIElementCopyAttributeValue(el, name as CFString, &v)
+        return v as? String
+    }
+
     // everything the overlay needs in one query: active tab index (first
-    // field) + every tab's title and url
+    // field) + every tab's title and url — plus pinned flags from the AX tree
     static func list(bundleId: String, queue: DispatchQueue, done: @escaping ([Tab]?, Int?) -> Void) {
+        // captured on the calling (main) thread: NSWorkspace is happiest there
+        let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier
         queue.async {
             let s = compiled(for: bundleId)
             guard let raw = run(s.list) else { done(nil, nil); return }
@@ -97,6 +178,16 @@ enum Browser {
             for record in parts.joined(separator: "\u{1f}").components(separatedBy: "\u{1e}") where !record.isEmpty {
                 let f = record.components(separatedBy: "\u{1f}")
                 if f.count == 3, let n = Int(f[0]) { tabs.append(Tab(n: n, title: f[1], url: f[2])) }
+            }
+            // merge pinned flags. primary path: AX strip order == appleScript
+            // order, so equal counts zip by index. fallback (AX pruned tabs
+            // from the strip): match by title — a heuristic, better than none
+            let scan = pinnedFlags(pid: pid)
+            if scan.flags.count == tabs.count {
+                for i in tabs.indices { tabs[i].pinned = scan.flags[i] }
+            } else if !scan.flags.isEmpty {
+                let pinnedTitles = Set(zip(scan.flags, scan.titles).filter { $0.0 }.map { $0.1 })
+                for i in tabs.indices where pinnedTitles.contains(tabs[i].title) { tabs[i].pinned = true }
             }
             done(tabs.isEmpty ? nil : tabs, active)
         }
