@@ -31,10 +31,9 @@ let PILL_INSET: CGFloat = 6      // gap between pill and the right screen edge
 let PILL_RADIUS: CGFloat = 14
 let REVEAL_WIDTH: CGFloat = 12   // summon zone: cursor within this of the right edge
 let HIDE_MARGIN: CGFloat = 6     // cursor must drop this far left of the pill before it springs away
-// spring constants: ω ≈ 19.5 rad/s, ζ ≈ 0.66 — a pop with ~6% overshoot
-let SPRING_K: CGFloat = 380
-let SPRING_C: CGFloat = 26
-let SPRING_DT: CGFloat = 1 / 120
+// spring constants: ω ≈ 22.8 rad/s, ζ ≈ 0.66 — a pop with ~8% overshoot
+let SPRING_K: CGFloat = 520
+let SPRING_C: CGFloat = 30
 
 // MARK: - the pill
 
@@ -78,36 +77,68 @@ func pillFrame(visible: Bool) -> NSRect {
 // toward an old position while a newer animation fought it. a spring has
 // no completions — retargeting is just changing the goal, which is smooth
 // by construction, no matter how fast the cursor flips in and out.
+//
+// driven by CADisplayLink (display-synced, so it ticks at the screen's real
+// refresh rate) and integrating with MEASURED dt — the old Timer version
+// assumed 120Hz but macOS coalesces timers, so physics ran at half speed.
 
-var springTimer: Timer?
-var springX: CGFloat = 0
-var springV: CGFloat = 0
-var springTargetX: CGFloat = 0
+final class SpringDriver: NSObject {
+    var link: CADisplayLink?
+    var timer: Timer?
+    var x: CGFloat = 0
+    var v: CGFloat = 0
+    var target: CGFloat = 0
+    var last: CFTimeInterval = 0
 
-func springTo(_ targetX: CGFloat) {
-    springTargetX = targetX
-    guard springTimer == nil else { return }   // already chasing — just retargeted
-    springX = strip.frame.origin.x
-    springV = 0
-    let t = Timer(timeInterval: SPRING_DT, repeats: true) { _ in springTick() }
-    RunLoop.main.add(t, forMode: .common)
-    springTimer = t
-}
+    func chase(_ targetX: CGFloat) {
+        target = targetX
+        guard link == nil, timer == nil else { return }   // already chasing — just retargeted
+        x = strip.frame.origin.x
+        v = 0
+        last = 0
+        if #available(macOS 14.0, *) {
+            let dl = (strip.contentView ?? StripView()).displayLink(target: self, selector: #selector(displayTick(_:)))
+            dl.add(to: .main, forMode: .common)
+            link = dl
+        } else {
+            let t = Timer(timeInterval: 1 / 120, repeats: true) { [weak self] _ in self?.integrate() }
+            t.tolerance = 1 / 240
+            RunLoop.main.add(t, forMode: .common)
+            timer = t
+        }
+    }
 
-func springTick() {
-    let accel = -SPRING_K * (springX - springTargetX) - SPRING_C * springV
-    springV += accel * SPRING_DT
-    springX += springV * SPRING_DT
-    var f = strip.frame
-    f.origin.x = springX
-    strip.setFrame(f, display: true)
-    if abs(springX - springTargetX) < 0.5, abs(springV) < 4 {
-        f.origin.x = springTargetX
-        strip.setFrame(f, display: true)
-        springTimer?.invalidate()
-        springTimer = nil
+    @objc func displayTick(_ dl: CADisplayLink) { integrate() }
+
+    private func integrate() {
+        // measured dt — physics time is wall time, whatever the fire rate is
+        let now = CACurrentMediaTime()
+        var dt = last == 0 ? 1 / 120 : CGFloat(now - last)
+        last = now
+        dt = min(dt, 1 / 30)                       // clamp huge gaps (display sleep, etc.)
+        let accel = -SPRING_K * (x - target) - SPRING_C * v
+        v += accel * dt
+        x += v * dt
+        var f = strip.frame
+        f.origin.x = x
+        strip.setFrame(f, display: false)
+        if abs(x - target) < 0.5, abs(v) < 4 {
+            f.origin.x = target
+            strip.setFrame(f, display: true)
+            stop()
+        }
+    }
+
+    func stop() {
+        link?.invalidate()
+        link = nil
+        timer?.invalidate()
+        timer = nil
+        last = 0
     }
 }
+
+let spring = SpringDriver()
 
 func applyVisibility(_ desired: Bool, animate: Bool = true) {
     let changed = desired != stripVisible
@@ -120,10 +151,9 @@ func applyVisibility(_ desired: Bool, animate: Bool = true) {
         f.origin.y = target.origin.y
         f.size = target.size
         strip.setFrame(f, display: true)
-        springTo(target.origin.x)
+        spring.chase(target.origin.x)
     } else {
-        springTimer?.invalidate()
-        springTimer = nil
+        spring.stop()
         strip.setFrame(target, display: true)
     }
 }
