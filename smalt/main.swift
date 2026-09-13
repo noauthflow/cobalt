@@ -38,14 +38,11 @@ let SPRING_C: CGFloat = 32
 // MARK: - the pill
 
 final class StripView: NSView {
-    // the glass: soft violet (D0BCFF), rounded, one subtle border — nothing else
+    // the glass: soft violet (D0BCFF), rounded — no border, the shadow does the lifting
     override func draw(_ dirtyRect: NSRect) {
         let path = NSBezierPath(roundedRect: bounds, xRadius: PILL_RADIUS, yRadius: PILL_RADIUS)
         NSColor(srgbRed: 0xD0/255.0, green: 0xBC/255.0, blue: 0xFF/255.0, alpha: 1).setFill()
         path.fill()
-        NSColor(srgbRed: 0.13, green: 0.06, blue: 0.24, alpha: 0.15).setStroke()
-        path.lineWidth = 1
-        path.stroke()
     }
 }
 
