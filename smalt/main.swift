@@ -497,8 +497,14 @@ func applyVisibility(_ desired: Bool, animate: Bool = true) {
 
 // current cursor position. CGEvent coordinates are global, top-left origin —
 // NOT relative to any screen. cocoa x == cg x; cg y = globalTop − cocoa y.
+// the cg origin is the top-left of the CG PRIMARY display = NSScreen index
+// 0 — NOT the top of the tallest display. (the old version used max maxY:
+// correct on one monitor, silently broken the moment a taller monitor sits
+// above the primary — the summon zone landed 1440px into empty space and
+// the pill could never appear at all.)
 var globalCocoaTopY: CGFloat {
-    NSScreen.screens.map { $0.frame.maxY }.max() ?? 0
+    NSScreen.screens.first { $0.frame.origin == NSPoint.zero }?.frame.maxY
+        ?? NSScreen.screens.map { $0.frame.maxY }.max() ?? 0
 }
 func cursorXFromRight() -> CGFloat {
     guard let loc = CGEvent(source: nil)?.location, let screen = mainScreen() else { return .infinity }
