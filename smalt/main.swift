@@ -309,18 +309,21 @@ extension NSFont {
 // matching tabular SF Pro, everything centered in its slot. sources are
 // permission-free: IOKit power sources, the clock, ProcessInfo LPM state.
 
-// an SF Symbol at a given point size, tinted to one palette color
-func symbolImage(_ name: String, size: CGFloat, color: NSColor) -> NSImage? {
+// an SF Symbol at a given point size + weight, tinted to one palette color
+func symbolImage(_ name: String, size: CGFloat, weight: NSFont.Weight, color: NSColor) -> NSImage? {
     guard let base = NSImage(systemSymbolName: name, accessibilityDescription: nil) else { return nil }
     return base
-        .withSymbolConfiguration(.init(pointSize: size, weight: .regular))?
+        .withSymbolConfiguration(.init(pointSize: size, weight: weight))?
         .withSymbolConfiguration(.init(paletteColors: [color]))
 }
 
-// an image rect of the image's own size, centered in the slot
-func centered(_ size: NSSize, in slot: NSRect) -> NSRect {
-    NSRect(x: slot.midX - size.width / 2, y: slot.midY - size.height / 2,
-           width: size.width, height: size.height)
+// aspect-fit an image into a rect, centered — symbols render at their own
+// glyph aspect (the battery is ~2.3:1), so they must be fitted to the slot,
+// not drawn at raw point size
+func fitted(_ img: NSImage, into box: NSRect) -> NSRect {
+    let s = min(box.width / img.size.width, box.height / img.size.height)
+    let w = img.size.width * s, h = img.size.height * s
+    return NSRect(x: box.midX - w / 2, y: box.midY - h / 2, width: w, height: h)
 }
 
 // IOKit power sources — the same thing the native battery item reads
@@ -343,11 +346,12 @@ func drawBattery(in slot: NSRect) {
     guard let (pct, _) = batteryLevel() else { return }
     let lowPower = ProcessInfo.processInfo.isLowPowerModeEnabled
     let color = lowPower ? Theme.lpm : Theme.ink
-    guard let img = symbolImage("battery.0", size: Theme.iconSize, color: color) else {
+    // the raw symbol is huge at point size — render at iconSize, fit the glyph
+    guard let img = symbolImage("battery.0", size: Theme.iconSize, weight: .regular, color: color) else {
         Heroicon.draw(SVGPath.battery, color: color, in: slot)
         return
     }
-    let r = centered(img.size, in: slot)
+    let r = fitted(img, into: slot.insetBy(dx: 1, dy: 1))
     img.draw(in: r)
 
     // the number inside the body — the nub takes the last ~18% of the
@@ -359,11 +363,11 @@ func drawBattery(in slot: NSRect) {
 
 // SF Symbols calendar, the same one the menu bar's date UI uses
 func drawCalendar(in slot: NSRect) {
-    guard let img = symbolImage("calendar", size: Theme.iconSize, color: Theme.ink) else {
+    guard let img = symbolImage("calendar", size: Theme.iconSize, weight: .regular, color: Theme.ink) else {
         Heroicon.draw(SVGPath.calendar, color: Theme.ink, in: slot)
         return
     }
-    img.draw(in: centered(img.size, in: slot))
+    img.draw(in: fitted(img, into: slot.insetBy(dx: 1, dy: 1)))
 }
 
 // time: hour over minute — one CELL slot each, tabular SF Pro centered
