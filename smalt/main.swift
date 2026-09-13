@@ -83,7 +83,6 @@ func pillFrame(visible: Bool) -> NSRect {
 // assumed 120Hz but macOS coalesces timers, so physics ran at half speed.
 
 final class SpringDriver: NSObject {
-    var link: CADisplayLink?
     var timer: Timer?
     var x: CGFloat = 0
     var v: CGFloat = 0
@@ -92,30 +91,27 @@ final class SpringDriver: NSObject {
 
     func chase(_ targetX: CGFloat) {
         target = targetX
-        guard link == nil, timer == nil else { return }   // already chasing — just retargeted
+        guard timer == nil else { return }             // already chasing — just retargeted
         x = strip.frame.origin.x
         v = 0
         last = 0
-        if #available(macOS 14.0, *) {
-            let dl = (strip.contentView ?? StripView()).displayLink(target: self, selector: #selector(displayTick(_:)))
-            dl.add(to: .main, forMode: .common)
-            link = dl
-        } else {
-            let t = Timer(timeInterval: 1 / 120, repeats: true) { [weak self] _ in self?.integrate() }
-            t.tolerance = 1 / 240
-            RunLoop.main.add(t, forMode: .common)
-            timer = t
-        }
+        // a plain Timer with MEASURED dt. (CADisplayLink was tried first —
+        // but a view-attached display link pauses while its window is
+        // off-screen, which is exactly the pill's resting state: the spring
+        // would never tick and the pill could never appear.) with measured
+        // dt the physics is time-correct at any fire rate, and coalescing
+        // jitter just averages out in the integration.
+        let t = Timer(timeInterval: 1 / 120, repeats: true) { [weak self] _ in self?.integrate() }
+        t.tolerance = 1 / 240                          // keep macOS from coalescing hard
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
     }
 
-    @objc func displayTick(_ dl: CADisplayLink) { integrate() }
-
     private func integrate() {
-        // measured dt — physics time is wall time, whatever the fire rate is
         let now = CACurrentMediaTime()
         var dt = last == 0 ? 1 / 120 : CGFloat(now - last)
         last = now
-        dt = min(dt, 1 / 30)                       // clamp huge gaps (display sleep, etc.)
+        dt = min(dt, 1 / 30)                           // clamp huge gaps (display sleep, etc.)
         let accel = -SPRING_K * (x - target) - SPRING_C * v
         v += accel * dt
         x += v * dt
@@ -130,8 +126,6 @@ final class SpringDriver: NSObject {
     }
 
     func stop() {
-        link?.invalidate()
-        link = nil
         timer?.invalidate()
         timer = nil
         last = 0
