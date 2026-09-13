@@ -1,6 +1,7 @@
 import AppKit
 import QuartzCore
 import ApplicationServices
+import CoreText
 import CoreWLAN
 import IOKit
 import IOKit.ps
@@ -10,7 +11,7 @@ import IOKit.ps
 // for centuries, if you wanted a strip of cobalt blue across something —
 // stained glass, porcelain, delft tile — you ground cobalt glass into
 // powder and laid it down. smalt is that glass — a floating cobalt pill
-// docked at the right edge of the screen, dead center, nothing in it.
+// docked at the right edge of the screen, dead center.
 //
 //   hidden by default. the cursor entering the right edge, level with the
 //   pill, summons it: a real spring drives it out (underdamped — it pops
@@ -18,35 +19,58 @@ import IOKit.ps
 //   the spring retargets mid-flight, so fast in-out just reverses it
 //   smoothly — no completion-handler races, no flicker.
 //
-//   the pill is deliberately empty for now — a pane of glass first,
-//   contents later.
+//   the pill shows four widgets on one grid, each in its own fixed slot:
+//   battery · calendar · hour · minute.
 //   mission control    off the stage — it's not part of the expose grid
 //
 // zero permissions: the reveal is a global mouse monitor, not an event
 // tap. nothing is intercepted, nothing is rewritten, nothing is polled.
 
-// the design system: palette + grid. the ONLY place colors and sizes exist.
+// MARK: - the design system
+//
+// palette + grid + type — the ONLY place visual constants exist. every
+// widget is a real heroicon glyph (or type) optically centered inside one
+// uniform CELL × CELL slot; the pill is exactly its grid, nothing
+// hand-placed anywhere.
+
 enum Theme {
     // palette
-    static let bg = NSColor(srgbRed: 0xFA/255.0, green: 0xF6/255.0, blue: 0xF3/255.0, alpha: 1)    // #FAF6F3 pill glass
-    static let icon = NSColor(srgbRed: 0x99/255.0, green: 0x94/255.0, blue: 0x7F/255.0, alpha: 1)  // #99947F icon ink
-    static let lowPower = NSColor(srgbRed: 1.0, green: 0.84, blue: 0.0, alpha: 1)                   // LPM battery fill
-    static let onFill = NSColor(srgbRed: 0.24/255.0, green: 0.22/255.0, blue: 0.16/255.0, alpha: 1) // text over the yellow fill
-    // grid — every widget lives in one uniform CELL × CELL slot, stacked
-    static let cell: CGFloat = 36
-    static let gap: CGFloat = 10
-    static let pad: CGFloat = 12
-    static let stroke: CGFloat = 1.6      // heroicon-style outline weight
-    static let iconRadius: CGFloat = 6
-    // derived — the pill is exactly its grid, nothing hand-placed
+    static let glass   = NSColor(srgbRed: 0xFA/255.0, green: 0xF6/255.0, blue: 0xF3/255.0, alpha: 1)  // #FAF6F3 pill glass
+    static let ink     = NSColor(srgbRed: 0x99/255.0, green: 0x94/255.0, blue: 0x7F/255.0, alpha: 1)  // #99947F strokes + labels
+    static let inkDeep = NSColor(srgbRed: 0x3D/255.0, green: 0x38/255.0, blue: 0x29/255.0, alpha: 1)  // #3D3829 the darker on-palette ink
+    static let lpm     = NSColor(srgbRed: 1.0, green: 0.84, blue: 0.0, alpha: 1)                       // low-power battery stroke
+    static let lpmInk  = NSColor(srgbRed: 0xA1/255.0, green: 0x62/255.0, blue: 0x07/255.0, alpha: 1)  // #A16207 dark amber — LPM percentage, same warmth, readable on the glass
+
+    // grid — one uniform CELL slot per widget, stacked top to bottom
+    static let cell: CGFloat = 28
+    static let gap: CGFloat = 4
+    static let pad: CGFloat = 10
+
+    // icons — real heroicons: the verbatim svg `d` strings (see SVGPath
+    // below), rendered on heroicons' own 24×24 grid at their own
+    // stroke-width 1.5, scaled so the grid is iconSize points.
+    static let iconSize: CGFloat = 20
+
+    // type — SF Pro tabular digits at a weight whose stems sit at the icon
+    // stroke weight (medium at 14pt ≈ 1.2pt vs 1.25pt strokes)
+    static let typeSize: CGFloat = 14     // clock digits
+    static let pctSize: CGFloat = 8       // battery percentage (6.5 for "100")
+
+    // the pill is exactly its grid
     static var pillWidth: CGFloat { cell + 2 * pad }
     static var pillHeight: CGFloat { 2 * pad + 4 * cell + 3 * gap }
+
+    // the four slots, top to bottom — battery / calendar / hour / minute.
+    // each widget receives exactly this rect and draws centered in it.
+    static func slot(_ index: Int, in bounds: NSRect) -> NSRect {
+        NSRect(x: pad, y: pad + CGFloat(index) * (cell + gap), width: cell, height: cell)
+    }
 }
 
 let PILL_WIDTH = Theme.pillWidth
 let PILL_HEIGHT = Theme.pillHeight
 let PILL_INSET: CGFloat = 6      // gap between pill and the right screen edge
-let PILL_RADIUS: CGFloat = 16
+let PILL_RADIUS: CGFloat = 14
 let REVEAL_WIDTH: CGFloat = 12   // summon zone: cursor within this of the right edge
 let HIDE_MARGIN: CGFloat = 6     // cursor must drop this far left of the pill before it springs away
 // spring constants: ω ≈ 23.7 rad/s, ζ ≈ 0.68 — a crisp pop with ~5% overshoot
@@ -61,42 +85,228 @@ final class StripView: NSView {
     // the glass: #FAF6F3, rounded — no border, the shadow does the lifting
     override func draw(_ dirtyRect: NSRect) {
         let path = NSBezierPath(roundedRect: bounds, xRadius: PILL_RADIUS, yRadius: PILL_RADIUS)
-        Theme.bg.setFill()
+        Theme.glass.setFill()
         path.fill()
-        drawWidgets(in: bounds)
+
+        // the grid: battery / calendar / hour / minute — one uniform slot
+        // each, every widget centered in its own fixed spot
+        for i in 0..<4 {
+            let r = Theme.slot(i, in: bounds)
+            switch i {
+            case 0: drawBattery(in: r)
+            case 1: drawCalendar(in: r)
+            default: drawClock(i == 2 ? .hour : .minute, in: r)
+            }
+        }
+    }
+}
+
+// MARK: - drawing primitives
+//
+// two rules keep everything on its spot:
+//   · glyphs draw on the 24×24 heroicon grid, centered in their slot
+//   · text draws centered by INK (glyph bounds), not line height —
+//     line-height centering leaves digits riding high, which is exactly
+//     the "percentage isn't in the middle" bug
+
+// MARK: - heroicons, verbatim
+//
+// the glyphs ARE the heroicons svg path data, copied unchanged from
+// heroicons.com (24×24 grid, stroke-width 1.5, round caps + joins). a tiny
+// parser turns each `d` string into a CGPath, so when heroicons updates an
+// icon you paste in its new `d` — no hand-transcription to drift.
+// (no WebKit: a webview is a whole rendering process for two strokes; the
+// parser renders the same vectors synchronously, in-process.)
+
+enum SVGPath {
+    // heroicons "calendar" (outline)
+    static let calendar = "M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 0 1 2.25-2.25h13.5A2.25 2.25 0 0 1 21 7.5v11.25m-18 0A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75m-18 0v-7.5A2.25 2.25 0 0 1 5.25 9h13.5A2.25 2.25 0 0 1 21 11.25v7.5"
+    // heroicons "battery" (outline)
+    static let battery = "M21 10.5h.375c.621 0 1.125.504 1.125 1.125v2.25c0 .621-.504 1.125-1.125 1.125H21M3.75 18h15A2.25 2.25 0 0 0 21 15.75v-6a2.25 2.25 0 0 0-2.25-2.25h-15A2.25 2.25 0 0 0 1.5 9.75v6A2.25 2.25 0 0 0 3.75 18Z"
+
+    // svg path `d` → CGPath. just enough of the spec for icon path data:
+    // M m L l H h V v C c S s Q q T t A a Z, implicit repeats, and the
+    // packed-number forms svg allows ("2.25-2.25", "1.125.504").
+    static func cgPath(_ d: String) -> CGPath {
+        let p = CGMutablePath()
+        var rest = Substring(d)
+        var cmd: Character = " "
+        var cur: CGPoint = .zero        // current point
+        var sub: CGPoint = .zero        // subpath start (Z returns here)
+        var lastC: CGPoint = .zero      // previous cubic control (S/s)
+        var lastQ: CGPoint = .zero      // previous quad control (T/t)
+
+        func num() -> CGFloat {
+            while rest.first == " " || rest.first == "," { rest = rest.dropFirst() }
+            var t = ""
+            var dot = false
+            if rest.first == "-" || rest.first == "+" { t.append(rest.removeFirst()) }
+            while let c = rest.first {
+                if c.isNumber { t.append(c); rest = rest.dropFirst() }
+                else if c == "." && !dot { dot = true; t.append(c); rest = rest.dropFirst() }
+                else { break }               // "1.125.504" → 1.125 | .504; "2.25-2.25" splits on the sign
+            }
+            return CGFloat(Double(t) ?? 0)
+        }
+
+        func arc(to end: CGPoint, rx rx0: CGFloat, ry ry0: CGFloat,
+                 rotation: CGFloat, large: Bool, sweep: Bool) {
+            // svg endpoint→center parameterization (W3C appendix); heroicons
+            // arcs are circular (rx == ry), which cg arcs are too
+            var rx = abs(rx0), ry = abs(ry0)
+            let φ = rotation * .pi / 180
+            let (cosφ, sinφ) = (cos(φ), sin(φ))
+            let dx = (cur.x - end.x) / 2, dy = (cur.y - end.y) / 2
+            let x1p = cosφ * dx + sinφ * dy
+            let y1p = -sinφ * dx + cosφ * dy
+            let λ = x1p * x1p / (rx * rx) + y1p * y1p / (ry * ry)
+            if λ > 1 { let f = sqrt(λ); rx *= f; ry *= f }
+            let num = rx * rx * ry * ry - rx * rx * y1p * y1p - ry * ry * x1p * x1p
+            let den = rx * rx * y1p * y1p + ry * ry * x1p * x1p
+            let co = ((large != sweep) ? 1.0 : -1.0) * sqrt(max(0, num / den))
+            let ccx = cosφ * (co * rx * y1p / ry) - sinφ * (-co * ry * x1p / rx) + (cur.x + end.x) / 2
+            let ccy = sinφ * (co * rx * y1p / ry) + cosφ * (-co * ry * x1p / rx) + (cur.y + end.y) / 2
+            let θ1 = atan2((y1p + co * ry * x1p / rx) / ry, (x1p - co * rx * y1p / ry) / rx)
+            var Δθ = atan2((-y1p + co * ry * x1p / rx) / ry, (-x1p - co * rx * y1p / ry) / rx) - θ1
+            if !sweep && Δθ > 0 { Δθ -= 2 * .pi }
+            if sweep && Δθ < 0 { Δθ += 2 * .pi }
+            p.addArc(center: CGPoint(x: ccx, y: ccy), radius: rx,
+                     startAngle: θ1, endAngle: θ1 + Δθ, clockwise: !sweep)
+            cur = end
+        }
+
+        while !rest.isEmpty {
+            if let c = rest.first, c.isLetter {
+                cmd = c
+                rest = rest.dropFirst()
+                if c == "Z" || c == "z" {
+                    p.closeSubpath()
+                    cur = sub
+                    continue
+                }
+            }
+            switch cmd {
+            case "M", "m":
+                var x = num(), y = num()
+                if cmd == "m" { x += cur.x; y += cur.y }
+                p.move(to: CGPoint(x: x, y: y))
+                cur = CGPoint(x: x, y: y); sub = cur
+                cmd = cmd == "M" ? "L" : "l"      // implicit linetos after a moveto
+            case "L", "l":
+                var x = num(), y = num()
+                if cmd == "l" { x += cur.x; y += cur.y }
+                p.addLine(to: CGPoint(x: x, y: y))
+                cur = CGPoint(x: x, y: y)
+            case "H", "h":
+                var x = num()
+                if cmd == "h" { x += cur.x }
+                p.addLine(to: CGPoint(x: x, y: cur.y))
+                cur = CGPoint(x: x, y: cur.y)
+            case "V", "v":
+                var y = num()
+                if cmd == "v" { y += cur.y }
+                p.addLine(to: CGPoint(x: cur.x, y: y))
+                cur = CGPoint(x: cur.x, y: y)
+            case "C", "c":
+                var a = (0..<6).map { _ in num() }
+                if cmd == "c" { for k in stride(from: 0, to: 6, by: 2) { a[k] += cur.x; a[k + 1] += cur.y } }
+                p.addCurve(to: CGPoint(x: a[4], y: a[5]),
+                           control1: CGPoint(x: a[0], y: a[1]),
+                           control2: CGPoint(x: a[2], y: a[3]))
+                lastC = CGPoint(x: a[2], y: a[3])
+                cur = CGPoint(x: a[4], y: a[5])
+            case "S", "s":
+                var a = (0..<4).map { _ in num() }
+                if cmd == "s" { for k in stride(from: 0, to: 4, by: 2) { a[k] += cur.x; a[k + 1] += cur.y } }
+                let r = CGPoint(x: 2 * cur.x - lastC.x, y: 2 * cur.y - lastC.y)
+                p.addCurve(to: CGPoint(x: a[2], y: a[3]),
+                           control1: r,
+                           control2: CGPoint(x: a[0], y: a[1]))
+                lastC = CGPoint(x: a[0], y: a[1])
+                cur = CGPoint(x: a[2], y: a[3])
+            case "Q", "q":
+                var a = (0..<4).map { _ in num() }
+                if cmd == "q" { for k in stride(from: 0, to: 4, by: 2) { a[k] += cur.x; a[k + 1] += cur.y } }
+                p.addQuadCurve(to: CGPoint(x: a[2], y: a[3]),
+                               control: CGPoint(x: a[0], y: a[1]))
+                lastQ = CGPoint(x: a[0], y: a[1])
+                cur = CGPoint(x: a[2], y: a[3])
+            case "T", "t":
+                var x = num(), y = num()
+                if cmd == "t" { x += cur.x; y += cur.y }
+                let c = CGPoint(x: 2 * cur.x - lastQ.x, y: 2 * cur.y - lastQ.y)
+                p.addQuadCurve(to: CGPoint(x: x, y: y), control: c)
+                lastQ = c
+                cur = CGPoint(x: x, y: y)
+            case "A", "a":
+                let rx = num(), ry = num(), rot = num()
+                let large = num() != 0, sweep = num() != 0
+                var x = num(), y = num()
+                if cmd == "a" { x += cur.x; y += cur.y }
+                arc(to: CGPoint(x: x, y: y), rx: rx, ry: ry, rotation: rot, large: large, sweep: sweep)
+            default:
+                rest = rest.dropFirst()
+            }
+        }
+        return p
+    }
+}
+
+// renders a heroicon `d` inside a slot: the 24 grid scaled to iconSize,
+// stroked at the svg's own 1.5 with round caps + joins (as authored)
+enum Heroicon {
+    static func draw(_ d: String, color: NSColor, in slot: NSRect) {
+        let ctx = NSGraphicsContext.current!.cgContext
+        ctx.saveGState()
+        let s = Theme.iconSize / 24
+        ctx.translateBy(x: slot.midX, y: slot.midY)
+        ctx.scaleBy(x: s, y: s)
+        ctx.translateBy(x: -12, y: -12)   // flipped view + svg y-down: already aligned
+        ctx.addPath(SVGPath.cgPath(d))
+        ctx.setLineWidth(1.5)             // the svg's own stroke-width, in grid units
+        ctx.setLineCap(.round)
+        ctx.setLineJoin(.round)
+        color.setStroke()
+        ctx.strokePath()
+        ctx.restoreGState()
     }
 
-    // the grid: battery / calendar / hour / minute — one uniform slot each.
-    // nothing is hand-placed; every widget is centered inside its cell.
-    private func drawWidgets(in bounds: NSRect) {
-        var y = Theme.pad
-        for slot in 0..<4 {
-            let rect = NSRect(x: Theme.pad, y: y, width: Theme.cell, height: Theme.cell)
-            switch slot {
-            case 0: drawBatteryIcon(in: rect)
-            case 1: drawCalendarIcon(in: rect)
-            default: drawTimeDigit(slot == 2 ? .hour : .minute, in: rect)
-            }
-            y += Theme.cell + Theme.gap
-        }
+    // svg-grid rect → view rect, for text placed inside a glyph feature
+    static func gridRect(_ r: CGRect, in slot: NSRect) -> NSRect {
+        let s = Theme.iconSize / 24
+        return NSRect(x: slot.midX + (r.minX - 12) * s,
+                      y: slot.midY + (r.minY - 12) * s,
+                      width: r.width * s, height: r.height * s)
+    }
+}
+
+// text centered on its ink — CoreText glyph bounds, not the line box
+func drawText(_ s: String, font: NSFont, color: NSColor, in r: NSRect) {
+    let line = CTLineCreateWithAttributedString(NSAttributedString(
+        string: s, attributes: [.font: font, .foregroundColor: color]))
+    let inkBounds = CTLineGetBoundsWithOptions(line, .useGlyphPathBounds)
+    let ctx = NSGraphicsContext.current!.cgContext
+    ctx.saveGState()
+    ctx.translateBy(x: r.midX, y: r.midY)   // to the slot center…
+    ctx.scaleBy(x: 1, y: -1)                // …unflip for CoreText (y-up)
+    ctx.textMatrix = .identity
+    ctx.translateBy(x: -inkBounds.midX, y: -inkBounds.midY)
+    CTLineDraw(line, ctx)
+    ctx.restoreGState()
+}
+
+extension NSFont {
+    // SF Pro, tabular digits — the clock's voice, weight-matched to the strokes
+    static func tabular(_ size: CGFloat) -> NSFont {
+        NSFont.monospacedDigitSystemFont(ofSize: size, weight: .medium)
     }
 }
 
 // MARK: - widgets
 //
-// heroicon-style outline icons in #99947F, uniform stroke, uniform slots.
-// sources are permission-free: IOKit power sources, clock, ProcessInfo
-// low-power state.
-
-extension NSFont {
-    // SF Pro Rounded, monospaced digits — the clock's voice
-    static func roundedMono(_ size: CGFloat, _ weight: NSFont.Weight) -> NSFont {
-        let base = NSFont.monospacedDigitSystemFont(ofSize: size, weight: weight)
-        guard let desc = base.fontDescriptor.withDesign(.rounded),
-              let f = NSFont(descriptor: desc, size: size) else { return base }
-        return f
-    }
-}
+// heroicon glyphs in `ink`, type in the matching tabular SF Pro, everything
+// centered in its slot. sources are permission-free: IOKit power sources,
+// the clock, ProcessInfo low-power state.
 
 // IOKit power sources — the same thing the native battery item reads
 func batteryLevel() -> (pct: Int, charging: Bool)? {
@@ -111,69 +321,32 @@ func batteryLevel() -> (pct: Int, charging: Bool)? {
     return nil
 }
 
-// battery: heroicon-style outline glyph in the icon color, proportional fill
-// (same color; yellow in low power mode), the number INSIDE — iPhone style
-func drawBatteryIcon(in slot: NSRect) {
+// heroicons battery, verbatim — no fill, just the glyph; the percentage
+// sits optically centered in the body. low power mode: the whole icon
+// strokes in yellow.
+func drawBattery(in slot: NSRect) {
     guard let (pct, _) = batteryLevel() else { return }
     let lowPower = ProcessInfo.processInfo.isLowPowerModeEnabled
-    let g = NSRect(x: slot.midX - 15, y: slot.midY - 7.5, width: 30, height: 15)
+    Heroicon.draw(SVGPath.battery, color: lowPower ? Theme.lpm : Theme.ink, in: slot)
 
-    Theme.icon.setStroke()
-    let outline = NSBezierPath(roundedRect: g, xRadius: 4.5, yRadius: 4.5)
-    outline.lineWidth = Theme.stroke
-    outline.stroke()
-    Theme.icon.setFill()
-    NSRect(x: g.maxX + 1.5, y: g.midY - 2.5, width: 2, height: 5).fill() // nub
-
-    let fillColor = lowPower ? Theme.lowPower : Theme.icon
-    fillColor.setFill()
-    let fillW = (g.width - 3) * CGFloat(pct) / 100
-    if fillW > 0.5 {
-        NSBezierPath(roundedRect: NSRect(x: g.minX + 1.5, y: g.minY + 1.5,
-                                         width: fillW, height: g.height - 3),
-                     xRadius: 2.5, yRadius: 2.5).fill()
-    }
-
-    // number inside: dark over the yellow fill; over the icon-color fill it
-    // reads in the bg color once the fill reaches it, else in the icon color
-    let label = "\(pct)"
-    let textColor: NSColor = lowPower ? Theme.onFill : (pct >= 40 ? Theme.bg : Theme.icon)
-    let a: [NSAttributedString.Key: Any] = [.font: NSFont.roundedMono(9.5, .semibold), .foregroundColor: textColor]
-    let ts = (label as NSString).size(withAttributes: a)
-    (label as NSString).draw(at: NSPoint(x: g.midX - ts.width / 2, y: g.midY - ts.height / 2), withAttributes: a)
+    // the number, inside the body (svg rect x1.5–21, y7.5–18), ink-centered,
+    // icon color normally; in LPM a darker amber — yellow family like the
+    // stroke, but readable on the cream glass
+    let iconColor = lowPower ? Theme.lpmInk : Theme.ink
+    let size: CGFloat = pct >= 100 ? Theme.pctSize - 1.5 : Theme.pctSize
+    drawText("\(pct)", font: .tabular(size), color: iconColor,
+             in: Heroicon.gridRect(CGRect(x: 2.5, y: 8, width: 17.5, height: 9.5), in: slot))
 }
 
-// heroicons "calendar": outline body, header line, two binder ticks
-func drawCalendarIcon(in slot: NSRect) {
-    Theme.icon.setStroke()
-    let box = NSRect(x: slot.midX - 12, y: slot.minY + (Theme.cell - 26) / 2, width: 24, height: 26)
-    let p = NSBezierPath(roundedRect: box, xRadius: Theme.iconRadius, yRadius: Theme.iconRadius)
-    p.lineWidth = Theme.stroke
-    p.lineCapStyle = .round
-    p.stroke()
-
-    let header = NSBezierPath()
-    header.move(to: NSPoint(x: box.minX, y: box.minY + 9))
-    header.line(to: NSPoint(x: box.maxX, y: box.minY + 9))
-    header.lineWidth = Theme.stroke
-    header.stroke()
-
-    for dx in [6.5, 17.5] {
-        let t = NSBezierPath()
-        t.move(to: NSPoint(x: box.minX + dx, y: box.minY - 2))
-        t.line(to: NSPoint(x: box.minX + dx, y: box.minY + 5))
-        t.lineWidth = Theme.stroke
-        t.stroke()
-    }
+// heroicons calendar, verbatim
+func drawCalendar(in slot: NSRect) {
+    Heroicon.draw(SVGPath.calendar, color: Theme.ink, in: slot)
 }
 
-// time: hour over minute — one CELL slot each, flip-clock style
-func drawTimeDigit(_ component: Calendar.Component, in slot: NSRect) {
-    let value = Calendar.current.component(component, from: Date())
-    let s = String(format: "%02d", value)
-    let a: [NSAttributedString.Key: Any] = [.font: NSFont.roundedMono(19, .semibold), .foregroundColor: Theme.icon]
-    let sz = (s as NSString).size(withAttributes: a)
-    (s as NSString).draw(at: NSPoint(x: slot.midX - sz.width / 2, y: slot.midY - sz.height / 2), withAttributes: a)
+// time: hour over minute — one CELL slot each, tabular SF Pro centered
+func drawClock(_ component: Calendar.Component, in slot: NSRect) {
+    let value = String(format: "%02d", Calendar.current.component(component, from: Date()))
+    drawText(value, font: .tabular(Theme.typeSize), color: Theme.ink, in: slot)
 }
 
 // MARK: - state
