@@ -54,20 +54,47 @@ final class Favicons {
                 return
             }
             self.waiting[domain] = [done]
-            let req = URLRequest(url: URL(string: "https://icons.duckduckgo.com/ip3/\(domain).ico")!,
-                                 cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 5)
-            URLSession.shared.dataTask(with: req) { data, resp, _ in
-                self.q.async {
-                    var img: NSImage?
-                    if let http = resp as? HTTPURLResponse, http.statusCode == 200,
-                       let data, let i = NSImage(data: data) {
-                        try? data.write(to: self.fileURL(domain), options: .atomic)
-                        img = i
-                    }
+            // ddg's service is indexed per-domain and coverage is uneven:
+            // "web.whatsapp.com" 404s while "whatsapp.com" has the icon.
+            // try the full host first, then fall back to the registrable
+            // domain — but always cache under the ORIGINAL key, so the
+            // instant disk path above keeps matching what tabs actually are.
+            let candidates = [domain] + self.registrableFallback(domain)
+            self.fetchFirst(candidates, domain: domain)
+        }
+    }
+
+    // "web.whatsapp.com" → ["whatsapp.com"]; bare domains → []. two labels
+    // is the safe definition of registrable here (no public-suffix table —
+    // worst case "mail.google.com" → "google.com", which is the icon we want).
+    private func registrableFallback(_ domain: String) -> [String] {
+        let parts = domain.lowercased().split(separator: ".")
+        guard parts.count > 2 else { return [] }
+        return [parts.suffix(2).joined(separator: ".")]
+    }
+
+    // walk the candidate list; first 200 that decodes wins. fires the
+    // original domain's callbacks exactly once, with nil if nothing worked.
+    private func fetchFirst(_ candidates: [String], domain: String) {
+        guard let candidate = candidates.first else {
+            let callbacks = waiting.removeValue(forKey: domain) ?? []
+            DispatchQueue.main.async { callbacks.forEach { $0(nil) } }
+            return
+        }
+        let req = URLRequest(url: URL(string: "https://icons.duckduckgo.com/ip3/\(candidate).ico")!,
+                             cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 5)
+        URLSession.shared.dataTask(with: req) { [weak self] data, resp, _ in
+            guard let self else { return }
+            self.q.async {
+                if let http = resp as? HTTPURLResponse, http.statusCode == 200,
+                   let data, let img = NSImage(data: data) {
+                    try? data.write(to: self.fileURL(domain), options: .atomic)
                     let callbacks = self.waiting.removeValue(forKey: domain) ?? []
                     DispatchQueue.main.async { callbacks.forEach { $0(img) } }
+                    return
                 }
-            }.resume()
-        }
+                self.fetchFirst(Array(candidates.dropFirst()), domain: domain)
+            }
+        }.resume()
     }
 }
