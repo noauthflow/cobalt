@@ -13,7 +13,9 @@ everything here is something **made from cobalt** — an alloy, an isotope, a co
     cobalt-sync   Co-Al-Ni magnet alloy      sync = magnetic alignment
     cobalt-60     the radioactive isotope    an invisible barrier you don't cross
     elgiloy       Co-Cr-Ni spring alloy      cycles forever without fatiguing
+    smalt         ground cobalt glass        the pigment — a cobalt pill on the screen
     stellite      Co-Cr wear-proof alloy     a coating that doesn't degrade
+    talonite      Co-Cr-W-Mo blade alloy     holds an edge, cannot corrode
 
 ## the directories
 
@@ -25,6 +27,7 @@ everything here is something **made from cobalt** — an alloy, an isotope, a co
 | [elgiloy-mac-arm/](elgiloy-mac-arm/) | tab overlay daemon | **macOS (arm) only** — apple events, event taps, NSPanel |
 | [elgiloy-linux/](elgiloy-linux/) | tab overlay daemon, linux port | in progress — shared design, separate code |
 | [stellite/](stellite/) | new tab page + shorts blocker extension + template theme | **anywhere chrome runs** — it's just an extension |
+| [talonite/](talonite/) | raycast mono-extension: timezones + proxy toggle | **macOS** — raycast development extension; zero permissions |
 
 each folder is self-contained: source + its own `install.sh`. nothing here depends on anything else in the repo. see each folder's README for the full story.
 
