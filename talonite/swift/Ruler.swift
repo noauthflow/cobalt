@@ -74,16 +74,19 @@ private final class RulerView: NSView {
   }
 
   // the endpoint the line and the measurement use: with cmd held, the line
-  // from the start point snaps to the nearest multiple of 45°
+  // from the start point snaps to the nearest multiple of 45° and the end
+  // point is the cursor projected onto that ray — so the measured length is
+  // the length of the line you actually see (e.g. a horizontal snap reads
+  // |dx|), not the diagonal distance to the raw cursor
   private func effectiveEnd() -> NSPoint {
     guard let s = start, snapping else { return current }
     let dx = current.x - s.x
     let dy = current.y - s.y
-    let d = hypot(dx, dy)
-    guard d > 0 else { return current }
+    guard hypot(dx, dy) > 0 else { return current }
     let step = Double.pi / 4
     let angle = (atan2(dy, dx) / step).rounded() * step
-    return NSPoint(x: s.x + CGFloat(d * cos(angle)), y: s.y + CGFloat(d * sin(angle)))
+    let t = dx * cos(angle) + dy * sin(angle)
+    return NSPoint(x: s.x + CGFloat(t * cos(angle)), y: s.y + CGFloat(t * sin(angle)))
   }
 
   static func distanceLabel(from a: NSPoint, to b: NSPoint) -> String {
