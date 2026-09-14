@@ -356,6 +356,18 @@ func toggleFeature(key: String, enable: Bool, name: String) {
         : "  note: daemon not running — switch applies at next start")
 }
 
+// bounce the daemon: corner filler windows are rebuilt from scratch and the
+// wall re-arms — for when the fullscreen corner patches glitch out
+func cmdReset() {
+    guard agentLoaded() || daemonRunning() else {
+        print("not running — run cobalt-60 on"); exit(1)
+    }
+    sh("launchctl kickstart -k \(gui)/\(label)")
+    print(daemonRunning()
+        ? "reset — corner fillers rebuilt, wall re-armed"
+        : "restarting… (check \(errLog) if it doesn't come back)")
+}
+
 func cmdStatus() {
     let installed = FileManager.default.fileExists(atPath: plistPath)
     let loaded = agentLoaded()
@@ -400,6 +412,7 @@ switch args.count > 1 ? args[1] : "run" {
 case "run":              runDaemon()
 case "on", "enable":     loadFeatures(); cmdOn()
 case "off", "disable":   loadFeatures(); cmdOff()
+case "reset":            loadFeatures(); cmdReset()
 case "status":           loadFeatures(); cmdStatus()
 case "wall":
     loadFeatures()
@@ -420,6 +433,8 @@ default:
       (none)              daemon mode (what launchd runs)
       on, enable          start the agent
       off, disable        stop the agent (starts again at next login)
+      reset               restart the agent — rebuilds corner fillers, re-arms
+                          the wall (use when the black corners glitch)
       status              installed / loaded / running + per-feature state
       wall on|off         toggle the cursor boundary on its own
       corners on|off      toggle the fullscreen corner filler on its own
