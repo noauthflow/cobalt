@@ -47,8 +47,15 @@ var exemptToX: CGFloat = .greatestFiniteMagnitude
 // left edge of the main screen — bounds the left exemption so displays
 // further left (negative x) don't get exempted wholesale
 var mainScreenMinX: CGFloat = 0
+// the wall only arms itself while exactly one display is connected. the
+// y-only test lives in global display space, and a second monitor above or
+// beside the main one shares (or undercuts) that y range — the wall would
+// rewrite every event on it. so: multi-monitor = wall down, single = wall up.
+var wallActive = true
 
 func recomputeMinY() {
+    wallActive = wallOn && NSScreen.screens.count <= 1
+    FileHandle.standardError.write("recompute: screens=\(NSScreen.screens.count) wallActive=\(wallActive)\n".data(using: .utf8)!)
     guard let mainScreen = NSScreen.screens.first(where: { $0.frame.origin.y == 0 }) ?? NSScreen.main else { return }
     let screenHeight = mainScreen.frame.height
     // bottom edge of the menu bar, as distance from the top of the screen
@@ -61,7 +68,7 @@ func recomputeMinY() {
 let tapCallback: CGEventTapCallBack = { _, type, event, _ in
     switch type {
     case .mouseMoved, .leftMouseDragged, .otherMouseDragged:
-        if wallOn {
+        if wallActive {
             let loc = event.location
             // top-corner exemptions: menu bar stays reachable at both edges
             // (apple/app menus on the left, clock/control center on the right)
@@ -219,7 +226,22 @@ func scheduleCornerUpdate() {
 
 func runDaemon() -> Never {
     loadFeatures()
+    // touch the app object first — NSScreen.screens is empty until the
+    // process has talked to the window server
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
     recomputeMinY()
+    // at login the daemon can still beat display enumeration; re-check after
+    // the run loop is live so the wall/corners don't stick on stale state
+    for delay in [0.5, 3.0] {
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            recomputeMinY()
+            if cornersOn {
+                makeCornerFillers()
+                scheduleCornerUpdate()
+            }
+        }
+    }
     // recompute on display changes (resolution switch, monitor plug/unplug)
     NotificationCenter.default.addObserver(
         forName: NSApplication.didChangeScreenParametersNotification,
@@ -266,8 +288,6 @@ func runDaemon() -> Never {
     CGEvent.tapEnable(tap: tap, enable: true)
 
     // full app run loop — needed for workspace notifications to fire
-    let app = NSApplication.shared
-    app.setActivationPolicy(.accessory)
     app.run()
     exit(0)
 }
@@ -346,13 +366,19 @@ func cmdStatus() {
     print("process:  \(running ? "running" : "not running")")
 
     if running {
-        if wallOn {
+        // live state — this is a separate process from the daemon, so its own
+        // feature vars are defaults; recompute what the daemon computes
+        recomputeMinY()
+        let wallEffective = wallOn && NSScreen.screens.count <= 1
+        if wallEffective {
             print("wall:     up — cursor held \(Int(TOP_MARGIN))px below the menu bar (top \(Int(CORNER_EXEMPT))px exempt at both screen edges)")
+        } else if wallOn {
+            print("wall:     standing down — \(NSScreen.screens.count) displays connected (auto-off; arms itself when back to one)")
         } else {
             print("wall:     disabled — cursor boundary inactive")
         }
         if cornersOn {
-            print("corners:  on — black on fullscreen displays only (\(cornerWindows.count/4) displays watched, \(fullscreenDisplays.count) currently fullscreen)")
+            print("corners:  on — black on fullscreen displays only (\(NSScreen.screens.count) displays watched, \(fullscreenWindowDisplays().count) currently fullscreen)")
         } else {
             print("corners:  disabled — fullscreen cutouts show wallpaper")
         }
