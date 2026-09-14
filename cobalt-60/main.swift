@@ -100,6 +100,10 @@ let CORNER_OVERLAP: CGFloat = 0
 var cornerWindows: [(window: NSWindow, display: CGDirectDisplayID)] = []
 // displays currently showing a fullscreen window — only their patches are up
 var fullscreenDisplays: Set<CGDirectDisplayID> = []
+// per-window desired visibility, parallel to cornerWindows. the heartbeat
+// reconciles the windows' ACTUAL state (ordered in? alpha?) against this,
+// so a missed notification or a racing orderOut can never wedge the filler
+var cornerWantsShown: [Bool] = []
 var cornerEval: DispatchWorkItem?
 
 final class CornerView: NSView {
@@ -141,6 +145,7 @@ final class CornerView: NSView {
 func makeCornerFillers() {
     for (w, _) in cornerWindows { w.orderOut(nil) }
     cornerWindows.removeAll()
+    cornerWantsShown.removeAll()
     fullscreenDisplays = []
     let s = CORNER_RADIUS + CORNER_OVERLAP
     for screen in NSScreen.screens {
@@ -169,27 +174,83 @@ func makeCornerFillers() {
             corner += 1
             let display = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID ?? 0
             cornerWindows.append((w, display))
+            cornerWantsShown.append(false)
         }
     }
 }
 
 // show patches only on the displays that actually have a fullscreen window;
-// other monitors keep their wallpaper corners
-func setCorners(_ fullscreen: Set<CGDirectDisplayID>) {
-    guard fullscreen != fullscreenDisplays else { return }
+// other monitors keep their wallpaper corners.
+func setCorners(_ fullscreen: Set<CGDirectDisplayID>, force: Bool = false) {
+    guard force || fullscreen != fullscreenDisplays else { return }
     fullscreenDisplays = fullscreen
-    for (w, display) in cornerWindows {
-        let shown = fullscreen.contains(display)
+    for (i, entry) in cornerWindows.enumerated() {
+        let shown = fullscreen.contains(entry.display)
+        cornerWantsShown[i] = shown
+        let w = entry.window
         if shown { w.orderFrontRegardless() }
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.25
             w.animator().alphaValue = shown ? 1 : 0
         }
         if !shown {
+            // delayed orderOut — checks LIVE state (fullscreenDisplays), never
+            // a captured set. the old version froze the set from this call:
+            // hide → show within the 0.3s grace window let the stale closure
+            // order out a patch a newer transition had just re-shown, and the
+            // dedup guard above then kept it hidden forever (the soft-lock).
+            // all of this runs on the main queue, so reading the global here
+            // is atomic with respect to every other setCorners call.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak w] in
-                if !fullscreen.contains(display) { w?.orderOut(nil) }
+                if let w, !fullscreenDisplays.contains(entry.display) { w.orderOut(nil) }
             }
         }
+    }
+}
+
+// reconcile actual window state against what we want. the event-driven path
+// (workspace notifications + debounced evals) can miss transitions or sample
+// CGWindowList mid-animation; this catches anything it got wrong.
+func reconcileCorners() {
+    for (i, entry) in cornerWindows.enumerated() {
+        let shown = cornerWantsShown[i]
+        let w = entry.window
+        if shown {
+            // the soft-lock signature: state says shown, window is ordered out
+            // (or still translucent from a fade that never completed)
+            if !w.isVisible || w.alphaValue < 0.99 {
+                w.orderFrontRegardless()
+                NSAnimationContext.runAnimationGroup { ctx in
+                    ctx.duration = 0.25
+                    w.animator().alphaValue = 1
+                }
+            }
+        } else if w.isVisible && w.alphaValue > 0.01 {
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.25
+                w.animator().alphaValue = 0
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak w] in
+                if let w, !cornerWantsShown[i] { w.orderOut(nil) }
+            }
+        }
+    }
+}
+
+// safety net: every 2s recompute the truth from the window list and reconcile.
+// nothing event-driven is load-bearing for correctness anymore — a missed
+// notification degrades to a 2s-late corner update instead of a stuck state.
+func startCornerHeartbeat() {
+    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+        if cornersOn {
+            let truth = fullscreenWindowDisplays()
+            if truth != fullscreenDisplays {
+                setCorners(truth)
+            } else {
+                reconcileCorners()
+            }
+        }
+        startCornerHeartbeat()
     }
 }
 
@@ -255,6 +316,7 @@ func runDaemon() -> Never {
     }
 
     if cornersOn { makeCornerFillers() }
+    if cornersOn { startCornerHeartbeat() }
 
     // corner updates are driven by workspace events (space change, app
     // activate/quit — entering/exiting fullscreen always fires one of these).
@@ -265,6 +327,10 @@ func runDaemon() -> Never {
             wnc.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: nil) { _ in scheduleCornerUpdate() },
             wnc.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: nil) { _ in scheduleCornerUpdate() },
             wnc.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: nil) { _ in scheduleCornerUpdate() },
+            // hide/unhide (Cmd+H) used to be covered only indirectly by the
+            // activate events; ghostty-style hide/show is exactly this path
+            wnc.addObserver(forName: NSWorkspace.didHideApplicationNotification, object: nil, queue: nil) { _ in scheduleCornerUpdate() },
+            wnc.addObserver(forName: NSWorkspace.didUnhideApplicationNotification, object: nil, queue: nil) { _ in scheduleCornerUpdate() },
         ]
         _ = observers // keep alive for the life of the process
     }

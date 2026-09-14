@@ -1,4 +1,5 @@
 node_modules/
 dist/
+assets/compiled_raycast_swift/
 *.log
 .DS_Store

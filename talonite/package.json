@@ -3,7 +3,7 @@
   "name": "talonite",
   "title": "Talonite",
   "version": "0.1.0",
-  "description": "Two edges, one blade: pinned timezones for any instant, and a network/proxy toggle",
+  "description": "Four edges, one blade: pinned timezones, a proxy toggle, a color picker, and an on-screen ruler",
   "icon": "icon.png",
   "author": "jamielink",
   "license": "MIT",
@@ -21,6 +21,46 @@
       "subtitle": "Talonite",
       "description": "Show current Wi-Fi, proxy state, host:port, and toggle each proxy",
       "mode": "view"
+    },
+    {
+      "name": "color",
+      "title": "Color Picker",
+      "subtitle": "Talonite",
+      "description": "Pick any pixel on screen and copy its color",
+      "mode": "no-view",
+      "preferences": [
+        {
+          "name": "format",
+          "title": "Color Format",
+          "description": "The format to copy the picked color in",
+          "type": "dropdown",
+          "data": [
+            { "title": "Hex", "value": "hex" },
+            { "title": "RGB", "value": "rgb" },
+            { "title": "HSL", "value": "hsl" }
+          ],
+          "default": "hex",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "ruler",
+      "title": "Ruler",
+      "subtitle": "Talonite",
+      "description": "Measure the distance between two points on screen, in pixels",
+      "mode": "no-view",
+      "preferences": [
+        {
+          "name": "dragMode",
+          "title": "Drag Mode",
+          "description": "By default: click point A and point B to measure distance",
+          "type": "checkbox",
+          "label": "Drag point A to point B to measure distance",
+          "default": false,
+          "required": false
+        }
+      ]
     }
   ],
   "dependencies": {
@@ -33,7 +73,8 @@
     "typescript": "^5.2.2"
   },
   "scripts": {
-    "build": "ray build",
+    "native": "sh build-native.sh",
+    "build": "npm run native && ray build",
     "dev": "ray develop",
     "lint": "ray lint"
   },

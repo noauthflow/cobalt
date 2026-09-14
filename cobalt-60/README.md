@@ -5,7 +5,7 @@ the radioactive isotope of cobalt
 two independent features in one agent:
 
 - **the wall** — keeps the mouse cursor from entering the top 5px of the screen (the menu bar area)
-- **the corner filler** — tiny black squares in the screen corners while a fullscreen app is up, hiding the wallpaper slivers the window server's rounding leaves behind
+- **the corner filler** — tiny black squares in the screen corners while a fullscreen app is up, hiding the wallpaper slivers the window server's rounding leaves behind. driven by workspace notifications, with a 2s reconciliation heartbeat as a safety net, so corner state can't wedge (a rapid hide/show used to be able to permanently suppress the patches until a daemon reset)
 
 each can be toggled independently and the switches persist (see commands).
 
