@@ -11,13 +11,14 @@
     {
       "name": "timezone",
       "title": "Timezones",
+      "subtitle": "Talonite",
       "description": "Pinned timezones for now or any custom instant",
       "mode": "view"
     },
     {
       "name": "proxy",
       "title": "Proxy Status",
-      "subtitle": "Network",
+      "subtitle": "Talonite",
       "description": "Show current Wi-Fi, proxy state, host:port, and toggle each proxy",
       "mode": "view"
     }
