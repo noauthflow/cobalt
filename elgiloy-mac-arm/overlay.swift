@@ -97,8 +97,19 @@ final class Overlay {
                 highlight.isHidden = true
                 return false
             }
+            // a slide only reads as the app-switcher glide when the highlight
+            // is ALREADY visible in this pill and the destination is exactly
+            // one row away. everything else — sel crossing between the pin
+            // and main pills (this highlight was hidden, or sits at a stale
+            // frame from an older row layout), a wrap from the last row to
+            // the first, a digit jump, a post-rebuild reposition — would
+            // animate a smear across the whole pill while the OTHER pill's
+            // highlight vanishes instantly. those moves snap instead.
+            let adjacent = !highlight.isHidden
+                && abs(row.0.frame.minY - highlight.frame.minY)
+                    <= Overlay.ROW_H + Overlay.GAP + 0.5
             CATransaction.begin()
-            CATransaction.setAnimationDuration(animate ? 0.05 : 0)
+            CATransaction.setAnimationDuration(adjacent && animate ? 0.05 : 0)
             highlight.frame = row.0.frame
             highlight.isHidden = false
             CATransaction.commit()
@@ -133,6 +144,11 @@ final class Overlay {
     func hide() {
         pinPill.panel.orderOut(nil)
         mainPill.panel.orderOut(nil)
+        // drop both highlights so no pill starts the next session with a
+        // stale frame from the last one (a fresh open re-centers and snaps,
+        // but the refresh that follows a session reuses these panels)
+        pinPill.highlight.isHidden = true
+        mainPill.highlight.isHidden = true
         lastKey = ""
     }
 
