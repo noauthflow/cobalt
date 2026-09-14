@@ -72,9 +72,12 @@ function getWifiPassword(ssid: string): string {
   if (!ssid) return "";
   const safe = ssid.replace(/"/g, '\\"');
   try {
-    return execSync(`security find-generic-password -wa "${safe}" 2>/dev/null`, {
-      encoding: "utf8",
-    }).trim();
+    return execSync(
+      `security find-generic-password -wa "${safe}" 2>/dev/null`,
+      {
+        encoding: "utf8",
+      },
+    ).trim();
   } catch {
     return "";
   }
@@ -283,7 +286,11 @@ export default function Command() {
     />
   );
 
-  const proxyRow = (label: string, proxy: ProxyState, which: "http" | "https") => {
+  const proxyRow = (
+    label: string,
+    proxy: ProxyState,
+    which: "http" | "https",
+  ) => {
     const accessories: List.Item.Accessory[] = proxy.server
       ? [
           { tag: { value: proxy.server, color: Color.Blue } },

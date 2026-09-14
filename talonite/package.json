@@ -4,7 +4,7 @@
   "title": "Talonite",
   "version": "0.1.0",
   "description": "Two edges, one blade: pinned timezones for any instant, and a network/proxy toggle",
-  "icon": "assets/icon.png",
+  "icon": "icon.png",
   "author": "jamielink",
   "license": "MIT",
   "commands": [
