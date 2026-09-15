@@ -1067,13 +1067,18 @@ func releaseAttention() {
 
 func flushPendingRelease() {
     pendingRelease = false
-    // parked = off stage ENTIRELY: order out and stay out. the parked glass
-    // lives in the window's off-screen slack, and an ordered-in window with
-    // off-screen content is exactly what the lock-screen zoom reveals (it
-    // composites un-clipped mid-animation). the key drop comes free: the
-    // active app regains key the instant we resign. summon re-fronts.
+    // the key-drop dance, in full: orderOut drops key (the bg app regains it
+    // and its cursor rects — the automatic un-re-click), orderFrontRegardless
+    // forces the window server to settle the handback. skipping the re-front
+    // leaves key dangling on the resigned panel: no refocus, wrong cursors.
     strip.orderOut(nil)
-    dbg("attention released: window ordered out")
+    strip.orderFrontRegardless()
+    // then leave the stage — the parked glass sits in off-screen slack, and
+    // an ordered-in window with off-screen content is exactly what the
+    // lock-screen zoom composites un-clipped. the window is not key here,
+    // so this last orderOut is inert to focus: off it goes.
+    strip.orderOut(nil)
+    dbg("attention released: key dropped, window off stage")
 }
 
 // MARK: - fullscreen + mission control detection
