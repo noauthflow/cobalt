@@ -655,18 +655,25 @@ enum Battery {
         return p
     }()
 
-    // the figma palette — fixed in ALL states: the shell never changes,
-    // the digits and bolt are always white; only the fill answers charge
-    static let shellColor = NSColor(srgbRed: 0xCD/255.0, green: 0xCD/255.0, blue: 0xCD/255.0, alpha: 1)   // #CDCDCD
-    static let textColor = NSColor.white                                                                 // #FFFFFF
-    static let fillNormal = NSColor(srgbRed: 0x12/255.0, green: 0x12/255.0, blue: 0x12/255.0, alpha: 1)  // #121212
-    static let fillCharging = NSColor(srgbRed: 0x34/255.0, green: 0xC7/255.0, blue: 0x59/255.0, alpha: 1)       // #34C759
-    static let fillLowPower = NSColor(srgbRed: 1, green: 0xCC/255.0, blue: 0x0A/255.0, alpha: 1)         // #FFCC0A
-    static let fillLow = NSColor(srgbRed: 1, green: 0, blue: 0, alpha: 1)                                // #FF0000
+    // the palette — delft tones on the cream glass: the shell is a warm
+    // glass-washed grey, the fill answers charge in the deep ink, and the
+    // accents are glaze colors (sage, ochre, brick) — no traffic lights.
+    // the run (digits + bolt) reads on BOTH grounds: deep ink
+    // where the shell shows, white where the fill covers.
+    static let shellColor = NSColor(srgbRed: 0xD8/255.0, green: 0xD4/255.0, blue: 0xCB/255.0, alpha: 1)  // #D8D4CB
+    static let fillNormal   = Theme.inkDeep                                                              // #3D3829
+    static let fillCharging = NSColor(srgbRed: 0x5E/255.0, green: 0x77/255.0, blue: 0x49/255.0, alpha: 1) // #5E7749 — sage glaze
+    static let fillLowPower = NSColor(srgbRed: 0x9A/255.0, green: 0x6D/255.0, blue: 0x1B/255.0, alpha: 1) // #9A6D1B — deep ochre
+    static let fillLow      = NSColor(srgbRed: 0xA3/255.0, green: 0x47/255.0, blue: 0x30/255.0, alpha: 1) // #A34730 — muted brick
 
     static func draw(pct: Int, charging: Bool, in slot: NSRect) {
-        let f = CGFloat(max(0, min(100, pct))) / 100
-        let fillColor = charging ? (pct < 20 ? fillLow : fillCharging)
+        // visual floor: 1–4% fills draw at 5% — a hairline slither reads as
+        // a rendering glitch, not a battery
+        let f = pct <= 0 ? 0 : max(0.05, CGFloat(min(100, pct)) / 100)
+        // 100% is full, not charging — the sage and the bolt both stand
+        // down; only the nub joining the fill marks full
+        let isCharging = charging && pct < 100
+        let fillColor = isCharging ? (pct < 20 ? fillLow : fillCharging)
             : pct < 20 ? fillLow
             : ProcessInfo.processInfo.isLowPowerModeEnabled ? fillLowPower : fillNormal
 
@@ -677,7 +684,7 @@ enum Battery {
                            y: slot.midY - grid.height * s / 2,
                            width: grid.width * s, height: grid.height * s)
 
-        // the shell: #CDCDCD in every state, low power included
+        // the shell: glass-warmed grey in every state
         SVGIcon.draw(.battery27, color: shellColor, inRect: frame)
 
         // the charge: the shell's own body path as the clip, filled from the
@@ -703,18 +710,17 @@ enum Battery {
             }
         }
 
-        // the percentage: SF Pro Bold 11, −0.5 tracking, white in all
-        // states. while charging below 100, the bolt stands beside the
-        // digits and the run centers as ONE collective — no shrinking, the
-        // digits draw at their natural size. at 100% the bolt is dropped:
-        // on a full battery macOS still reports AC power, but nothing is
-        // charging.
+        // the run: SF Pro Bold 11, −0.5 tracking. while charging below
+        // 100, the bolt stands beside the digits and the run centers as ONE
+        // collective — no shrinking, the digits draw at their natural size.
+        // at 100% the bolt is dropped: on a full battery macOS still
+        // reports AC power, but nothing is charging.
         let text = "\(pct)"
         let font = NSFont.systemFont(ofSize: 11, weight: .bold)
         let boltH: CGFloat = 11
         let boltW = boltH * 6.07094 / 8.26108   // the bolt glyph's tight bounds
         let gap: CGFloat = 0.5
-        let showBolt = charging && pct < 100
+        let showBolt = isCharging
         let boltRun: CGFloat = showBolt ? gap + boltW : 0
 
         func inkWidth() -> CGFloat {
@@ -728,13 +734,24 @@ enum Battery {
         // bearings can't shove the bolt right of where the math put it
         let bodyCenter = frame.minX + bodyWidth * s / 2
         let x0 = bodyCenter - (textW + boltRun) / 2
-        drawText(text, font: font, color: textColor, in: NSRect(
-            x: x0, y: frame.minY, width: textW, height: frame.height),
-            kern: -0.5)
-        if showBolt {
-            SVGIcon.draw(.bolt, color: textColor, inRect: NSRect(
-                x: x0 + textW + gap, y: frame.midY - boltH / 2,
-                width: boltW, height: boltH))
+        let textRect = NSRect(x: x0, y: frame.minY, width: textW, height: frame.height)
+        let boltRect = NSRect(x: x0 + textW + gap, y: frame.midY - boltH / 2,
+                              width: boltW, height: boltH)
+
+        // two-tone legibility: pass 1 paints the whole run in the deep ink
+        // (reads on the light shell), pass 2 repaints it inside the fill
+        // rect in white (reads on every fill tone). a digit straddling the
+        // fill edge splits cleanly instead of vanishing into either side.
+        drawText(text, font: font, color: Theme.inkDeep, in: textRect, kern: -0.5)
+        if showBolt { SVGIcon.draw(.bolt, color: Theme.inkDeep, inRect: boltRect) }
+        if f > 0 {
+            let context = NSGraphicsContext.current!.cgContext
+            context.saveGState()
+            context.clip(to: NSRect(x: frame.minX, y: frame.minY,
+                                    width: bodyWidth * s * f, height: frame.height))
+            drawText(text, font: font, color: .white, in: textRect, kern: -0.5)
+            if showBolt { SVGIcon.draw(.bolt, color: .white, inRect: boltRect) }
+            context.restoreGState()
         }
     }
 }
