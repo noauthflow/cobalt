@@ -33,7 +33,7 @@ fi
 echo "building (swiftc)"
 mkdir -p "$HOME/.local/bin"
 # build straight to the install target — nothing lands in the repo folder
-swiftc -O -o "$BIN_LOCAL" main.swift -framework AppKit -framework QuartzCore
+swiftc -O -o "$BIN_LOCAL" main.swift -framework AppKit -framework QuartzCore -F /System/Library/PrivateFrameworks -framework CoreBrightness
 codesign --force --sign "$IDENTITY" "$BIN_LOCAL"
 if [[ "$IDENTITY" != "-" ]]; then echo "signed (cobalt-dev)"; fi
 

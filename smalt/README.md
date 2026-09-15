@@ -22,8 +22,11 @@ type. nothing is hand-placed:
 - **type** — SF Pro tabular digits at medium, sized so the stems sit at the
   icon stroke weight. text is centered by glyph ink (CoreText), not line
   height — line-height centering is what leaves digits riding high.
-- **slots** — battery / calendar / hour / minute, each drawn only inside its
-  own fixed slot, optically centered in it.
+- **slots** — a stack (`Theme.slots`) where each widget claims one or more
+  cells (`span`) — a span of N cells is one continuous region with no gaps
+  inside; the gap only separates widgets. battery / calendar / hour /
+  minute each take 1, the slider takes 5. containers, hit-testing and the
+  debug grid all derive from the list.
 
 ## how it works
 
@@ -92,7 +95,25 @@ anyway, so any permission a later version earns survives rebuilds.)
 - logs: `/tmp/smalt.err`
 - main display only in v0 — secondary displays get the pill later
 - constants: `cell/gap/pad`, `iconSize`, `typeSize/pctSize` in `Theme`;
+  `sliderTrack` (M3 metric) + `sliderHandle` (24pt — bigger than M3's 18dp, smalt skin) in `Theme`;
   `PILL_RADIUS`, `REVEAL_WIDTH` (12px), `HIDE_MARGIN` (6px) in main.swift
+- the slider below the time is Material Design 3's shape language (4dp
+  track, round handle) drawn with CG in the palette; the knob is the
+  readout — a Phosphor sun glyph at rest, swelling to a live percentage
+  (tabular semibold, shrink-to-fit) while you drag, lingering ~1.5s after
+  release, then back to the bulb;
+  it is live — press anywhere in its 5-cell region and drag, and the real
+  keyboard backlight follows. it drives the same `KeyboardBrightnessClient`
+  (private `CoreBrightness` framework) that the F5/F6 keys use — value
+  0–1, no permissions. the slider state is the hardware, and the render
+  is decoupled from the sample: smalt samples the hardware at 30Hz while
+  the glass is visible (~0.16% of a core — 52µs per read, benchmarked)
+  and 2Hz while hidden, and the handle *springs* to each new sample at
+  120fps — so fn-key and ambient auto-brightness changes glide in exactly
+  like the system's own bezel instead of stepping. there is no push
+  channel at user privilege: CoreBrightness posts no darwin notification
+  and the Keyboard Backlight HID device rejects listeners (privileged) —
+  both were tested; sampling is the only channel macOS gives us
 - the pill is clickable; widgets don't do anything yet — v1 flips that
 - focus: hover = attention. while the cursor is on the glass the panel
   takes KEY status (`OverlayPanel` canBecomeKey + `strip.makeKey()`) —

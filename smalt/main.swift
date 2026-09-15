@@ -45,6 +45,31 @@ enum Theme {
     static let gap: CGFloat = 4
     static let pad: CGFloat = 7
 
+    // structure: the widget stack, top to bottom — THE single source of
+    // truth. the pill is exactly its grid: height derives from this list,
+    // every slot loop ranges over slotCount, and adding a widget is one
+    // entry here plus one case in draw(_:) — the container follows on its
+    // own (the smalt answer to auto layout: the grid IS the layout).
+    // a widget can claim multiple cells via `span`: a span-5 slider is one
+    // continuous 5-cell region — cells inside a span have no gap between
+    // them; the gap only separates widgets.
+    enum Kind {
+        case battery, calendar, hour, minute, slider
+    }
+    struct SlotDef {
+        let kind: Kind
+        let span: Int
+        init(_ kind: Kind, span: Int = 1) { self.kind = kind; self.span = span }
+    }
+    static let slots: [SlotDef] = [
+        .init(.battery),
+        .init(.calendar),
+        .init(.hour),
+        .init(.minute),
+        .init(.slider, span: 5),
+    ]
+    static var slotCount: Int { slots.count }
+
     // icons — heroicons, verbatim svg paths on their 24×24 grid at their
     // authored 1.5 stroke. ONE uniform scale for every glyph: the grid is
     // the point size. no per-glyph normalization — heroicons balance their
@@ -63,14 +88,33 @@ enum Theme {
     static let typeSize: CGFloat = 19     // clock digits
     static let pctSize: CGFloat = 8       // battery percentage (6.5 for "100")
 
-    // the pill is exactly its grid
-    static var pillWidth: CGFloat { cell + 2 * pad }
-    static var pillHeight: CGFloat { 2 * pad + 4 * cell + 3 * gap }
+    // slider — material design 3's shape language in smalt's skin: 4dp
+    // track, round handle. vertical, one CELL tall... spans 5 below the
+    // time. v0 drew a fixed value; the live hardware wiring is further down.
+    static let sliderTrack: CGFloat = 4
+    static let sliderHandle: CGFloat = 24
+    static var sliderValue: CGFloat = 0.5    // the hardware's current level (sampled)
+    static var sliderDisplay: CGFloat = 0.5  // what the handle draws — springs toward sliderValue
+    static var sliderFace: CGFloat = 0       // knob face crossfade: 0 = sun, 1 = %
 
-    // the four slots, top to bottom — battery / calendar / hour / minute.
-    // each widget receives exactly this rect and draws centered in it.
+    // the pill is exactly its grid — derived from the slot stack, never hand-counted
+    static var contentHeight: CGFloat {
+        // every widget's full footprint: its cells PLUS the gaps inside its
+        // span — then the between-widget gaps on top. omit the internal gaps
+        // and the stack overflows the glass (the vanishing bottom margin).
+        slots.reduce(0) { $0 + CGFloat($1.span) * cell + CGFloat($1.span - 1) * gap }
+            + CGFloat(slotCount - 1) * gap
+    }
+    static var pillWidth: CGFloat { cell + 2 * pad }
+    static var pillHeight: CGFloat { 2 * pad + contentHeight }
+
+    // the slot rect for widget i: its span of cells (no internal gaps),
+    // offset by every widget above it. flipped coords — y grows downward.
     static func slot(_ index: Int, in bounds: NSRect) -> NSRect {
-        NSRect(x: pad, y: pad + CGFloat(index) * (cell + gap), width: cell, height: cell)
+        var y = pad
+        for j in 0..<index { y += CGFloat(slots[j].span) * cell + gap }
+        let h = CGFloat(slots[index].span) * cell + CGFloat(slots[index].span - 1) * gap
+        return NSRect(x: pad, y: y, width: cell, height: h)
     }
 }
 
@@ -127,7 +171,7 @@ final class StripView: NSView {
         super.updateTrackingAreas()
         trackingAreas.forEach(removeTrackingArea)
         // one tracking area per slot — mouseEntered tells us which
-        for i in 0..<4 {
+        for i in 0..<Theme.slotCount {
             let a = NSTrackingArea(rect: Theme.slot(i, in: bounds),
                                    options: [.mouseEnteredAndExited, .activeAlways],
                                    owner: self, userInfo: ["slot": i])
@@ -166,6 +210,104 @@ final class StripView: NSView {
         hoverSlot = -1
     }
 
+    // ── slider drag: press anywhere in the slider slot, the value follows
+    // the cursor until mouse-up. hit-test walks Theme.slots so a different
+    // stack order can't break it.
+    var dragSlot: Int? = nil   // file-visible: the hw-sync poll pauses while we drive
+
+    private func slotIndex(at p: NSPoint) -> Int? {
+        for i in 0..<Theme.slotCount where Theme.slot(i, in: bounds).insetBy(dx: -3, dy: 0).contains(p) {
+            return i
+        }
+        return nil
+    }
+
+    // spring-render: Theme.sliderDisplay chases Theme.sliderValue at 120fps
+    // so a sampled hardware change arrives as one smooth glide (the bezel's
+    // own ~250ms feel), never a jump. runs only while it has distance to
+    // cover; drags bypass it and write both directly.
+    private var valueTimer: Timer?
+    private var faceTimer: Timer?
+    private var faceTarget: CGFloat = 0
+
+    // crossfade the knob face (sun ⇄ %) — same recipe as the value spring:
+    // a 120fps timer that runs only while the blend has distance to cover
+    private func setFaceTarget(_ target: CGFloat) {
+        faceTarget = target
+        guard faceTimer == nil else { return }
+        faceTimer = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            let d = self.faceTarget - Theme.sliderFace
+            if abs(d) < 0.002 {
+                Theme.sliderFace = self.faceTarget
+                self.faceTimer?.invalidate(); self.faceTimer = nil
+            } else {
+                Theme.sliderFace += d * 0.2
+            }
+            self.needsDisplay = true
+        }
+        RunLoop.main.add(faceTimer!, forMode: .common)
+    }
+
+    func beginValueSpring() {
+        guard abs(Theme.sliderDisplay - Theme.sliderValue) > 0.0004 else { return }
+        guard valueTimer == nil else { return }
+        let t = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            let d = Theme.sliderValue - Theme.sliderDisplay
+            if abs(d) < 0.0004 {
+                Theme.sliderDisplay = Theme.sliderValue
+                self.valueTimer?.invalidate(); self.valueTimer = nil
+            } else {
+                Theme.sliderDisplay += d * 0.22
+            }
+            self.needsDisplay = true
+        }
+        RunLoop.main.add(t, forMode: .common)
+        valueTimer = t
+    }
+
+    private func stopValueSpring() {
+        valueTimer?.invalidate(); valueTimer = nil
+        Theme.sliderDisplay = Theme.sliderValue
+    }
+
+    private func updateSliderValue(at p: NSPoint) {
+        guard let i = dragSlot else { return }
+        let r = Theme.slot(i, in: bounds)
+        // flipped coords: slot top (minY) = 1.0, bottom = 0.0
+        let v = min(1, max(0, (r.maxY - p.y) / r.height))
+        Theme.sliderValue = v
+        KeyboardBrightness.set(Float(v))   // the F5/F6 keys' own call path
+        stopValueSpring()                  // the cursor is the only spring that matters here
+        needsDisplay = true
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        if let i = slotIndex(at: p), Theme.slots[i].kind == .slider {
+            dragSlot = i
+            setFaceTarget(1)
+        }
+        updateSliderValue(at: p)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        updateSliderValue(at: convert(event.locationInWindow, from: nil))
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        if dragSlot != nil {
+            // keep the % on screen a beat after release, then fade back to
+            // the bulb (the async redraw is what actually flips it back)
+            sliderValueUntil = Date().addingTimeInterval(1.5)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { [weak self] in
+                self?.setFaceTarget(0)
+            }
+        }
+        dragSlot = nil
+    }
+
     // the glass: #FAF6F3 — the caelestia tab shape: rounded on the left,
     // fused into the right screen edge with concave fillets top and bottom
     override func draw(_ dirtyRect: NSRect) {
@@ -174,14 +316,17 @@ final class StripView: NSView {
         path.fill()
         window?.invalidateShadow()   // the shadow follows the tab silhouette
 
-        // the grid: battery / calendar / hour / minute — one uniform slot
-        // each, every widget centered in its own fixed spot
-        for i in 0..<4 {
+        // the grid: each entry of Theme.slots draws in its own uniform
+        // slot — the container is built from the same list, so widget and
+        // window can never disagree
+        for i in 0..<Theme.slotCount {
             let r = Theme.slot(i, in: bounds)
-            switch i {
-            case 0: drawBattery(in: r)
-            case 1: drawCalendar(in: r)
-            default: drawClock(i == 2 ? .hour : .minute, in: r)
+            switch Theme.slots[i].kind {
+            case .battery: drawBattery(in: r)
+            case .calendar: drawCalendar(in: r)
+            case .slider: drawSlider(in: r)
+            case .hour: drawClock(.hour, in: r)
+            case .minute: drawClock(.minute, in: r)
             }
 
             // hover wash: a soft ink tint filling the whole slot, so the
@@ -197,7 +342,7 @@ final class StripView: NSView {
         // every widget must sit inside its red box; the red boxes never move.
         if Theme.debugGrid {
             NSColor.systemRed.withAlphaComponent(0.55).setStroke()
-            for i in 0..<4 {
+            for i in 0..<Theme.slotCount {
                 let r = Theme.slot(i, in: bounds).insetBy(dx: 0.5, dy: 0.5)
                 NSBezierPath(roundedRect: r, xRadius: 2, yRadius: 2).stroke()
             }
@@ -231,6 +376,9 @@ enum SVGPath {
     static let calendar = "M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 0 1 2.25-2.25h13.5A2.25 2.25 0 0 1 21 7.5v11.25m-18 0A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75m-18 0v-7.5A2.25 2.25 0 0 1 5.25 9h13.5A2.25 2.25 0 0 1 21 11.25v7.5m-9-6h.008v.008H12v-.008ZM12 15h.008v.008H12V15Zm0 2.25h.008v.008H12v-.008ZM9.75 15h.008v.008H9.75V15Zm0 2.25h.008v.008H9.75v-.008ZM7.5 15h.008v.008H7.5V15Zm0 2.25h.008v.008H7.5v-.008Zm6.75-4.5h.008v.008h-.008v-.008Zm0 2.25h.008v.008h-.008V15Zm0 2.25h.008v.008h-.008v-.008Zm2.25-4.5h.008v.008H16.5v-.008Zm0 2.25h.008v.008H16.5V15Z"
     // heroicons "battery" (outline)
     static let battery = "M21 10.5h.375c.621 0 1.125.504 1.125 1.125v2.25c0 .621-.504 1.125-1.125 1.125H21M3.75 18h15A2.25 2.25 0 0 0 21 15.75v-6a2.25 2.25 0 0 0-2.25-2.25h-15A2.25 2.25 0 0 0 1.5 9.75v6A2.25 2.25 0 0 0 3.75 18Z"
+    // the slider's idle voice: a Phosphor "sun" (256 grid, FILL glyph —
+    // not heroicon stroke language; drawn filled, see drawSlider)
+    static let sun = "M120,40V16a8,8,0,0,1,16,0V40a8,8,0,0,1-16,0Zm72,88a64,64,0,1,1-64-64A64.07,64.07,0,0,1,192,128Zm-16,0a48,48,0,1,0-48,48A48.05,48.05,0,0,0,176,128ZM58.34,69.66A8,8,0,0,0,69.66,58.34l-16-16A8,8,0,0,0,42.34,53.66Zm0,116.68-16,16a8,8,0,0,0,11.32,11.32l16-16a8,8,0,0,0-11.32-11.32ZM192,72a8,8,0,0,0,5.66-2.34l16-16a8,8,0,0,0-11.32-11.32l-16,16A8,8,0,0,0,192,72Zm5.66,114.34a8,8,0,0,0-11.32,11.32l16,16a8,8,0,0,0,11.32-11.32ZM48,128a8,8,0,0,0-8-8H16a8,8,0,0,0,0,16H40A8,8,0,0,0,48,128Zm80,80a8,8,0,0,0-8,8v24a8,8,0,0,0,16,0V216A8,8,0,0,0,128,208Zm112-88H216a8,8,0,0,0,0,16h24a8,8,0,0,0,0-16Z"
 
     // svg path `d` → CGPath. just enough of the spec for icon path data:
     // M m L l H h V v C c S s Q q T t A a Z, implicit repeats, and the
@@ -367,10 +515,10 @@ enum Heroicon {
     // is `size` points — the same relation every heroicon has to every other
     // one on heroicons.com. stroke is the authored 1.5 in grid units, so
     // every icon carries the set's own weight, identically.
-    static func draw(_ d: String, color: NSColor, in slot: NSRect) {
+    static func draw(_ d: String, color: NSColor, in slot: NSRect, size: CGFloat? = nil) {
         let ctx = NSGraphicsContext.current!.cgContext
         ctx.saveGState()
-        let s = Theme.iconSize / 24
+        let s = (size ?? Theme.iconSize) / 24
         ctx.translateBy(x: slot.midX, y: slot.midY)
         ctx.scaleBy(x: s, y: s)
         ctx.translateBy(x: -12, y: -12)
@@ -411,6 +559,36 @@ extension NSFont {
     // SF Pro, tabular digits — the clock's voice, weight-matched to the strokes
     static func tabular(_ size: CGFloat, _ weight: NSFont.Weight = .medium) -> NSFont {
         NSFont.monospacedDigitSystemFont(ofSize: size, weight: weight)
+    }
+}
+
+// MARK: - keyboard brightness
+//
+// CoreBrightness (private framework, linked in install.sh): its
+// KeyboardBrightnessClient class is what the system itself uses for the
+// F5/F6 keys. value is a Float 0–1, no permissions required. the hardware
+// is the state — the slider reads it at launch and writes it on drag.
+enum KeyboardBrightness {
+    private static var client: NSObject = {
+        (NSClassFromString("KeyboardBrightnessClient") as? NSObject.Type)?.init() ?? NSObject()
+    }()
+
+    static var available: Bool {
+        client.responds(to: NSSelectorFromString("setBrightness:forKeyboard:"))
+    }
+
+    static func get() -> Float {
+        typealias Fn = @convention(c) (AnyObject, Selector, Int) -> Float
+        let sel = NSSelectorFromString("brightnessForKeyboard:")
+        guard client.responds(to: sel) else { return 0 }
+        return unsafeBitCast(client.method(for: sel), to: Fn.self)(client, sel, 1)
+    }
+
+    static func set(_ value: Float) {
+        typealias Fn = @convention(c) (AnyObject, Selector, Float, Int) -> Void
+        let sel = NSSelectorFromString("setBrightness:forKeyboard:")
+        guard client.responds(to: sel) else { return }
+        unsafeBitCast(client.method(for: sel), to: Fn.self)(client, sel, max(0, min(1, value)), 1)
     }
 }
 
@@ -465,6 +643,90 @@ func drawClock(_ component: Calendar.Component, in slot: NSRect) {
     drawText(value, font: .tabular(Theme.typeSize), color: Theme.ink, in: slot)
 }
 
+// material design 3 slider, vertical, in smalt's skin — M3's own metrics
+// (4dp track, round handle) drawn with CG, but inked
+// in the palette instead of M3's. one CELL slot below the time. v0 draws
+// the live keyboard backlight (CoreBrightness); drag writes straight to it.
+// linger: after release the % stays on screen this long before the bulb
+// returns — the value should outlive the gesture by a beat, not vanish
+var sliderValueUntil = Date.distantPast
+
+func drawSlider(in slot: NSRect) {
+    let v = max(0, min(1, Theme.sliderDisplay))
+    let cx = slot.midX
+    let stroke = Theme.stroke * Theme.iconSize / 24   // the icons' on-screen stroke, 1.5 grid units at scale
+
+    // the knob is the readout: bulb glyph at rest, live % while interacting
+    // (plus a beat of linger — a value that vanishes at mouse-up is unread).
+    // ONE size, always — the knob never changes under the cursor.
+    let knobSize = Theme.sliderHandle
+
+    // handle center travel: v=0 parks at the bottom, v=1 at the top —
+    // up means more, matching updateSliderValue's drag mapping
+    let yBottom = slot.maxY - Theme.sliderHandle / 2
+    let yTop = slot.minY + Theme.sliderHandle / 2
+    let hc = yBottom + (yTop - yBottom) * v
+
+    // track: one rounded 4pt bar, full slot height (M3's inactive container,
+    // here ink at 20%)
+    let trackRect = NSRect(x: cx - Theme.sliderTrack / 2, y: slot.minY,
+                           width: Theme.sliderTrack, height: slot.height)
+    Theme.ink.withAlphaComponent(0.2).setFill()
+    NSBezierPath(roundedRect: trackRect, xRadius: Theme.sliderTrack / 2,
+                 yRadius: Theme.sliderTrack / 2).fill()
+
+    // active run: handle center → bottom (M3 primary, here ink-deep) —
+    // the fill sits UNDER the handle, so value reads bottom-up
+    var active = trackRect
+    active.origin.y = hc
+    active.size.height = slot.maxY - hc
+    Theme.inkDeep.setFill()
+    NSBezierPath(roundedRect: active, xRadius: Theme.sliderTrack / 2,
+                 yRadius: Theme.sliderTrack / 2).fill()
+
+    // knob: round, glass fill + ink-deep stroke at the icon weight —
+    // M3's primary handle reading as part of the same ink family
+    let handle = NSRect(x: cx - knobSize / 2, y: hc - knobSize / 2,
+                        width: knobSize, height: knobSize)
+    let hp = NSBezierPath(ovalIn: handle)
+    Theme.glass.setFill()
+    hp.fill()
+    Theme.inkDeep.setStroke()
+    hp.lineWidth = stroke
+    hp.stroke()
+
+    // the knob's face: sun and % crossfaded by Theme.sliderFace — both
+    // drawn at their alphas, so the swap is a blend, never a flip
+    let face = max(0, min(1, Theme.sliderFace))
+
+    if face < 1 {
+        // the sun is a fill glyph on a 256 grid: scale it into the knob
+        // face and fill. (vertically symmetric, so the flipped-context
+        // mirror is harmless)
+        let sunSize: CGFloat = 14
+        let s = sunSize / 256
+        let ctx = NSGraphicsContext.current!.cgContext
+        ctx.saveGState()
+        ctx.translateBy(x: handle.minX + (handle.width - sunSize) / 2,
+                        y: handle.minY + (handle.height - sunSize) / 2)
+        ctx.scaleBy(x: s, y: s)
+        Theme.inkDeep.withAlphaComponent(1 - face).setFill()
+        ctx.addPath(SVGPath.cgPath(SVGPath.sun))
+        ctx.fillPath()
+        ctx.restoreGState()
+    }
+
+    if face > 0 {
+        // tabular %, shrink-to-fit like the battery's "100"
+        let pct = Int((Theme.sliderValue * 100).rounded())
+        var size: CGFloat = 12
+        let wide = ("100" as NSString).size(withAttributes: [.font: NSFont.tabular(size, .semibold)]).width
+        if wide > knobSize - 6 { size *= (knobSize - 6) / wide }
+        drawText("\(pct)", font: .tabular(size, .semibold),
+                 color: Theme.inkDeep.withAlphaComponent(face), in: handle)
+    }
+}
+
 // MARK: - state
 
 // stderr debug tracing — off unless built with -D SMALT_DEBUG (stderr → /tmp/smalt.err)
@@ -475,6 +737,16 @@ func dbg(_ s: String) {
 }
 
 var stripVisible = false       // hidden until the cursor hovers the right edge
+
+// the slider's state IS the hardware: read the real keyboard backlight once
+// at launch, then every drag writes straight through to it
+if KeyboardBrightness.available {
+    let hw = CGFloat(KeyboardBrightness.get())
+    Theme.sliderValue = hw
+    Theme.sliderDisplay = hw
+} else {
+    dbg("keyboard brightness: KeyboardBrightnessClient unavailable — slider is visual-only")
+}
 var evalItem: DispatchWorkItem?
 var pendingRelease = false     // key-drop deferred until the exit spring parks the glass
 
@@ -831,6 +1103,39 @@ func runDaemon() -> Never {
     // accessory = no dock icon.
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
+
+    // hardware sync: F5/F6 and the auto-brightness daemon change the
+    // backlight behind our back. there is no push channel at our privilege
+    // level — proven empirically: CoreBrightness posts no darwin
+    // notification and the Keyboard Backlight HID device rejects listeners
+    // (privileged) — so sample. adaptive rate: 30Hz while the glass is on
+    // stage (52µs per read → 0.16% of a core), 2Hz hidden. the RENDER is
+    // decoupled from the SAMPLE: the handle springs to each new value at
+    // 120fps, so even coarse samples glide like the system's own bezel.
+    let hwSync = DispatchSource.makeTimerSource(queue: .main)
+    enum HwSync {
+        static let liveInterval: TimeInterval = 1.0 / 30.0   // visible: 0.16% CPU, reads track live
+        static let idleInterval: TimeInterval = 0.5          // hidden: nobody's watching
+        static var deadline: DispatchTime = .now()
+    }
+    func scheduleHwSync() {
+        let dt = stripVisible ? HwSync.liveInterval : HwSync.idleInterval
+        HwSync.deadline = .now() + dt
+        hwSync.schedule(deadline: HwSync.deadline)
+    }
+    hwSync.setEventHandler {
+        defer { scheduleHwSync() }
+        guard KeyboardBrightness.available else { return }
+        guard tab.dragSlot == nil else { return }   // mid-drag: we ARE the writer
+        let hw = CGFloat(KeyboardBrightness.get())
+        if abs(hw - Theme.sliderValue) > 0.001 {
+            Theme.sliderValue = hw
+            if stripVisible { tab.beginValueSpring() }
+            else { Theme.sliderDisplay = hw }
+        }
+    }
+    scheduleHwSync()
+    hwSync.resume()
 
     // the window is docked from this moment on — it owns the screen edge
     // permanently (that's the cursor fix); only the glass ever moves
