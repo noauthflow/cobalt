@@ -379,7 +379,7 @@ final class RowView: NSView {
         } else if let img = Favicons.shared.cached(d) {
             applyIcon(img)
         } else {
-            Favicons.shared.fetch(d) { [weak self] img in
+            Favicons.shared.fetch(d, pageURL: tab.url) { [weak self] img in
                 guard let self, let img else { return }
                 self.applyIcon(img)
             }
