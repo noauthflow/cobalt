@@ -706,34 +706,24 @@ func drawSlider(in slot: NSRect) {
     let edgeAlpha: (CGFloat) -> CGFloat = { min(1, $0 * 4) }
 
     // the % — tabular semibold, shrink-to-fit like the battery's "100".
-    // computed once up front: the sun below is BUILT from this font's
-    // metrics, so both knob faces share DNA by construction.
+    // the size + stroke live in KnobFace so the sun below is built from
+    // the digits' own rendered metrics, by construction.
     let pct = Int((Theme.sliderValue * 100).rounded())
-    var base: CGFloat = 12
-    let wide = ("100" as NSString).size(withAttributes: [.font: NSFont.tabular(base, .semibold)]).width
-    if wide > knobSize - 6 { base *= (knobSize - 6) / wide }
-    let pctFont = NSFont.tabular(base, .semibold)
+    let pctFont = NSFont.tabular(KnobFace.base, .semibold)
 
     if face > 0 {
-        drawText("\(pct)", font: .tabular(base * face, .semibold),
+        drawText("\(pct)", font: .tabular(KnobFace.base * face, .semibold),
                  color: Theme.glass.withAlphaComponent(edgeAlpha(face)), in: handle)
     }
 
     if face < 1 {
         // the sun, generated from the digits' own metrics — not a borrowed
-        // glyph. the old Phosphor fill path put 1.125pt strokes next to the
-        // digits' 1.24pt stems and a 9pt disc over a 7.16pt cap — close on
-        // paper, wrong in kind: no constant keeps an imported glyph's fixed
-        // 16/256 ratios aligned to a live font. here the stroke IS the
-        // measured stem width and the disc IS the cap height, so the icon
-        // and the number it swaps with are cut from the same typeface.
+        // glyph (the old Phosphor path shipped 1.125pt strokes against
+        // 1.24pt stems). the stroke IS KnobFace.stem — measured off the
+        // rendered '0', because that's what the eye weighs the ring
+        // against — and the disc IS the cap height.
         let f = 1 - face
-        // stem width, measured not guessed: the 'l' glyph's ink is a bare
-        // SF Pro stem — the same number the % renders its strokes with
-        let stem = CTLineGetBoundsWithOptions(
-            CTLineCreateWithAttributedString(NSAttributedString(
-                string: "l", attributes: [.font: pctFont])),
-            .useGlyphPathBounds).width
+        let stem = KnobFace.stem
         let cap = pctFont.capHeight
         let discD = cap                 // disc outer diameter == cap height
         let air   = 1.1 * stem          // disc→ray air, a shade over a stem
@@ -758,6 +748,63 @@ func drawSlider(in slot: NSRect) {
         ctx.strokePath()
         ctx.restoreGState()
     }
+}
+
+// the knob face's shared numbers — one font for the % and one stroke
+// width for both faces, measured (not estimated) so they can't drift.
+enum KnobFace {
+    // the shrink-to-fit size drawSlider's % settles at ("100" must fit)
+    static let base: CGFloat = {
+        var b: CGFloat = 12
+        let wide = ("100" as NSString).size(withAttributes: [.font: NSFont.tabular(b, .semibold)]).width
+        return wide > Theme.sliderHandle - 6 ? b * (Theme.sliderHandle - 6) / wide : b
+    }()
+
+    // the stroke width the eye actually sees on the digits: a scanline
+    // through an 8× rendered '0'. SF Pro cuts curved strokes fatter than
+    // the 'l' stem (~12% here — optical compensation), so measuring 'l'
+    // left the sun's ring visibly thin next to the number it swaps with.
+    static let stem: CGFloat = {
+        let font = NSFont.tabular(base, .semibold)
+        let s = 8, w = 32, h = 32
+        let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: w * s, pixelsHigh: h * s,
+                                   bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                                   isPlanar: false, colorSpaceName: .calibratedRGB,
+                                   bytesPerRow: 0, bitsPerPixel: 0)!
+        rep.size = NSSize(width: w, height: h)
+        NSGraphicsContext.saveGraphicsState()
+        let ctx = NSGraphicsContext(bitmapImageRep: rep)!
+        NSGraphicsContext.current = ctx
+        let line = CTLineCreateWithAttributedString(NSAttributedString(
+            string: "0", attributes: [.font: font, .foregroundColor: NSColor.black]))
+        ctx.cgContext.translateBy(x: 8, y: 8)   // clear of the edges
+        ctx.cgContext.textMatrix = .identity
+        CTLineDraw(line, ctx.cgContext)
+        NSGraphicsContext.restoreGraphicsState()
+        // locate the ink, then scan the row through its vertical middle —
+        // the '0' is widest at mid-height (vertical-tangent bowls), and
+        // anchoring to the rendered ink instead of the baseline makes the
+        // scan immune to context orientation/offset quirks.
+        var minX = w * s, maxX = 0, minY = h * s, maxY = 0
+        for py in 0..<(h * s) { for px in 0..<(w * s) {
+            if rep.colorAt(x: px, y: py)!.alphaComponent > 0.1 {
+                minX = min(minX, px); maxX = max(maxX, px)
+                minY = min(minY, py); maxY = max(maxY, py)
+            }
+        } }
+        guard maxX > minX else { return 1 }
+        let py = (minY + maxY) / 2
+        var best = CGFloat(0), run = 0
+        for px in 0..<(w * s) {
+            if rep.colorAt(x: px, y: py)!.alphaComponent > 0.5 {
+                run += 1
+            } else if run > 0 {
+                best = max(best, CGFloat(run) / CGFloat(s)); run = 0
+            }
+        }
+        if run > 0 { best = max(best, CGFloat(run) / CGFloat(s)) }
+        return best > 0 ? best : 1
+    }()
 }
 
 // MARK: - state
