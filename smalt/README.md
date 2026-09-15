@@ -13,12 +13,11 @@ one file owns every visual decision (`Theme` in main.swift) — palette, grid,
 type. nothing is hand-placed:
 
 - **palette** — glass `#FAF6F3`, ink `#99947F` (strokes + labels), ink deep
-  `#3D3829` (the darker on-palette ink, battery fill + digits). the battery's
-  accents are glaze colors, not traffic lights: cobalt `#0047AB` (charging),
-  deep ochre `#9A6D1B` (low power), muted brick `#A34730` (low charge), on a
-  glass-warmed shell `#D8D4CB`. digits + bolt are two-tone — deep ink on the
-  shell, white inside the fill — so they read wherever the fill edge falls.
-  charging is sage `#5E7749` — green says "plugged in" without shouting.
+  `#3D3829` (the darker on-palette ink, battery fill + digits). the battery is
+  monochrome: deep-ink fill on a glass-warmed shell `#D8D4CB`, and the only
+  color state is low power mode (deep ochre `#9A6D1B`). charging is the bolt,
+  not a color. digits + bolt are one color at a time — deep ink on the shell,
+  white inside the fill, chosen by which side of the fill edge the run sits on.
 - **grid** — one uniform `CELL × CELL` slot per widget (`cell 28 / gap 8 /
   pad 11`); the pill is exactly its grid: `pad + 4 slots + gaps + pad`.
 - **icons** — Material Design 3 SVG assets loaded through one AppKit renderer

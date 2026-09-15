@@ -439,6 +439,7 @@ enum SVGIcon {
     enum Name: String {
         case battery27 = "battery-27"
         case bolt = "bolt"
+        case boltOutline = "bolt-outline"
         case calendar = "calendar-today"
         case nightDay = "Night-Day"
         case headphones, bluetooth, mic
@@ -655,27 +656,26 @@ enum Battery {
         return p
     }()
 
-    // the palette — delft tones on the cream glass: the shell is a warm
-    // glass-washed grey, the fill answers charge in the deep ink, and the
-    // accents are glaze colors (sage, ochre, brick) — no traffic lights.
-    // the run (digits + bolt) reads on BOTH grounds: deep ink
-    // where the shell shows, white where the fill covers.
-    static let shellColor = NSColor(srgbRed: 0xD8/255.0, green: 0xD4/255.0, blue: 0xCB/255.0, alpha: 1)  // #D8D4CB
-    static let fillNormal   = Theme.inkDeep                                                              // #3D3829
-    static let fillCharging = NSColor(srgbRed: 0x5E/255.0, green: 0x77/255.0, blue: 0x49/255.0, alpha: 1) // #5E7749 — sage glaze
-    static let fillLowPower = NSColor(srgbRed: 0x9A/255.0, green: 0x6D/255.0, blue: 0x1B/255.0, alpha: 1) // #9A6D1B — deep ochre
-    static let fillLow      = NSColor(srgbRed: 0xA3/255.0, green: 0x47/255.0, blue: 0x30/255.0, alpha: 1) // #A34730 — muted brick
+    // the palette — the slider's language: ONE value color, two weights.
+    // the fill is the slider's own value run (#75564F); the empty shell is
+    // that same color held to 30% over the glass (#D2C6C2 pre-composited —
+    // the svg tint is a solid). the only color state is low power mode:
+    // house amber fill, and the run flips to deep ink for contrast. the
+    // run's color is bound to the fill state, never to the fill %.
+    static let shellColor = NSColor(srgbRed: 0xD2/255.0, green: 0xC6/255.0, blue: 0xC2/255.0, alpha: 1)  // #D2C6C2
+    static let fillNormal   = Theme.sliderFill   // #75564F — the slider's value run
+    static let fillLowPower = Theme.lpm          // #CA8A04 — house amber
 
     static func draw(pct: Int, charging: Bool, in slot: NSRect) {
         // visual floor: 1–4% fills draw at 5% — a hairline slither reads as
         // a rendering glitch, not a battery
         let f = pct <= 0 ? 0 : max(0.05, CGFloat(min(100, pct)) / 100)
-        // 100% is full, not charging — the sage and the bolt both stand
-        // down; only the nub joining the fill marks full
-        let isCharging = charging && pct < 100
-        let fillColor = isCharging ? (pct < 20 ? fillLow : fillCharging)
-            : pct < 20 ? fillLow
-            : ProcessInfo.processInfo.isLowPowerModeEnabled ? fillLowPower : fillNormal
+        // 100% is full, not charging — the bolt stands down; the nub
+        // joining the fill is the full marker
+        let fillColor = ProcessInfo.processInfo.isLowPowerModeEnabled ? fillLowPower : fillNormal
+        // the bolt wears the knob's own color — the slider knob #3A2D27 —
+        // so charging reads in the slider's exact two-color language
+        let runColor = Theme.knob
 
         // fit the svg's grid to the slot width, vertically centered — the
         // grid decides, nothing hand-placed
@@ -710,48 +710,30 @@ enum Battery {
             }
         }
 
-        // the run: SF Pro Bold 11, −0.5 tracking. while charging below
-        // 100, the bolt stands beside the digits and the run centers as ONE
-        // collective — no shrinking, the digits draw at their natural size.
-        // at 100% the bolt is dropped: on a full battery macOS still
-        // reports AC power, but nothing is charging.
-        let text = "\(pct)"
-        let font = NSFont.systemFont(ofSize: 11, weight: .bold)
-        let boltH: CGFloat = 11
-        let boltW = boltH * 6.07094 / 8.26108   // the bolt glyph's tight bounds
-        let gap: CGFloat = 0.5
-        let showBolt = isCharging
-        let boltRun: CGFloat = showBolt ? gap + boltW : 0
-
-        func inkWidth() -> CGFloat {
-            let line = CTLineCreateWithAttributedString(NSAttributedString(
-                string: text, attributes: [.font: font, .kern: -0.5]))
-            return CTLineGetBoundsWithOptions(line, .useGlyphPathBounds).width
-        }
-        let textW = inkWidth()
-
-        // centered on the BODY (not the nub), placed by INK width so side
-        // bearings can't shove the bolt right of where the math put it
+        // the charge state: the bolt stands centered in the body when
+        // charging — the % digits are gone (they fought every ground and
+        // lost). the bolt color matches the digits' old white, always.
+        // the bolt stands a touch taller than the meter — stretched
+        // vertically only, the width keeps the glyph's natural bounds so
+        // it never gets fatter
+        let boltStretch: CGFloat = 1.22
+        let boltH = grid.height * s * boltStretch
+        let boltW = grid.height * s * 6.07094 / 8.26108
+        // the knockout: the outline asset is the same path, stroke-only,
+        // on a canvas grown 0.6 units a side — drawn in the GLASS color
+        // behind the bolt it erases the fill around the glyph, a gap that
+        // reads as transparent (the pill behind is that same glass)
+        let outlineMargin: CGFloat = 0.6
+        let oH = boltH + 2 * outlineMargin * s
+        let oW = boltW + 2 * outlineMargin * s   // horizontal margin only — no x stretch
         let bodyCenter = frame.minX + bodyWidth * s / 2
-        let x0 = bodyCenter - (textW + boltRun) / 2
-        let textRect = NSRect(x: x0, y: frame.minY, width: textW, height: frame.height)
-        let boltRect = NSRect(x: x0 + textW + gap, y: frame.midY - boltH / 2,
-                              width: boltW, height: boltH)
-
-        // two-tone legibility: pass 1 paints the whole run in the deep ink
-        // (reads on the light shell), pass 2 repaints it inside the fill
-        // rect in white (reads on every fill tone). a digit straddling the
-        // fill edge splits cleanly instead of vanishing into either side.
-        drawText(text, font: font, color: Theme.inkDeep, in: textRect, kern: -0.5)
-        if showBolt { SVGIcon.draw(.bolt, color: Theme.inkDeep, inRect: boltRect) }
-        if f > 0 {
-            let context = NSGraphicsContext.current!.cgContext
-            context.saveGState()
-            context.clip(to: NSRect(x: frame.minX, y: frame.minY,
-                                    width: bodyWidth * s * f, height: frame.height))
-            drawText(text, font: font, color: .white, in: textRect, kern: -0.5)
-            if showBolt { SVGIcon.draw(.bolt, color: .white, inRect: boltRect) }
-            context.restoreGState()
+        if charging {
+            SVGIcon.draw(.boltOutline, color: Theme.glass, inRect: NSRect(
+                x: bodyCenter - oW / 2, y: frame.midY - oH / 2,
+                width: oW, height: oH))
+            SVGIcon.draw(.bolt, color: runColor, inRect: NSRect(
+                x: bodyCenter - boltW / 2, y: frame.midY - boltH / 2,
+                width: boltW, height: boltH))
         }
     }
 }
@@ -763,7 +745,7 @@ var batteryPctOverride: Int? = nil
 
 func drawBattery(in slot: NSRect) {
     guard let hw = batteryLevel() else { return }
-    Battery.draw(pct: batteryPctOverride ?? hw.pct, charging: hw.charging, in: slot)
+    Battery.draw(pct: batteryPctOverride ?? hw.pct, charging: true, in: slot)
 }
 
 // The calendar SVG leaves a 14×10-unit body for the day number.
@@ -1322,6 +1304,14 @@ func runDaemon() -> Never {
     // accessory = no dock icon.
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
+
+    // never App Nap: an accessory app with no active windows gets its
+    // timers suspended while idle — the fade and the clock tick would
+    // freeze until the mouse moves. one activity claim pins the run loop
+    // for the daemon's lifetime.
+    _ = ProcessInfo.processInfo.beginActivity(
+        options: .userInitiated,
+        reason: "smalt: menu strip timers")
 
     // hardware sync: F5/F6 and the auto-brightness daemon change the
     // backlight behind our back. there is no push channel at our privilege
