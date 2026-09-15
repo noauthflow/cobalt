@@ -350,9 +350,16 @@ final class StripView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
-        if let i = slotIndex(at: p), Theme.slots[i].kind == .slider {
-            dragSlot = i
-            setFaceTarget(1)
+        if let i = slotIndex(at: p) {
+            switch Theme.slots[i].kind {
+            case .slider:
+                dragSlot = i
+                setFaceTarget(1)
+            case .battery27:
+                batteryPctOverride = Int.random(in: 0...100)   // test dial: next random iteration
+            default:
+                break
+            }
         }
         updateSliderValue(at: p)
     }
@@ -631,17 +638,36 @@ enum Battery {
         return p
     }()
 
+    // the nub — the svg's second path, the tip outside the body. part of
+    // the shell (#CDCDCD) at every level; joins the fill only at 100% —
+    // full means full, tip included
+    private static let nubPath: NSBezierPath = {
+        let p = NSBezierPath()
+        p.move(to: NSPoint(x: 27, y: 6.75))
+        p.curve(to: NSPoint(x: 25.6861, y: 8.75),
+                controlPoint1: NSPoint(x: 27, y: 7.62313),
+                controlPoint2: NSPoint(x: 26.4822, y: 8.41122))
+        p.line(to: NSPoint(x: 25.6861, y: 4.75))
+        p.curve(to: NSPoint(x: 27, y: 6.75),
+                controlPoint1: NSPoint(x: 26.4822, y: 5.08878),
+                controlPoint2: NSPoint(x: 27, y: 5.87687))
+        p.close()
+        return p
+    }()
+
     // the figma palette — fixed in ALL states: the shell never changes,
     // the digits and bolt are always white; only the fill answers charge
     static let shellColor = NSColor(srgbRed: 0xCD/255.0, green: 0xCD/255.0, blue: 0xCD/255.0, alpha: 1)   // #CDCDCD
     static let textColor = NSColor.white                                                                 // #FFFFFF
     static let fillNormal = NSColor(srgbRed: 0x12/255.0, green: 0x12/255.0, blue: 0x12/255.0, alpha: 1)  // #121212
+    static let fillCharging = NSColor(srgbRed: 0x34/255.0, green: 0xC7/255.0, blue: 0x59/255.0, alpha: 1)       // #34C759
     static let fillLowPower = NSColor(srgbRed: 1, green: 0xCC/255.0, blue: 0x0A/255.0, alpha: 1)         // #FFCC0A
     static let fillLow = NSColor(srgbRed: 1, green: 0, blue: 0, alpha: 1)                                // #FF0000
 
     static func draw(pct: Int, charging: Bool, in slot: NSRect) {
         let f = CGFloat(max(0, min(100, pct))) / 100
-        let fillColor = pct < 20 ? fillLow
+        let fillColor = charging ? (pct < 20 ? fillLow : fillCharging)
+            : pct < 20 ? fillLow
             : ProcessInfo.processInfo.isLowPowerModeEnabled ? fillLowPower : fillNormal
 
         // fit the svg's grid to the slot width, vertically centered — the
@@ -665,6 +691,16 @@ enum Battery {
             fillColor.setFill()
             NSRect(x: 0, y: 0, width: bodyWidth * f, height: grid.height).fill()
             context.restoreGState()
+            // at 100% the nub joins the fill — drawn OUTSIDE the body clip,
+            // which would otherwise erase it (the nub lives past the body)
+            if pct >= 100 {
+                context.saveGState()
+                context.translateBy(x: frame.minX, y: frame.minY)
+                context.scaleBy(x: s, y: s)
+                fillColor.setFill()
+                nubPath.fill()
+                context.restoreGState()
+            }
         }
 
         // the percentage: SF Pro Bold 11, −0.5 tracking, white in all
@@ -703,9 +739,14 @@ enum Battery {
     }
 }
 
+// demo override: click the battery slot to cycle the displayed % through
+// random values (a test dial, not a state) — charging and low-power still
+// answer to the hardware, so fills/bolt/reactivity stay honest
+var batteryPctOverride: Int? = nil
+
 func drawBattery(in slot: NSRect) {
-    guard let (pct, charging) = batteryLevel() else { return }
-    Battery.draw(pct: pct, charging: charging, in: slot)
+    guard let hw = batteryLevel() else { return }
+    Battery.draw(pct: batteryPctOverride ?? hw.pct, charging: hw.charging, in: slot)
 }
 
 // The calendar SVG leaves a 14×10-unit body for the day number.
