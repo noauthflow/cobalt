@@ -9,6 +9,7 @@ A collection of small, self-contained desktop utilities for macOS (plus one cros
 | [cobalt-sync/](cobalt-sync/) | bookmarks + omnibox sync CLI | macOS, linux, windows (auto-detects browser paths; `avatar` subcommand is macOS + Chrome only) |
 | [cobalt-60/](cobalt-60/) | cursor wall daemon | macOS |
 | [smalt/](smalt/) | menu bar strip daemon | macOS |
+| [vitallium/](vitallium/) | living wallpaper daemon (looping video behind apps + widgets) | macOS |
 | [elgiloy-mac-arm/](elgiloy-mac-arm/) | tab overlay daemon | macOS (Apple Silicon) |
 | [elgiloy-linux/](elgiloy-linux/) | tab overlay daemon, linux port | linux (in progress) |
 | [stellite/](stellite/) | new tab page + shorts blocker Chrome extension + template theme | anywhere Chrome runs |

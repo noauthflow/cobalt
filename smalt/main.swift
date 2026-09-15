@@ -951,12 +951,24 @@ func applyVisibility(_ desired: Bool, animate: Bool = true) {
     if desired { pendingRelease = false }   // back on stage — attention wanted again
     else { releaseAttention() }             // off the stage → hand focus back (deferred till parked)
     guard changed else { return }
+    // summoning while the lock zoom is coming up: verify once before the
+    // spring starts — otherwise the glass animates out mid-transition and
+    // the user watches it race the login screen
+    if desired, !sessionLocked, loginWindowOnScreen() {
+        setSessionLocked(true)              // parks + orders out synchronously
+        return
+    }
     // (visibility = glass position; see below)
-    // the window never moves — it has owned the screen edge since launch.
-    // visibility is purely where the glass sits inside it: docked, or
-    // parked in the off-screen slack. springs drive the glass either way.
+    // the window never moves. but it's only ON STAGE while the glass is:
+    // parked = ordered out. the old design kept the window fronted forever
+    // ("it owns the screen edge") with the glass parked in its off-screen
+    // slack — which the lock-screen zoom then composites un-clipped, flash-
+    // ing the parked glass mid-animation even with the cursor nowhere near
+    // the edge. while hidden the window is click-through and transparent:
+    // it owns nothing. out it goes; summon re-fronts before the glass moves.
     spring.stop()
     spring.onSettle = nil
+    if desired { strip.orderFrontRegardless() }   // back on stage before the glass moves
     if !animate {
         var g = tab.frame
         g.origin.x = glassX(docked: desired)
@@ -1029,7 +1041,7 @@ func cmdHeld() -> Bool {
 //
 // so attention is now just that, automated:
 //   hover-enter  → strip.makeKey()   — arrow is law, keys land on the pill
-//   hover-exit   → drop key (orderOut + orderFront, no activation) and
+//   hover-exit   → drop key (orderOut, no activation) and
 //                  the active app's window regains key on its own
 // no activation anywhere: no menu-bar flash, no cooperative-activation
 // denial, nothing to hand back — the app beneath stays active the whole
@@ -1055,14 +1067,13 @@ func releaseAttention() {
 
 func flushPendingRelease() {
     pendingRelease = false
-    guard strip.isKeyWindow else { return }
-    // drop key without a visible blink: out + front in the same pass —
-    // and only ever while the glass is parked off-screen, so there is
-    // nothing to see. the active app's main window regains key on its own
-    // the instant ours resigns — that's the automatic un-re-click.
+    // parked = off stage ENTIRELY: order out and stay out. the parked glass
+    // lives in the window's off-screen slack, and an ordered-in window with
+    // off-screen content is exactly what the lock-screen zoom reveals (it
+    // composites un-clipped mid-animation). the key drop comes free: the
+    // active app regains key the instant we resign. summon re-fronts.
     strip.orderOut(nil)
-    strip.orderFrontRegardless()
-    dbg("attention released: key=\(strip.isKeyWindow)")
+    dbg("attention released: window ordered out")
 }
 
 // MARK: - fullscreen + mission control detection
@@ -1106,6 +1117,7 @@ func missionControlActive() -> Bool {
 var mcActive = false              // cached mission-control state (re-checked on space/app changes)
 
 func updateStrip() {
+    guard !sessionLocked else { return }           // locked: notifications don't summon
     mcActive = missionControlActive()
     if mcActive {
         applyVisibility(false)                                 // mission control: off the stage
@@ -1130,6 +1142,52 @@ func scheduleUpdate() {
     let item = DispatchWorkItem { updateStrip() }
     evalItem = item
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: item)
+}
+
+// MARK: - session lock
+//
+// the lock screen composites level-21 canJoinAllSpaces windows above its
+// UI — and nothing here knew the difference. the 30Hz poll happily chased
+// the cursor around the login window, so smalt sat on the lock screen
+// springing in and out of the edge. while locked: window OUT, every cursor
+// path dead, nothing renders on the login screen at all.
+//
+// ground truth is the CGWindowList scan below: the lock screen IS a
+// fullscreen loginwindow window, and it's on screen from the first frame
+// of the zoom — faster than any notification (the distributed lock notice
+// and the workspace session notices all lag the animation, which is how
+// the summon logic kept racing the transition). the scan costs ~1ms, so
+// it runs where that buys something: every tick the glass is on stage
+// (the flash case), throttled while locked, never at idle. notifications
+// stay as the fast path.
+var sessionLocked = false
+var pollTick = 0
+
+func setSessionLocked(_ locked: Bool) {
+    guard locked != sessionLocked else { return }
+    sessionLocked = locked
+    if locked {
+        spring.stop()
+        applyVisibility(false, animate: false)   // park instantly — no spring on the way out
+        releaseAttention()                        // drop any key/focus claim
+        strip.orderOut(nil)                       // gone from the lock screen entirely
+    } else {
+        strip.orderFrontRegardless()              // back on every space
+        scheduleUpdate()                          // re-derive hover state from the live cursor
+    }
+}
+
+// is the lock screen (or its zoom) on stage? a loginwindow-owned window
+// covering the main display — same shape as missionControlActive's Dock check
+func loginWindowOnScreen() -> Bool {
+    guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else { return false }
+    let main = CGDisplayBounds(CGMainDisplayID())
+    return list.contains { d in
+        guard let owner = d[kCGWindowOwnerName as String] as? String, owner == "loginwindow",
+              let b = d[kCGWindowBounds as String] as? [String: NSNumber],
+              let w = b["Width"]?.doubleValue, let h = b["Height"]?.doubleValue else { return false }
+        return w >= main.width * 0.9 && h >= main.height * 0.9
+    }
 }
 
 // MARK: - the pill (window)
@@ -1218,13 +1276,14 @@ func runDaemon() -> Never {
     hwSync.resume()
 
     // the window is docked from this moment on — it owns the screen edge
-    // permanently (that's the cursor fix); only the glass ever moves
+    // while on stage (that's the cursor fix); only the glass ever moves.
+    // parked at launch = ordered out: an ordered-in window with off-screen
+    // content is what the lock-screen zoom reveals.
     strip.setFrame(pillFrame(), display: true)
     var g = tab.frame
     g.origin.x = glassX(docked: false)   // glass parked off-screen at launch
     tab.setFrameSize(g.size); tab.setFrameOrigin(g.origin)
-    applyVisibility(false, animate: false)   // parked = click-through at the edge
-    strip.orderFrontRegardless()
+    applyVisibility(false, animate: false)   // parked = click-through at the edge → window OUT
 
     // the summon. a global mouse monitor — not an event tap — so there is
     // nothing to intercept and nothing to grant. the cursor entering the
@@ -1233,6 +1292,7 @@ func runDaemon() -> Never {
     // lines means edge jitter can't flicker it — and the spring retargets,
     // so even fast in-out is a smooth reversal, never a glitch.
     NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged, .otherMouseDragged]) { _ in
+        guard !sessionLocked else { return }       // lock screen: the edge is nobody's
         // cmd held: the edge is yours — no window, no glass, no cursor take-over
         setCmdOverride(cmdHeld())
         if cmdOverride { return }
@@ -1265,7 +1325,14 @@ func runDaemon() -> Never {
         wnc.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main) { _ in scheduleUpdate() },
         wnc.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { _ in scheduleUpdate() },
         wnc.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main) { _ in scheduleUpdate() },
+        // lock/unlock: screen lock comes via distributed notifications, fast
+        // user switching via the session lifecycle — cover both.
+        wnc.addObserver(forName: NSWorkspace.sessionDidResignActiveNotification, object: nil, queue: .main) { _ in setSessionLocked(true) },
+        wnc.addObserver(forName: NSWorkspace.sessionDidBecomeActiveNotification, object: nil, queue: .main) { _ in setSessionLocked(false) },
     ]
+    let dnc = DistributedNotificationCenter.default()
+    dnc.addObserver(forName: NSNotification.Name("com.apple.screenIsLocked"), object: nil, queue: .main) { _ in setSessionLocked(true) }
+    dnc.addObserver(forName: NSNotification.Name("com.apple.screenIsUnlocked"), object: nil, queue: .main) { _ in setSessionLocked(false) }
 
     // display reconfiguration: resolution switch, monitor plug/unplug
     NotificationCenter.default.addObserver(
@@ -1293,6 +1360,18 @@ func runDaemon() -> Never {
     // re-checked here too, because while smalt is active its own window
     // swallows mouse events — the global monitor goes quiet.
     Timer.scheduledTimer(withTimeInterval: 1 / 30, repeats: true) { _ in
+        // lock ground truth. the flash budget: a glass that's on stage at
+        // lock-press (hovering, or mid-spring) is what rides the zoom — so
+        // while VISIBLE, scan EVERY tick (≤33ms ≈ one zoom frame, ≤3% of a
+        // core for the seconds the user is actually at the edge); while
+        // LOCKED, throttled self-heal only (nobody's watching, save the
+        // battery); idle + unlocked — the resting state — pays nothing.
+        pollTick += 1
+        if stripVisible || (sessionLocked && pollTick % 4 == 0) {
+            let locked = loginWindowOnScreen()
+            if locked != sessionLocked { setSessionLocked(locked) }
+        }
+        guard !sessionLocked else { return }       // locked: no summon, no attention, nothing
         setCmdOverride(cmdHeld())
         if cmdOverride { releaseAttention(); return }
         if mcActive { applyVisibility(false); releaseAttention(); return }
