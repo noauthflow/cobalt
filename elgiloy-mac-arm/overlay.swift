@@ -156,35 +156,47 @@ final class Overlay {
     // the window keeps its position and only moves when sel comes within
     // SCROLL_OFF rows of an edge — one row per press, no pagination jump.
     // ALWAYS yields a window containing sel.
+    //
+    // split mode: the two pills paginate INDEPENDENTLY. the pinned pill is a
+    // fixed entity — it always shows EVERY pinned tab and never scrolls (a
+    // pinned sel therefore never moves the window). the scroll window applies
+    // only to the non-pinned tabs, indexed within that list alone. flat mode:
+    // one window over the whole list, pinned tabs marked per-row by RowView.
     func render(tabs: [Browser.Tab], sel: Int, center: Bool = true) {
-        let count = min(tabs.count, Overlay.MAX_ROWS)
+        let pinVisible = splitView
+            ? tabs.enumerated().filter { $0.element.pinned }
+                .map { (tab: $0.element, index: $0.offset) }
+            : []
+        // the list the scroll window ranges over: regular tabs only in split
+        // mode, everything in flat mode — either way as (tab, globalIndex)
+        let regular = tabs.enumerated()
+            .filter { !splitView || !$0.element.pinned }
+            .map { (tab: $0.element, index: $0.offset) }
+
+        let count = min(regular.count, Overlay.MAX_ROWS)
+        // sel's index WITHIN `regular` — nil when sel is a pinned tab (split)
+        let lsel = regular.firstIndex { $0.index == sel }
         var start = center
-            ? (tabs.isEmpty ? 0 : sel - Overlay.MAX_ROWS / 2)
+            ? (regular.isEmpty || lsel == nil ? 0 : lsel! - Overlay.MAX_ROWS / 2)
             : currentStart
         // scroll-off margin: pin SCROLL_OFF rows beyond the selection
-        if sel > start + count - 1 - Overlay.SCROLL_OFF {
-            start = sel - (count - 1 - Overlay.SCROLL_OFF)   // 3 rows below
+        if let l = lsel {
+            if l > start + count - 1 - Overlay.SCROLL_OFF {
+                start = l - (count - 1 - Overlay.SCROLL_OFF)   // 3 rows below
+            }
+            if l < start + Overlay.SCROLL_OFF {
+                start = l - Overlay.SCROLL_OFF                 // 3 rows above
+            }
         }
-        if sel < start + Overlay.SCROLL_OFF {
-            start = sel - Overlay.SCROLL_OFF                 // 3 rows above
-        }
-        start = max(0, min(start, max(0, tabs.count - count)))
-        let visible = tabs.isEmpty ? [] : Array(tabs[start..<start + count])
-
-        // split mode: pinned pill above, regular pill below. flat mode: one
-        // pill holding everything, pinned tabs marked per-row by RowView.
-        let pinVisible = splitView
-            ? visible.enumerated().filter { $0.element.pinned }
-                .map { (tab: $0.element, index: start + $0.offset) }
-            : []
-        let mainVisible = visible.enumerated()
-            .filter { !splitView || !$0.element.pinned }
-            .map { (tab: $0.element, index: start + $0.offset) }
+        start = max(0, min(start, max(0, regular.count - count)))
+        let mainVisible = regular.isEmpty ? [] : Array(regular[start..<start + count])
 
         // rebuild only when the visible tab set actually changed (pinned flags
         // AND view mode are part of the key — either changing redraws)
         let key = (splitView ? "s\u{1f}" : "f\u{1f}")
-            + visible.map { "\($0.n):\($0.pinned ? 1 : 0):\($0.audible ? 1 : 0):\($0.title)" }.joined(separator: "\u{1e}")
+            + pinVisible.map { "p\($0.index):\($0.tab.n):\($0.tab.audible ? 1 : 0):\($0.tab.title)" }.joined(separator: "\u{1e}")
+            + "\u{1d}"
+            + mainVisible.map { "m\($0.index):\($0.tab.n):\($0.tab.pinned ? 1 : 0):\($0.tab.audible ? 1 : 0):\($0.tab.title)" }.joined(separator: "\u{1e}")
         if key != lastKey {
             lastKey = key
             let pinH = Self.height(for: pinVisible.count)
@@ -225,7 +237,7 @@ final class Overlay {
             }
         }
         currentStart = start
-        currentCount = visible.count
+        currentCount = mainVisible.count
 
         // exactly one pill's highlight shows: the one holding sel
         let inPin = pinPill.placeHighlight(index: sel, animate: !center)
@@ -233,7 +245,7 @@ final class Overlay {
         if inPin { mainPill.highlight.isHidden = true }
         if inMain { pinPill.highlight.isHidden = true }
 
-        updateScrollbar(total: tabs.count, count: count)
+        updateScrollbar(total: splitView ? regular.count : tabs.count, count: count)
     }
 
     private static func height(for rows: Int) -> CGFloat {
@@ -261,12 +273,22 @@ final class Overlay {
     }
 
     // per-press fast path: slide the highlight layer. only when sel is fully
-    // interior (SCROLL_OFF margin satisfied on both edges) — anything else
-    // goes through render, which owns the window math.
+    // interior (SCROLL_OFF margin satisfied on both edges, indexed within the
+    // windowed list) — anything else goes through render, which owns the
+    // window math. a pinned sel in split view is ALWAYS interior: the pin
+    // pill is fixed and never scrolls, so it's a pure highlight slide.
     func moveHighlight(to sel: Int, tabs: [Browser.Tab]) {
-        let count = min(tabs.count, Overlay.MAX_ROWS)
-        let interior = sel >= currentStart + Overlay.SCROLL_OFF
-            && sel <= currentStart + count - 1 - Overlay.SCROLL_OFF
+        let windowed = tabs.indices.filter { !splitView || !tabs[$0].pinned }
+        guard let l = windowed.firstIndex(of: sel) else {
+            let inPin = pinPill.placeHighlight(index: sel, animate: true)
+            let inMain = mainPill.placeHighlight(index: sel, animate: true)
+            if inPin { mainPill.highlight.isHidden = true }
+            if inMain { pinPill.highlight.isHidden = true }
+            return
+        }
+        let count = min(windowed.count, Overlay.MAX_ROWS)
+        let interior = l >= currentStart + Overlay.SCROLL_OFF
+            && l <= currentStart + count - 1 - Overlay.SCROLL_OFF
         guard interior else {
             render(tabs: tabs, sel: sel, center: false)
             return
