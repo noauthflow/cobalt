@@ -1183,6 +1183,7 @@ var mcActive = false              // cached mission-control state (re-checked on
 
 func updateStrip() {
     guard !sessionLocked else { return }           // locked: notifications don't summon
+    guard tab.dragSlot == nil else { return }      // mid-drag: collapse only on release
     mcActive = missionControlActive()
     guard !mcActive else { applyVisibility(false); return }   // mission control: off the stage
     guard let c = cursorCG() else { return }
@@ -1227,6 +1228,8 @@ func setSessionLocked(_ locked: Bool) {
     sessionLocked = locked
     if locked {
         spring.stop()
+        tab.dragSlot = nil                  // a lock mid-drag kills the drag —
+                                            // otherwise dragSlot pins the glass open forever
         applyVisibility(false, animate: false)   // park instantly — no spring on the way out
         releaseAttention()                        // drop any key/focus claim
         strip.orderOut(nil)                       // gone from the lock screen entirely
@@ -1355,6 +1358,8 @@ func runDaemon() -> Never {
     // so even fast in-out is a smooth reversal, never a glitch.
     NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged, .otherMouseDragged]) { _ in
         guard !sessionLocked else { return }       // lock screen: the edge is nobody's
+        guard tab.dragSlot == nil else { return }  // mid-drag: the cursor is the knob —
+                                                   // nobody summons or collapses mid-drag
         // cmd held: the edge is yours — no window, no glass, no cursor take-over
         setCmdOverride(cmdHeld())
         if cmdOverride { return }
@@ -1432,17 +1437,27 @@ func runDaemon() -> Never {
             if locked != sessionLocked { setSessionLocked(locked) }
         }
         guard !sessionLocked else { return }       // locked: no summon, no attention, nothing
-        setCmdOverride(cmdHeld())
-        if cmdOverride { releaseAttention(); return }
-        if mcActive { applyVisibility(false); releaseAttention(); return }
+        // mid-drag: the cursor IS the knob — the glass stays on stage wherever
+        // the cursor goes; the hide decision (and cmd override, which would
+        // murder the drag mid-grip) waits for mouseUp. attention still runs,
+        // so sliding back over the glass re-keys; releaseAttention defers the
+        // key-drop to parking (pendingRelease), never mid-drag.
+        let dragging = tab.dragSlot != nil
+        if !dragging {
+            setCmdOverride(cmdHeld())
+            if cmdOverride { releaseAttention(); return }
+            if mcActive { applyVisibility(false); releaseAttention(); return }
+        }
         guard let c = cursorCG() else { return }
         let (top, bottom) = pillBandCG()
-        // summon / hide — the shared hover rule (hysteresis: dismiss only past
-        // ±HIDE_BAND, so band-edge jitter can't flap it)
-        switch hoverVisibility(xr: c.xr, y: c.y, top: top, bottom: bottom) {
-        case true:  applyVisibility(true)
-        case false: applyVisibility(false)
-        case nil:   break
+        if !dragging {
+            // summon / hide — the shared hover rule (hysteresis: dismiss only past
+            // ±HIDE_BAND, so band-edge jitter can't flap it)
+            switch hoverVisibility(xr: c.xr, y: c.y, top: top, bottom: bottom) {
+            case true:  applyVisibility(true)
+            case false: applyVisibility(false)
+            case nil:   break
+            }
         }
         // attention — cursor on the glass owns the moment
         if stripVisible, c.xr <= PILL_WIDTH, c.y >= top, c.y <= bottom {
