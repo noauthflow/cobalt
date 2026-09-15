@@ -131,6 +131,8 @@ let PILL_RADIUS: CGFloat = 17
 let TAB_TRAVEL: CGFloat = 50     // hidden slide distance (≥ pill width)
 let TAB_MARGIN: CGFloat = 6      // left slack so spring overshoot never clips
 let REVEAL_WIDTH: CGFloat = 12   // summon zone: cursor within this of the right edge
+let SUMMON_BAND: CGFloat = 26    // vertical summon band: cursor within this of the pill's
+                                 // top/bottom edge (level with the pill, with slack)
 let HIDE_MARGIN: CGFloat = 6     // cursor must drop this far left of the pill before it springs away
 let HIDE_BAND: CGFloat = 40      // vertical hysteresis: summon at ±26px, dismiss only past ±40px —
                                  // without it, 1px of hand jitter at the band edge flips the
@@ -138,6 +140,48 @@ let HIDE_BAND: CGFloat = 40      // vertical hysteresis: summon at ±26px, dismi
 // spring constants: ω ≈ 23.7 rad/s, ζ ≈ 0.68 — a crisp pop with ~5% overshoot
 let SPRING_K: CGFloat = 560
 let SPRING_C: CGFloat = 32
+
+// a 120fps chase timer: drives one CGFloat toward a target with a
+// proportional step, self-stops once it has arrived, and keeps running in
+// .common so it survives modal tracking (slider drags). it holds no state
+// of its own — the value lives where Theme says it must (single source of
+// truth), the timer only moves it. one instance per animated value.
+final class ChaseTimer {
+    private var timer: Timer?
+    private let get: () -> CGFloat
+    private let set: (CGFloat) -> Void
+    private let target: () -> CGFloat
+    private let rate: CGFloat      // fraction of the remaining distance per tick
+    private let epsilon: CGFloat   // close enough = done
+
+    init(get: @escaping () -> CGFloat, set: @escaping (CGFloat) -> Void,
+         target: @escaping () -> CGFloat, rate: CGFloat, epsilon: CGFloat) {
+        self.get = get; self.set = set
+        self.target = target; self.rate = rate; self.epsilon = epsilon
+    }
+
+    func start() {
+        guard timer == nil else { return }   // already chasing — target() moved under us
+        let t = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            let d = self.target() - self.get()
+            if abs(d) < self.epsilon {
+                self.timer?.invalidate(); self.timer = nil
+                self.set(self.target())
+            } else {
+                self.set(self.get() + d * self.rate)
+            }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
+    }
+
+    // finish instantly — the cursor takes over from the spring
+    func stop() {
+        timer?.invalidate(); timer = nil
+        set(target())
+    }
+}
 
 final class StripView: NSView {
     override var isFlipped: Bool { true }   // y counts down from the pill top
@@ -189,30 +233,48 @@ final class StripView: NSView {
     }
 
     override func resetCursorRects() {
+        // one arrow rect for the whole window — the baseline. the slider's
+        // hand is set IMPERATIVELY by position (see overSlider), never by
+        // rect: a hand rect here is event-driven and fights the spring
+        // mid-slide (the flicker), and rects can't see a cursor the glass
+        // slid under without a mouse event.
         addCursorRect(bounds, cursor: .arrow)
-        // the slider is an affordance, not a label — hand cursor over it
-        for i in 0..<Theme.slotCount where Theme.slots[i].kind == .slider {
-            addCursorRect(Theme.slot(i, in: bounds), cursor: .pointingHand)
-        }
+    }
+
+    // where is the cursor, right now, in view coords — a live query, not
+    // event history. NSEvent.mouseLocation reads the window server's current
+    // position, so it answers correctly even when the last mouse event is
+    // stale (the glass just slid under a stationary cursor).
+    private var cursorPoint: NSPoint? {
+        guard let win = window else { return nil }
+        let p = win.convertFromScreen(NSRect(origin: NSEvent.mouseLocation, size: .zero)).origin
+        return convert(p, from: nil)
+    }
+
+    // the pointing-hand decision, position-driven: over the slider slot of a
+    // PARKED glass. no tracking-area dependency — hoverSlot only updates on
+    // mouse events, and the first hover can happen with zero of those.
+    private func overSlider() -> Bool {
+        guard glassDocked, let p = cursorPoint else { return false }
+        return slotIndex(at: p).map { Theme.slots[$0].kind == .slider } ?? false
     }
 
     override func cursorUpdate(with event: NSEvent) {
-        // apps beneath push their cursors on redraw; re-win by position —
-        // the slider slot gets the hand, everything else the arrow
-        let p = convert(event.locationInWindow, from: nil)
-        if let i = slotIndex(at: p), Theme.slots[i].kind == .slider {
+        // apps beneath push their cursors on redraw; re-win by position
+        if overSlider() {
             NSCursor.pointingHand.set()
         } else {
             NSCursor.arrow.set()
         }
     }
 
-    // re-win the arrow on demand: apps beneath push their cursors when they
+    // re-win the cursor on demand: apps beneath push their cursors when they
     // REDRAW — no mouse event fires, so nothing above catches it. called from
-    // the passive cursor-defense timer in runDaemon (and the mouse monitor).
+    // the 30Hz poll and the mouse monitor, so a stationary cursor over the
+    // slider gets the hand within one tick of the glass parking.
     func reassertCursor() {
         window?.invalidateCursorRects(for: self)   // window server re-reads resetCursorRects
-        if hoverSlot != -1, Theme.slots[hoverSlot].kind == .slider {
+        if overSlider() {
             NSCursor.pointingHand.set()
         } else {
             NSCursor.arrow.set()
@@ -239,54 +301,32 @@ final class StripView: NSView {
         return nil
     }
 
-    // spring-render: Theme.sliderDisplay chases Theme.sliderValue at 120fps
-    // so a sampled hardware change arrives as one smooth glide (the bezel's
-    // own ~250ms feel), never a jump. runs only while it has distance to
-    // cover; drags bypass it and write both directly.
-    private var valueTimer: Timer?
-    private var faceTimer: Timer?
+    // spring-render: the two display values chase their targets at 120fps so
+    // a sampled hardware change arrives as one smooth glide (the bezel's own
+    // ~250ms feel), never a jump. each timer runs only while it has distance
+    // to cover; drags bypass the value spring — the cursor is the only spring
+    // that matters there.
     private var faceTarget: CGFloat = 0
+    private lazy var valueSpring = ChaseTimer(
+        get: { Theme.sliderDisplay },
+        set: { [weak self] v in Theme.sliderDisplay = v; self?.needsDisplay = true },
+        target: { Theme.sliderValue },
+        rate: 0.22, epsilon: 0.0004)
+    private lazy var faceSpring = ChaseTimer(
+        get: { Theme.sliderFace },
+        set: { [weak self] v in Theme.sliderFace = v; self?.needsDisplay = true },
+        target: { [weak self] in self?.faceTarget ?? 0 },
+        rate: 0.25, epsilon: 0.002)
 
-    // crossfade the knob face (sun ⇄ %) — same recipe as the value spring:
-    // a 120fps timer that runs only while the blend has distance to cover
+    // crossfade the knob face (sun ⇄ %) — the face spring runs only while the
+    // blend has distance to cover
     private func setFaceTarget(_ target: CGFloat) {
         faceTarget = target
-        guard faceTimer == nil else { return }
-        faceTimer = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            let d = self.faceTarget - Theme.sliderFace
-            if abs(d) < 0.002 {
-                Theme.sliderFace = self.faceTarget
-                self.faceTimer?.invalidate(); self.faceTimer = nil
-            } else {
-                Theme.sliderFace += d * 0.25
-            }
-            self.needsDisplay = true
-        }
-        RunLoop.main.add(faceTimer!, forMode: .common)
+        faceSpring.start()
     }
 
     func beginValueSpring() {
-        guard abs(Theme.sliderDisplay - Theme.sliderValue) > 0.0004 else { return }
-        guard valueTimer == nil else { return }
-        let t = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            let d = Theme.sliderValue - Theme.sliderDisplay
-            if abs(d) < 0.0004 {
-                Theme.sliderDisplay = Theme.sliderValue
-                self.valueTimer?.invalidate(); self.valueTimer = nil
-            } else {
-                Theme.sliderDisplay += d * 0.22
-            }
-            self.needsDisplay = true
-        }
-        RunLoop.main.add(t, forMode: .common)
-        valueTimer = t
-    }
-
-    private func stopValueSpring() {
-        valueTimer?.invalidate(); valueTimer = nil
-        Theme.sliderDisplay = Theme.sliderValue
+        valueSpring.start()   // no-op if already within epsilon of the hardware
     }
 
     private func updateSliderValue(at p: NSPoint) {
@@ -296,7 +336,7 @@ final class StripView: NSView {
         let v = min(1, max(0, (r.maxY - p.y) / r.height))
         Theme.sliderValue = v
         KeyboardBrightness.set(Float(v))   // the F5/F6 keys' own call path
-        stopValueSpring()                  // the cursor is the only spring that matters here
+        valueSpring.stop()                 // the cursor is the only spring that matters here
         needsDisplay = true
     }
 
@@ -611,8 +651,21 @@ enum KeyboardBrightness {
 // digits. sources are permission-free: IOKit power sources, the clock,
 // ProcessInfo low-power state.
 
-// IOKit power sources — the same thing the native battery item reads
+// IOKit power sources — the same thing the native battery item reads.
+// IOKit is not free, and every widget repaints at up to 120fps mid-spring —
+// cache the reading (nil included, desktop macs have no power source). 5s of
+// staleness is finer than the 10s widget tick that drives most repaints.
+var batteryCache: (result: (pct: Int, charging: Bool)?, stamp: CFTimeInterval)?
+
 func batteryLevel() -> (pct: Int, charging: Bool)? {
+    let now = CACurrentMediaTime()
+    if let c = batteryCache, now - c.stamp < 5 { return c.result }
+    let result = readBatteryLevel()
+    batteryCache = (result, now)   // cache hits and misses alike
+    return result
+}
+
+func readBatteryLevel() -> (pct: Int, charging: Bool)? {
     guard let blob = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
           let list = IOPSCopyPowerSourcesList(blob)?.takeRetainedValue() as? [CFTypeRef] else { return nil }
     for ps in list {
@@ -674,9 +727,10 @@ func drawSlider(in slot: NSRect) {
     // the value color held to 30%; below the knob it runs solid #75564F
     let trackRect = NSRect(x: cx - Theme.sliderTrack / 2, y: slot.minY,
                            width: Theme.sliderTrack, height: slot.height)
+    let stadium = NSBezierPath(roundedRect: trackRect, xRadius: Theme.sliderTrack / 2,
+                               yRadius: Theme.sliderTrack / 2)
     Theme.sliderFill.withAlphaComponent(0.3).setFill()
-    NSBezierPath(roundedRect: trackRect, xRadius: Theme.sliderTrack / 2,
-                 yRadius: Theme.sliderTrack / 2).fill()
+    stadium.fill()
     // active run: FLAT-top fill from the knob's center line down. a rounded
     // top here bulges up at the center while the knob's circle bulges down —
     // two opposing arcs with air at the sides (the gap). flat meets the knob
@@ -684,8 +738,7 @@ func drawSlider(in slot: NSRect) {
     // track so the stadium silhouette survives.
     if let ctx = NSGraphicsContext.current?.cgContext {
         ctx.saveGState()
-        NSBezierPath(roundedRect: trackRect, xRadius: Theme.sliderTrack / 2,
-                     yRadius: Theme.sliderTrack / 2).addClip()
+        stadium.addClip()
         Theme.sliderFill.setFill()
         NSBezierPath(rect: NSRect(x: trackRect.minX, y: hc - 1,
                                   width: trackRect.width,
@@ -709,7 +762,6 @@ func drawSlider(in slot: NSRect) {
     // the size + stroke live in KnobFace so the sun below is built from
     // the digits' own rendered metrics, by construction.
     let pct = Int((Theme.sliderValue * 100).rounded())
-    let pctFont = NSFont.tabular(KnobFace.base, .semibold)
 
     if face > 0 {
         drawText("\(pct)", font: .tabular(KnobFace.base * face, .semibold),
@@ -724,7 +776,7 @@ func drawSlider(in slot: NSRect) {
         // against — and the disc IS the cap height.
         let f = 1 - face
         let stem = KnobFace.stem
-        let cap = pctFont.capHeight
+        let cap = KnobFace.pctFont.capHeight
         let discD = cap                 // disc outer diameter == cap height
         let air   = 1.1 * stem          // disc→ray air, a shade over a stem
         let ray   = 1.4 * stem          // ray length: a stroke, not a dot
@@ -759,6 +811,8 @@ enum KnobFace {
         let wide = ("100" as NSString).size(withAttributes: [.font: NSFont.tabular(b, .semibold)]).width
         return wide > Theme.sliderHandle - 6 ? b * (Theme.sliderHandle - 6) / wide : b
     }()
+
+    static let pctFont = NSFont.tabular(base, .semibold)
 
     // the stroke width the eye actually sees on the digits: a scanline
     // through an 8× rendered '0'. SF Pro cuts curved strokes fatter than
@@ -912,14 +966,9 @@ final class SpringDriver: NSObject {
         let accel = -SPRING_K * (x - target) - SPRING_C * v
         v += accel * dt
         x += v * dt
-        var f = tab.frame
-        f.origin.x = x.rounded()               // whole pixels: no subpixel shimmer on the glass
-        tab.setFrameSize(f.size); tab.setFrameOrigin(f.origin)
-        tab.needsDisplay = true
+        setGlassX(x.rounded())                     // whole pixels: no subpixel shimmer on the glass
         if abs(x - target) < 0.25, abs(v) < 2 {
-            f.origin.x = target
-            tab.setFrameSize(f.size); tab.setFrameOrigin(f.origin)
-            tab.needsDisplay = true
+            setGlassX(target)
             stop()
             onSettle?()
             onSettle = nil
@@ -970,10 +1019,7 @@ func applyVisibility(_ desired: Bool, animate: Bool = true) {
     spring.onSettle = nil
     if desired { strip.orderFrontRegardless() }   // back on stage before the glass moves
     if !animate {
-        var g = tab.frame
-        g.origin.x = glassX(docked: desired)
-        tab.setFrameSize(g.size); tab.setFrameOrigin(g.origin)
-        tab.needsDisplay = true
+        setGlassX(glassX(docked: desired))
         if !desired { flushPendingRelease() }   // parked instantly — release now
         return
     }
@@ -992,9 +1038,13 @@ var globalCocoaTopY: CGFloat {
     NSScreen.screens.first { $0.frame.origin == NSPoint.zero }?.frame.maxY
         ?? NSScreen.screens.map { $0.frame.maxY }.max() ?? 0
 }
-func cursorXFromRight() -> CGFloat {
-    guard let loc = CGEvent(source: nil)?.location, let screen = mainScreen() else { return .infinity }
-    return screen.frame.maxX - loc.x
+
+// the cursor, in the two spaces the reveal logic cares about: distance from
+// the main screen's right edge, and global CG top-left y. nil when the event
+// source can't tell us (rare; callers treat it as "no cursor").
+func cursorCG() -> (xr: CGFloat, y: CGFloat)? {
+    guard let loc = CGEvent(source: nil)?.location, let screen = mainScreen() else { return nil }
+    return (screen.frame.maxX - loc.x, loc.y)
 }
 
 // the pill's vertical band, in CG top-left coordinates — the same space the
@@ -1005,6 +1055,20 @@ func pillBandCG() -> (top: CGFloat, bottom: CGFloat) {
     let fr = pillFrame()
     let top = globalCocoaTopY - fr.maxY
     return (top, top + fr.height)
+}
+
+// the shared hover rule — ONE source of truth for summon / hide, used by the
+// global monitor, the 30Hz poll and the workspace-notification path:
+//   true   cursor is in the summon zone (right edge, level with the pill)
+//   false  cursor is past the hide margin (x) or the hysteresis band (y)
+//   nil    inside the hysteresis band — keep whatever state we're in
+// (a hovered glass stays on stage even if a notification lands here — app
+// switch, quit, space change — the summon zone only ever decides the
+// hidden → visible transition, never "you were hovering, bye")
+func hoverVisibility(xr: CGFloat, y: CGFloat, top: CGFloat, bottom: CGFloat) -> Bool? {
+    if xr <= REVEAL_WIDTH, y >= top - SUMMON_BAND, y <= bottom + SUMMON_BAND { return true }
+    if xr > PILL_WIDTH + HIDE_MARGIN || y > bottom + HIDE_BAND || y < top - HIDE_BAND { return false }
+    return nil
 }
 
 // cmd override: while command is held, smalt gets out of the way
@@ -1091,30 +1155,26 @@ func displayID(_ screen: NSScreen) -> CGDirectDisplayID? {
     screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID
 }
 
-func mainDisplayFullscreen() -> Bool {
-    guard let screen = mainScreen(), let id = displayID(screen) else { return false }
-    let db = CGDisplayBounds(id)
+// shared CGWindowList scan: is there an on-screen window owned by `owner`
+// that covers ~all of the main display (and passes the layer predicate)?
+// the lock screen IS such a loginwindow window; mission control raises a
+// Dock-owned backdrop of the same shape (layer > 0, to skip its layer-0
+// wallpaper).
+func fullscreenWindow(owner: String, layer: ((Int) -> Bool)? = nil) -> Bool {
     guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else { return false }
+    let main = CGDisplayBounds(CGMainDisplayID())
     return list.contains { d in
-        guard (d[kCGWindowLayer as String] as? Int) == 0,
-              let b = d[kCGWindowBounds as String] as? [String: NSNumber] else { return false }
-        let w = CGRect(x: b["X"]?.doubleValue ?? 0, y: b["Y"]?.doubleValue ?? 0,
-                       width: b["Width"]?.doubleValue ?? 0, height: b["Height"]?.doubleValue ?? 0)
-        return abs(w.minX - db.minX) <= 2 && abs(w.minY - db.minY) <= 2 &&
-               w.width >= db.width - 2 && w.height >= db.height - 2
+        guard d[kCGWindowOwnerName as String] as? String == owner,
+              let b = d[kCGWindowBounds as String] as? [String: NSNumber],
+              let w = b["Width"]?.doubleValue,
+              let h = b["Height"]?.doubleValue else { return false }
+        if let layer, !layer(d[kCGWindowLayer as String] as? Int ?? 0) { return false }
+        return w >= main.width * 0.9 && h >= main.height * 0.9
     }
 }
 
 func missionControlActive() -> Bool {
-    guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else { return false }
-    let main = CGDisplayBounds(CGMainDisplayID())
-    return list.contains { d in
-        guard let owner = d[kCGWindowOwnerName as String] as? String, owner == "Dock",
-              let layer = d[kCGWindowLayer as String] as? Int, layer > 0,
-              let b = d[kCGWindowBounds as String] as? [String: NSNumber],
-              let w = b["Width"]?.doubleValue, let h = b["Height"]?.doubleValue else { return false }
-        return w >= main.width * 0.9 && h >= main.height * 0.9
-    }
+    fullscreenWindow(owner: "Dock", layer: { $0 > 0 })
 }
 
 // MARK: - evaluation
@@ -1124,20 +1184,14 @@ var mcActive = false              // cached mission-control state (re-checked on
 func updateStrip() {
     guard !sessionLocked else { return }           // locked: notifications don't summon
     mcActive = missionControlActive()
-    if mcActive {
-        applyVisibility(false)                                 // mission control: off the stage
-    } else {
-        // hover decides: visible iff the cursor is in the summon zone —
-        // within 12px of the right edge, level with the pill.
-        let (top, bottom) = pillBandCG()
-        guard let loc = CGEvent(source: nil)?.location else { return }
-        let inBand = loc.y >= top - 26 && loc.y <= bottom + 26
-        let xr = cursorXFromRight()
-        // a hovered glass stays on stage even if a notification lands here
-        // (app switch, quit, space change) — the summon zone only decides
-        // the hidden → visible transition, never "you were hovering, bye"
-        let hovered = stripVisible && xr <= PILL_WIDTH && inBand
-        applyVisibility(xr <= REVEAL_WIDTH && inBand || hovered)
+    guard !mcActive else { applyVisibility(false); return }   // mission control: off the stage
+    guard let c = cursorCG() else { return }
+    let (top, bottom) = pillBandCG()
+    // the same hover rule the monitor and poll use — see hoverVisibility
+    switch hoverVisibility(xr: c.xr, y: c.y, top: top, bottom: bottom) {
+    case true:  applyVisibility(true)
+    case false: applyVisibility(false)
+    case nil:   break
     }
 }
 
@@ -1185,14 +1239,7 @@ func setSessionLocked(_ locked: Bool) {
 // is the lock screen (or its zoom) on stage? a loginwindow-owned window
 // covering the main display — same shape as missionControlActive's Dock check
 func loginWindowOnScreen() -> Bool {
-    guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else { return false }
-    let main = CGDisplayBounds(CGMainDisplayID())
-    return list.contains { d in
-        guard let owner = d[kCGWindowOwnerName as String] as? String, owner == "loginwindow",
-              let b = d[kCGWindowBounds as String] as? [String: NSNumber],
-              let w = b["Width"]?.doubleValue, let h = b["Height"]?.doubleValue else { return false }
-        return w >= main.width * 0.9 && h >= main.height * 0.9
-    }
+    fullscreenWindow(owner: "loginwindow")
 }
 
 // MARK: - the pill (window)
@@ -1205,14 +1252,26 @@ func loginWindowOnScreen() -> Bool {
 // two places — docked (summon: instant, so the cursor lands on it at once)
 // or off-screen (hidden, after the exit spring settles).
 
-let tab: StripView = {
-    let v = StripView(frame: NSRect(origin: .zero, size: NSSize(width: PILL_WIDTH, height: PILL_HEIGHT)))
-    return v
-}()
+let tab = StripView(frame: NSRect(origin: .zero, size: NSSize(width: PILL_WIDTH, height: PILL_HEIGHT)))
 
 // where the glass sits inside the window: docked (flush at the screen edge
 // with TAB_MARGIN of overshoot slack to its left) vs hidden (past the edge)
 func glassX(docked: Bool) -> CGFloat { docked ? TAB_MARGIN : TAB_MARGIN + TAB_TRAVEL }
+
+// move the glass: origin only. the tab's size never changes, and setting it
+// anyway invalidated tracking areas (a full rebuild) on every spring tick.
+func setGlassX(_ x: CGFloat) {
+    tab.setFrameOrigin(NSPoint(x: x, y: tab.frame.origin.y))
+    tab.needsDisplay = true
+}
+
+// the glass is fully docked = the reveal spring has parked. until then the
+// cursor is arrow-only everywhere: the panel takes KEY while the cursor is
+// over the glass — mid-slide — and a hand cursor flipping in and out while
+// the glass moves under a stationary cursor reads as flicker.
+var glassDocked: Bool {
+    tab.frame.origin.x <= glassX(docked: true) + 0.5
+}
 
 // the panel is key-capable but never main. being KEY is the point: cursor
 // rects only go live while the window is key, and keystrokes flow to the
@@ -1285,9 +1344,7 @@ func runDaemon() -> Never {
     // parked at launch = ordered out: an ordered-in window with off-screen
     // content is what the lock-screen zoom reveals.
     strip.setFrame(pillFrame(), display: true)
-    var g = tab.frame
-    g.origin.x = glassX(docked: false)   // glass parked off-screen at launch
-    tab.setFrameSize(g.size); tab.setFrameOrigin(g.origin)
+    setGlassX(glassX(docked: false))   // glass parked off-screen at launch
     applyVisibility(false, animate: false)   // parked = click-through at the edge → window OUT
 
     // the summon. a global mouse monitor — not an event tap — so there is
@@ -1302,26 +1359,21 @@ func runDaemon() -> Never {
         setCmdOverride(cmdHeld())
         if cmdOverride { return }
         let (top, bottom) = pillBandCG()
-        guard let loc = CGEvent(source: nil)?.location else { return }
-        let y = loc.y
-        let xr = cursorXFromRight()
-        // cursor defense: while the cursor is over smalt's window (the tab
-        // band, at the edge), smalt owns the cursor — apps underneath
-        // re-assert their I-beam/resize cursors on redraw, so re-win it
-        // on every move. arrow regardless of modifier flags — cmd never
-        // changes anything here. one NSCursor.set, no tap, no permissions.
+        guard let c = cursorCG() else { return }
         // cursor defense, active side: while the cursor is over the glass,
         // smalt owns the cursor — apps underneath re-assert their I-beam/
-        // resize cursors, so re-win on every move. (the old check, xr <= 0,
+        // resize cursors on redraw, so re-win it on every move. arrow
+        // regardless of modifier flags — cmd never changes anything here.
+        // one NSCursor.set, no tap, no permissions. (the old check, xr <= 0,
         // meant "cursor past the screen edge" — it almost never fired, which
         // is why the I-beam kept leaking through.)
-        if stripVisible, xr <= PILL_WIDTH, y >= top, y <= bottom {
+        if stripVisible, c.xr <= PILL_WIDTH, c.y >= top, c.y <= bottom {
             tab.reassertCursor()
         }
-        if xr <= REVEAL_WIDTH, y >= top - 26, y <= bottom + 26 {
-            applyVisibility(true)
-        } else if xr > PILL_WIDTH + HIDE_MARGIN || y > bottom + HIDE_BAND || y < top - HIDE_BAND {
-            applyVisibility(false)
+        switch hoverVisibility(xr: c.xr, y: c.y, top: top, bottom: bottom) {
+        case true:  applyVisibility(true)
+        case false: applyVisibility(false)
+        case nil:   break
         }
     }
 
@@ -1349,8 +1401,11 @@ func runDaemon() -> Never {
     }
 
     // widgets tick — the clock is minute-grade, a 10s repaint is plenty
-    // (and cheap: the window only repaints on demand)
+    // (and cheap: the window only repaints on demand). hidden glass doesn't
+    // repaint at all — the spring marks needsDisplay every frame on the way
+    // out anyway, so the reveal is never stale.
     Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { _ in
+        guard stripVisible else { return }
         strip.contentView?.needsDisplay = true
     }
 
@@ -1380,19 +1435,17 @@ func runDaemon() -> Never {
         setCmdOverride(cmdHeld())
         if cmdOverride { releaseAttention(); return }
         if mcActive { applyVisibility(false); releaseAttention(); return }
-        guard let loc = CGEvent(source: nil)?.location else { return }
+        guard let c = cursorCG() else { return }
         let (top, bottom) = pillBandCG()
-        let y = loc.y
-        let xr = cursorXFromRight()
-        // summon / hide — same hysteresis as the monitor (and wider on y:
-        // dismiss only past ±HIDE_BAND, so band-edge jitter can't flap it)
-        if xr <= REVEAL_WIDTH, y >= top - 26, y <= bottom + 26 {
-            applyVisibility(true)
-        } else if xr > PILL_WIDTH + HIDE_MARGIN || y > bottom + HIDE_BAND || y < top - HIDE_BAND {
-            applyVisibility(false)
+        // summon / hide — the shared hover rule (hysteresis: dismiss only past
+        // ±HIDE_BAND, so band-edge jitter can't flap it)
+        switch hoverVisibility(xr: c.xr, y: c.y, top: top, bottom: bottom) {
+        case true:  applyVisibility(true)
+        case false: applyVisibility(false)
+        case nil:   break
         }
         // attention — cursor on the glass owns the moment
-        if stripVisible, xr <= PILL_WIDTH, y >= top, y <= bottom {
+        if stripVisible, c.xr <= PILL_WIDTH, c.y >= top, c.y <= bottom {
             takeAttention()
             tab.reassertCursor()           // belt + suspenders during the activation handoff
         } else {
