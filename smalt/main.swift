@@ -140,6 +140,14 @@ let HIDE_BAND: CGFloat = 40      // vertical hysteresis: summon at ±26px, dismi
 // spring constants: ω ≈ 23.7 rad/s, ζ ≈ 0.68 — a crisp pop with ~5% overshoot
 let SPRING_K: CGFloat = 560
 let SPRING_C: CGFloat = 32
+// entrance head start, pt/s: a spring launched from rest spends its first
+// ~50ms covering ~18px — all of it in the off-screen slack — so the visible
+// glass TRICKLES out of the edge before the spring reaches speed. the kick
+// skips the dead zone: the glass crosses the screen edge already moving.
+// (sign handled at the call site; ~55% of this spring's natural peak
+// velocity of ~550pt/s at full travel — enough to read, not enough to
+// shrink the overshoot to nothing.)
+let SUMMON_KICK: CGFloat = 300
 
 // a 120fps chase timer: drives one CGFloat toward a target with a
 // proportional step, self-stops once it has arrived, and keeps running in
@@ -923,11 +931,11 @@ final class SpringDriver: NSObject {
 
     var onSettle: (() -> Void)?
 
-    func chase(_ targetX: CGFloat) {
+    func chase(_ targetX: CGFloat, initialVelocity: CGFloat = 0) {
         target = targetX
         guard !running else { return }             // already chasing — just retargeted
         x = tab.frame.origin.x
-        v = 0
+        v = initialVelocity
         last = 0
         if #available(macOS 14.0, *), let screen = mainScreen() {
             let dl = screen.displayLink(target: self, selector: #selector(tick(_:)))
@@ -1023,7 +1031,8 @@ func applyVisibility(_ desired: Bool, animate: Bool = true) {
         if !desired { flushPendingRelease() }   // parked instantly — release now
         return
     }
-    spring.chase(glassX(docked: desired))
+    spring.chase(glassX(docked: desired),
+                 initialVelocity: desired ? -SUMMON_KICK : 0)   // entrance kicks toward the dock; exit starts from rest
     if !desired { spring.onSettle = { flushPendingRelease() } }   // release after the exit spring lands
 }
 
