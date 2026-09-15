@@ -91,8 +91,10 @@ enum Theme {
     // slider — material design 3's shape language in smalt's skin: 4dp
     // track, round handle. vertical, one CELL tall... spans 5 below the
     // time. v0 drew a fixed value; the live hardware wiring is further down.
-    static let sliderTrack: CGFloat = 4
+    static let sliderTrack: CGFloat = 24   // = sliderHandle: knob and track are the same width
     static let sliderHandle: CGFloat = 24
+    static let sliderFill = NSColor(srgbRed: 0x75/255.0, green: 0x56/255.0, blue: 0x4F/255.0, alpha: 1)  // #75564F value run
+    static let knob      = NSColor(srgbRed: 0x3A/255.0, green: 0x2D/255.0, blue: 0x27/255.0, alpha: 1)  // #3A2D27 knob bg
     static var sliderValue: CGFloat = 0.5    // the hardware's current level (sampled)
     static var sliderDisplay: CGFloat = 0.5  // what the handle draws — springs toward sliderValue
     static var sliderFace: CGFloat = 0       // knob face crossfade: 0 = sun, 1 = %
@@ -188,10 +190,21 @@ final class StripView: NSView {
 
     override func resetCursorRects() {
         addCursorRect(bounds, cursor: .arrow)
+        // the slider is an affordance, not a label — hand cursor over it
+        for i in 0..<Theme.slotCount where Theme.slots[i].kind == .slider {
+            addCursorRect(Theme.slot(i, in: bounds), cursor: .pointingHand)
+        }
     }
 
     override func cursorUpdate(with event: NSEvent) {
-        NSCursor.arrow.set()
+        // apps beneath push their cursors on redraw; re-win by position —
+        // the slider slot gets the hand, everything else the arrow
+        let p = convert(event.locationInWindow, from: nil)
+        if let i = slotIndex(at: p), Theme.slots[i].kind == .slider {
+            NSCursor.pointingHand.set()
+        } else {
+            NSCursor.arrow.set()
+        }
     }
 
     // re-win the arrow on demand: apps beneath push their cursors when they
@@ -199,7 +212,11 @@ final class StripView: NSView {
     // the passive cursor-defense timer in runDaemon (and the mouse monitor).
     func reassertCursor() {
         window?.invalidateCursorRects(for: self)   // window server re-reads resetCursorRects
-        NSCursor.arrow.set()
+        if hoverSlot != -1, Theme.slots[hoverSlot].kind == .slider {
+            NSCursor.pointingHand.set()
+        } else {
+            NSCursor.arrow.set()
+        }
     }
 
     override func mouseEntered(with event: NSEvent) {
@@ -242,7 +259,7 @@ final class StripView: NSView {
                 Theme.sliderFace = self.faceTarget
                 self.faceTimer?.invalidate(); self.faceTimer = nil
             } else {
-                Theme.sliderFace += d * 0.2
+                Theme.sliderFace += d * 0.25
             }
             self.needsDisplay = true
         }
@@ -297,15 +314,8 @@ final class StripView: NSView {
     }
 
     override func mouseUp(with event: NSEvent) {
-        if dragSlot != nil {
-            // keep the % on screen a beat after release, then fade back to
-            // the bulb (the async redraw is what actually flips it back)
-            sliderValueUntil = Date().addingTimeInterval(1.5)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { [weak self] in
-                self?.setFaceTarget(0)
-            }
-        }
         dragSlot = nil
+        setFaceTarget(0)   // back to the sun the instant you release — no debounce
     }
 
     // the glass: #FAF6F3 — the caelestia tab shape: rounded on the left,
@@ -330,8 +340,10 @@ final class StripView: NSView {
             }
 
             // hover wash: a soft ink tint filling the whole slot, so the
-            // slot itself is the hit target — same fixed grid, nothing moves
-            if i == hoverSlot {
+            // slot itself is the hit target — same fixed grid, nothing moves.
+            // the slider opts out: its dark knob is feedback enough, and the
+            // wash over the thick track just made mud
+            if i == hoverSlot && Theme.slots[i].kind != .slider {
                 Theme.ink.withAlphaComponent(0.12).setFill()
                 NSBezierPath(roundedRect: r.insetBy(dx: 1, dy: 1),
                              xRadius: 5, yRadius: 5).fill()
@@ -376,9 +388,9 @@ enum SVGPath {
     static let calendar = "M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 0 1 2.25-2.25h13.5A2.25 2.25 0 0 1 21 7.5v11.25m-18 0A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75m-18 0v-7.5A2.25 2.25 0 0 1 5.25 9h13.5A2.25 2.25 0 0 1 21 11.25v7.5m-9-6h.008v.008H12v-.008ZM12 15h.008v.008H12V15Zm0 2.25h.008v.008H12v-.008ZM9.75 15h.008v.008H9.75V15Zm0 2.25h.008v.008H9.75v-.008ZM7.5 15h.008v.008H7.5V15Zm0 2.25h.008v.008H7.5v-.008Zm6.75-4.5h.008v.008h-.008v-.008Zm0 2.25h.008v.008h-.008V15Zm0 2.25h.008v.008h-.008v-.008Zm2.25-4.5h.008v.008H16.5v-.008Zm0 2.25h.008v.008H16.5V15Z"
     // heroicons "battery" (outline)
     static let battery = "M21 10.5h.375c.621 0 1.125.504 1.125 1.125v2.25c0 .621-.504 1.125-1.125 1.125H21M3.75 18h15A2.25 2.25 0 0 0 21 15.75v-6a2.25 2.25 0 0 0-2.25-2.25h-15A2.25 2.25 0 0 0 1.5 9.75v6A2.25 2.25 0 0 0 3.75 18Z"
-    // the slider's idle voice: a Phosphor "sun" (256 grid, FILL glyph —
-    // not heroicon stroke language; drawn filled, see drawSlider)
-    static let sun = "M120,40V16a8,8,0,0,1,16,0V40a8,8,0,0,1-16,0Zm72,88a64,64,0,1,1-64-64A64.07,64.07,0,0,1,192,128Zm-16,0a48,48,0,1,0-48,48A48.05,48.05,0,0,0,176,128ZM58.34,69.66A8,8,0,0,0,69.66,58.34l-16-16A8,8,0,0,0,42.34,53.66Zm0,116.68-16,16a8,8,0,0,0,11.32,11.32l16-16a8,8,0,0,0-11.32-11.32ZM192,72a8,8,0,0,0,5.66-2.34l16-16a8,8,0,0,0-11.32-11.32l-16,16A8,8,0,0,0,192,72Zm5.66,114.34a8,8,0,0,0-11.32,11.32l16,16a8,8,0,0,0,11.32-11.32ZM48,128a8,8,0,0,0-8-8H16a8,8,0,0,0,0,16H40A8,8,0,0,0,48,128Zm80,80a8,8,0,0,0-8,8v24a8,8,0,0,0,16,0V216A8,8,0,0,0,128,208Zm112-88H216a8,8,0,0,0,0,16h24a8,8,0,0,0,0-16Z"
+    // the slider's idle sun is NOT a borrowed glyph — it's generated in
+    // drawSlider from the knob digits' own font metrics (stroke == stems,
+    // disc == cap height), so icon and number can never drift apart.
 
     // svg path `d` → CGPath. just enough of the spec for icon path data:
     // M m L l H h V v C c S s Q q T t A a Z, implicit repeats, and the
@@ -647,83 +659,104 @@ func drawClock(_ component: Calendar.Component, in slot: NSRect) {
 // (4dp track, round handle) drawn with CG, but inked
 // in the palette instead of M3's. one CELL slot below the time. v0 draws
 // the live keyboard backlight (CoreBrightness); drag writes straight to it.
-// linger: after release the % stays on screen this long before the bulb
-// returns — the value should outlive the gesture by a beat, not vanish
-var sliderValueUntil = Date.distantPast
-
 func drawSlider(in slot: NSRect) {
     let v = max(0, min(1, Theme.sliderDisplay))
     let cx = slot.midX
-    let stroke = Theme.stroke * Theme.iconSize / 24   // the icons' on-screen stroke, 1.5 grid units at scale
-
-    // the knob is the readout: bulb glyph at rest, live % while interacting
-    // (plus a beat of linger — a value that vanishes at mouse-up is unread).
-    // ONE size, always — the knob never changes under the cursor.
     let knobSize = Theme.sliderHandle
 
     // handle center travel: v=0 parks at the bottom, v=1 at the top —
     // up means more, matching updateSliderValue's drag mapping
-    let yBottom = slot.maxY - Theme.sliderHandle / 2
-    let yTop = slot.minY + Theme.sliderHandle / 2
+    let yBottom = slot.maxY - knobSize / 2
+    let yTop = slot.minY + knobSize / 2
     let hc = yBottom + (yTop - yBottom) * v
 
-    // track: one rounded 4pt bar, full slot height (M3's inactive container,
-    // here ink at 20%)
+    // track: one thick rounded bar the full slot height. the quiet run is
+    // the value color held to 30%; below the knob it runs solid #75564F
     let trackRect = NSRect(x: cx - Theme.sliderTrack / 2, y: slot.minY,
                            width: Theme.sliderTrack, height: slot.height)
-    Theme.ink.withAlphaComponent(0.2).setFill()
+    Theme.sliderFill.withAlphaComponent(0.3).setFill()
     NSBezierPath(roundedRect: trackRect, xRadius: Theme.sliderTrack / 2,
                  yRadius: Theme.sliderTrack / 2).fill()
-
-    // active run: handle center → bottom (M3 primary, here ink-deep) —
-    // the fill sits UNDER the handle, so value reads bottom-up
-    var active = trackRect
-    active.origin.y = hc
-    active.size.height = slot.maxY - hc
-    Theme.inkDeep.setFill()
-    NSBezierPath(roundedRect: active, xRadius: Theme.sliderTrack / 2,
-                 yRadius: Theme.sliderTrack / 2).fill()
-
-    // knob: round, glass fill + ink-deep stroke at the icon weight —
-    // M3's primary handle reading as part of the same ink family
-    let handle = NSRect(x: cx - knobSize / 2, y: hc - knobSize / 2,
-                        width: knobSize, height: knobSize)
-    let hp = NSBezierPath(ovalIn: handle)
-    Theme.glass.setFill()
-    hp.fill()
-    Theme.inkDeep.setStroke()
-    hp.lineWidth = stroke
-    hp.stroke()
-
-    // the knob's face: sun and % crossfaded by Theme.sliderFace — both
-    // drawn at their alphas, so the swap is a blend, never a flip
-    let face = max(0, min(1, Theme.sliderFace))
-
-    if face < 1 {
-        // the sun is a fill glyph on a 256 grid: scale it into the knob
-        // face and fill. (vertically symmetric, so the flipped-context
-        // mirror is harmless)
-        let sunSize: CGFloat = 14
-        let s = sunSize / 256
-        let ctx = NSGraphicsContext.current!.cgContext
+    // active run: FLAT-top fill from the knob's center line down. a rounded
+    // top here bulges up at the center while the knob's circle bulges down —
+    // two opposing arcs with air at the sides (the gap). flat meets the knob
+    // exactly; 1px of overlap kills the antialiasing seam. clipped to the
+    // track so the stadium silhouette survives.
+    if let ctx = NSGraphicsContext.current?.cgContext {
         ctx.saveGState()
-        ctx.translateBy(x: handle.minX + (handle.width - sunSize) / 2,
-                        y: handle.minY + (handle.height - sunSize) / 2)
-        ctx.scaleBy(x: s, y: s)
-        Theme.inkDeep.withAlphaComponent(1 - face).setFill()
-        ctx.addPath(SVGPath.cgPath(SVGPath.sun))
-        ctx.fillPath()
+        NSBezierPath(roundedRect: trackRect, xRadius: Theme.sliderTrack / 2,
+                     yRadius: Theme.sliderTrack / 2).addClip()
+        Theme.sliderFill.setFill()
+        NSBezierPath(rect: NSRect(x: trackRect.minX, y: hc - 1,
+                                  width: trackRect.width,
+                                  height: trackRect.maxY - hc + 1)).fill()
         ctx.restoreGState()
     }
 
+    // knob: solid dark disc — the fill IS the weight, no stroke
+    let handle = NSRect(x: cx - knobSize / 2, y: hc - knobSize / 2,
+                        width: knobSize, height: knobSize)
+    Theme.knob.setFill()
+    NSBezierPath(ovalIn: handle).fill()
+
+    // the face: implode/explode — the outgoing glyph collapses into the
+    // knob's center while the incoming one grows out of it. scale carries
+    // the motion; alpha only cleans up the sub-pixel ends.
+    let face = max(0, min(1, Theme.sliderFace))
+    let edgeAlpha: (CGFloat) -> CGFloat = { min(1, $0 * 4) }
+
+    // the % — tabular semibold, shrink-to-fit like the battery's "100".
+    // computed once up front: the sun below is BUILT from this font's
+    // metrics, so both knob faces share DNA by construction.
+    let pct = Int((Theme.sliderValue * 100).rounded())
+    var base: CGFloat = 12
+    let wide = ("100" as NSString).size(withAttributes: [.font: NSFont.tabular(base, .semibold)]).width
+    if wide > knobSize - 6 { base *= (knobSize - 6) / wide }
+    let pctFont = NSFont.tabular(base, .semibold)
+
     if face > 0 {
-        // tabular %, shrink-to-fit like the battery's "100"
-        let pct = Int((Theme.sliderValue * 100).rounded())
-        var size: CGFloat = 12
-        let wide = ("100" as NSString).size(withAttributes: [.font: NSFont.tabular(size, .semibold)]).width
-        if wide > knobSize - 6 { size *= (knobSize - 6) / wide }
-        drawText("\(pct)", font: .tabular(size, .semibold),
-                 color: Theme.inkDeep.withAlphaComponent(face), in: handle)
+        drawText("\(pct)", font: .tabular(base * face, .semibold),
+                 color: Theme.glass.withAlphaComponent(edgeAlpha(face)), in: handle)
+    }
+
+    if face < 1 {
+        // the sun, generated from the digits' own metrics — not a borrowed
+        // glyph. the old Phosphor fill path put 1.125pt strokes next to the
+        // digits' 1.24pt stems and a 9pt disc over a 7.16pt cap — close on
+        // paper, wrong in kind: no constant keeps an imported glyph's fixed
+        // 16/256 ratios aligned to a live font. here the stroke IS the
+        // measured stem width and the disc IS the cap height, so the icon
+        // and the number it swaps with are cut from the same typeface.
+        let f = 1 - face
+        // stem width, measured not guessed: the 'l' glyph's ink is a bare
+        // SF Pro stem — the same number the % renders its strokes with
+        let stem = CTLineGetBoundsWithOptions(
+            CTLineCreateWithAttributedString(NSAttributedString(
+                string: "l", attributes: [.font: pctFont])),
+            .useGlyphPathBounds).width
+        let cap = pctFont.capHeight
+        let discD = cap                 // disc outer diameter == cap height
+        let air   = 1.1 * stem          // disc→ray air, a shade over a stem
+        let ray   = 1.4 * stem          // ray length: a stroke, not a dot
+        let ctx = NSGraphicsContext.current!.cgContext
+        ctx.saveGState()
+        ctx.translateBy(x: handle.midX, y: handle.midY)
+        ctx.scaleBy(x: f, y: f)         // implode/explode carries the crossfade
+        ctx.setLineWidth(stem)
+        ctx.setLineCap(.round)
+        Theme.glass.withAlphaComponent(edgeAlpha(f)).setStroke()
+        // ring: stroke is centered on the path, so radius = disc outer − stem/2
+        ctx.addArc(center: .zero, radius: discD / 2 - stem / 2,
+                   startAngle: 0, endAngle: 2 * .pi, clockwise: false)
+        // eight rays, round caps — the pill's one stroke language, everywhere
+        for i in 0..<8 {
+            let a = CGFloat(i) * .pi / 4
+            let c = cos(a), s = sin(a)
+            ctx.move(to: CGPoint(x: c * (discD / 2 + air), y: s * (discD / 2 + air)))
+            ctx.addLine(to: CGPoint(x: c * (discD / 2 + air + ray), y: s * (discD / 2 + air + ray)))
+        }
+        ctx.strokePath()
+        ctx.restoreGState()
     }
 }
 
