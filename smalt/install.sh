@@ -8,12 +8,16 @@ cd "$(dirname "$0")"
 NAME="smalt"
 LABEL="dev.cobalt.smalt"
 BIN_LOCAL="$HOME/.local/bin/$NAME"
+ASSET_DIR="$HOME/.local/share/$NAME"
+SVG_ASSETS=(battery-27 calendar-today headphones bluetooth mic Night-Day)
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 GUI="gui/$(id -u)"
 
 if [[ "${1:-}" == "uninstall" ]]; then
   launchctl bootout "$GUI/$LABEL" 2>/dev/null || true
   rm -f "$PLIST" "$BIN_LOCAL"
+  for asset in "${SVG_ASSETS[@]}"; do rm -f "$ASSET_DIR/$asset.svg"; done
+  rmdir "$ASSET_DIR" 2>/dev/null || true
   echo "uninstalled: agent stopped, plist + $BIN_LOCAL removed"
   exit 0
 fi
@@ -32,6 +36,8 @@ fi
 
 echo "building (swiftc)"
 mkdir -p "$HOME/.local/bin"
+mkdir -p "$ASSET_DIR"
+for asset in "${SVG_ASSETS[@]}"; do cp "icons/$asset.svg" "$ASSET_DIR/"; done
 # build straight to the install target — nothing lands in the repo folder
 swiftc -O -o "$BIN_LOCAL" main.swift -framework AppKit -framework QuartzCore -F /System/Library/PrivateFrameworks -framework CoreBrightness
 codesign --force --sign "$IDENTITY" "$BIN_LOCAL"

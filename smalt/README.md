@@ -16,17 +16,18 @@ type. nothing is hand-placed:
   `#3D3829` (the darker on-palette ink, battery percentage), LPM yellow.
 - **grid** — one uniform `CELL × CELL` slot per widget (`cell 28 / gap 8 /
   pad 11`); the pill is exactly its grid: `pad + 4 slots + gaps + pad`.
-- **icons** — real heroicons, drawn on heroicons' own 24×24 grid at 1.5
-  stroke, scaled to `iconSize` (20pt) so the stroke (1.25pt) scales with the
-  glyph and can never drift from it.
+- **icons** — Material Design 3 SVG assets loaded through one AppKit renderer
+  on their own 24×24 grid, scaled to `iconSize` so every glyph keeps its
+  optical balance — one uniform scale, no per-icon tuning.
 - **type** — SF Pro tabular digits at medium, sized so the stems sit at the
   icon stroke weight. text is centered by glyph ink (CoreText), not line
   height — line-height centering is what leaves digits riding high.
 - **slots** — a stack (`Theme.slots`) where each widget claims one or more
   cells (`span`) — a span of N cells is one continuous region with no gaps
   inside; the gap only separates widgets. battery / calendar / hour /
-  minute each take 1, the slider takes 5. containers, hit-testing and the
-  debug grid all derive from the list.
+  minute / headphones / bluetooth / microphone each take 1, the slider
+  takes 5. containers, hit-testing and the debug grid all derive from the
+  list.
 
 ## how it works
 
@@ -99,9 +100,9 @@ anyway, so any permission a later version earns survives rebuilds.)
   `PILL_RADIUS`, `REVEAL_WIDTH` (12px), `HIDE_MARGIN` (6px) in main.swift
 - the slider below the time is Material Design 3's shape language (4dp
   track, round handle) drawn with CG in the palette; the knob is the
-  readout — a Phosphor sun glyph at rest, swelling to a live percentage
+  readout — the supplied Night-Day SVG at rest, swelling to a live percentage
   (tabular semibold, shrink-to-fit) while you drag, lingering ~1.5s after
-  release, then back to the bulb;
+  release, then back to the icon;
   it is live — press anywhere in its 5-cell region and drag, and the real
   keyboard backlight follows. it drives the same `KeyboardBrightnessClient`
   (private `CoreBrightness` framework) that the F5/F6 keys use — value

@@ -1,11 +1,11 @@
 #!/bin/bash
-# vitallium — living wallpaper daemon: build, sign, install to ~/.local/bin, register launchd agent
+# erythrite — living wallpaper daemon: build, sign, install to ~/.local/bin, register launchd agent
 #   ./install.sh            build + install + start
 #   ./install.sh uninstall  stop agent, remove plist + binary (config + video stay)
 set -euo pipefail
 cd "$(dirname "$0")"
 
-NAME="vitallium"
+NAME="erythrite"
 LABEL="dev.cobalt.$NAME"
 BIN_LOCAL="$HOME/.local/bin/$NAME"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"

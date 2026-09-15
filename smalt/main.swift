@@ -19,8 +19,9 @@ import IOKit.ps
 //   the spring retargets mid-flight, so fast in-out just reverses it
 //   smoothly — no completion-handler races, no flicker.
 //
-//   the pill shows four widgets on one grid, each in its own fixed slot:
-//   battery · calendar · hour · minute.
+//   the pill shows six widgets on one grid, each in its own fixed slot:
+//   battery · calendar · hour · minute · headphones · bluetooth · microphone
+//   (the span-5 brightness slider rides below the stack)
 //   mission control    off the stage — it's not part of the expose grid
 //
 // zero permissions: the reveal is a global mouse monitor, not an event
@@ -29,8 +30,8 @@ import IOKit.ps
 // MARK: - the design system
 //
 // palette + grid + type — the ONLY place visual constants exist. every
-// widget is a real heroicon glyph (or type) optically centered inside one
-// uniform CELL × CELL slot; the pill is exactly its grid, nothing
+// SVG icons and type are optically centered
+// inside one uniform CELL × CELL slot; the pill is exactly its grid, nothing
 // hand-placed anywhere.
 
 enum Theme {
@@ -54,7 +55,7 @@ enum Theme {
     // continuous 5-cell region — cells inside a span have no gap between
     // them; the gap only separates widgets.
     enum Kind {
-        case battery, calendar, hour, minute, slider
+        case battery27, calendar, hour, minute, slider, headphones, bluetooth, microphone
     }
     struct SlotDef {
         let kind: Kind
@@ -62,21 +63,20 @@ enum Theme {
         init(_ kind: Kind, span: Int = 1) { self.kind = kind; self.span = span }
     }
     static let slots: [SlotDef] = [
-        .init(.battery),
+        .init(.battery27),
         .init(.calendar),
         .init(.hour),
         .init(.minute),
+        .init(.headphones),
+        .init(.bluetooth),
+        .init(.microphone),
         .init(.slider, span: 5),
     ]
     static var slotCount: Int { slots.count }
 
-    // icons — heroicons, verbatim svg paths on their 24×24 grid at their
-    // authored 1.5 stroke. ONE uniform scale for every glyph: the grid is
-    // the point size. no per-glyph normalization — heroicons balance their
-    // set optically on the shared grid (the battery is wide-and-short on
-    // purpose); rescaling glyphs individually breaks that tuning.
+    // SVG icons use one shared 24 grid and one uniform scale. AppKit loads
+    // the assets; SVGIcon caches them and draws them in these slots.
     static let iconSize: CGFloat = 30       // grid 24 → 30pt, all icons
-    static let stroke: CGFloat = 1.5        // heroicons' authored stroke, in grid units (= pt at this scale)
 
     // grid debug: stroke every slot + the padding bounds so the layout is
     // visible. red = widget slots, blue = where the padding ends. flip to
@@ -86,7 +86,7 @@ enum Theme {
     // type — SF Pro tabular digits at a weight whose stems sit at the icon
     // stroke weight (medium at 15pt ≈ 1.2pt vs 1.25pt strokes)
     static let typeSize: CGFloat = 19     // clock digits
-    static let pctSize: CGFloat = 8       // battery percentage (6.5 for "100")
+    static let dateSize: CGFloat = 12     // sized for the calendar's number area
 
     // slider — material design 3's shape language in smalt's skin: 4dp
     // track, round handle. vertical, one CELL tall... spans 5 below the
@@ -97,7 +97,7 @@ enum Theme {
     static let knob      = NSColor(srgbRed: 0x3A/255.0, green: 0x2D/255.0, blue: 0x27/255.0, alpha: 1)  // #3A2D27 knob bg
     static var sliderValue: CGFloat = 0.5    // the hardware's current level (sampled)
     static var sliderDisplay: CGFloat = 0.5  // what the handle draws — springs toward sliderValue
-    static var sliderFace: CGFloat = 0       // knob face crossfade: 0 = sun, 1 = %
+    static var sliderFace: CGFloat = 0       // knob face crossfade: 0 = Night-Day, 1 = %
 
     // the pill is exactly its grid — derived from the slot stack, never hand-counted
     static var contentHeight: CGFloat {
@@ -326,7 +326,7 @@ final class StripView: NSView {
         target: { [weak self] in self?.faceTarget ?? 0 },
         rate: 0.25, epsilon: 0.002)
 
-    // crossfade the knob face (sun ⇄ %) — the face spring runs only while the
+    // crossfade the knob face (Night-Day ⇄ %) — the face spring runs only while the
     // blend has distance to cover
     private func setFaceTarget(_ target: CGFloat) {
         faceTarget = target
@@ -363,7 +363,7 @@ final class StripView: NSView {
 
     override func mouseUp(with event: NSEvent) {
         dragSlot = nil
-        setFaceTarget(0)   // back to the sun the instant you release — no debounce
+        setFaceTarget(0)   // back to the Night-Day icon on release — no debounce
     }
 
     // the glass: #FAF6F3 — the caelestia tab shape: rounded on the left,
@@ -380,8 +380,11 @@ final class StripView: NSView {
         for i in 0..<Theme.slotCount {
             let r = Theme.slot(i, in: bounds)
             switch Theme.slots[i].kind {
-            case .battery: drawBattery(in: r)
+            case .battery27: drawBattery(in: r)
             case .calendar: drawCalendar(in: r)
+            case .headphones: drawHeadphones(in: r)
+            case .bluetooth: drawBluetooth(in: r)
+            case .microphone: drawMicrophone(in: r)
             case .slider: drawSlider(in: r)
             case .hour: drawClock(.hour, in: r)
             case .minute: drawClock(.minute, in: r)
@@ -417,193 +420,71 @@ final class StripView: NSView {
 // MARK: - drawing primitives
 //
 // two rules keep everything on its spot:
-//   · glyphs draw on the 24×24 heroicon grid, centered in their slot
+//   · SVG icons draw on their shared 24×24 grid, centered in each slot
 //   · text draws centered by INK (glyph bounds), not line height —
 //     line-height centering leaves digits riding high, which is exactly
 //     the "percentage isn't in the middle" bug
 
-// MARK: - heroicons, verbatim
-//
-// the glyphs ARE the heroicons svg path data, copied unchanged from
-// heroicons.com (24×24 grid, stroke-width 1.5, round caps + joins). a tiny
-// parser turns each `d` string into a CGPath, so when heroicons updates an
-// icon you paste in its new `d` — no hand-transcription to drift.
-// (no WebKit: a webview is a whole rendering process for two strokes; the
-// parser renders the same vectors synchronously, in-process.)
-
-enum SVGPath {
-    // heroicons "calendar-days" (outline) — the frame + date dots
-    static let calendar = "M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 0 1 2.25-2.25h13.5A2.25 2.25 0 0 1 21 7.5v11.25m-18 0A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75m-18 0v-7.5A2.25 2.25 0 0 1 5.25 9h13.5A2.25 2.25 0 0 1 21 11.25v7.5m-9-6h.008v.008H12v-.008ZM12 15h.008v.008H12V15Zm0 2.25h.008v.008H12v-.008ZM9.75 15h.008v.008H9.75V15Zm0 2.25h.008v.008H9.75v-.008ZM7.5 15h.008v.008H7.5V15Zm0 2.25h.008v.008H7.5v-.008Zm6.75-4.5h.008v.008h-.008v-.008Zm0 2.25h.008v.008h-.008V15Zm0 2.25h.008v.008h-.008v-.008Zm2.25-4.5h.008v.008H16.5v-.008Zm0 2.25h.008v.008H16.5V15Z"
-    // heroicons "battery" (outline)
-    static let battery = "M21 10.5h.375c.621 0 1.125.504 1.125 1.125v2.25c0 .621-.504 1.125-1.125 1.125H21M3.75 18h15A2.25 2.25 0 0 0 21 15.75v-6a2.25 2.25 0 0 0-2.25-2.25h-15A2.25 2.25 0 0 0 1.5 9.75v6A2.25 2.25 0 0 0 3.75 18Z"
-    // the slider's idle sun is NOT a borrowed glyph — it's generated in
-    // drawSlider from the knob digits' own font metrics (stroke == stems,
-    // disc == cap height), so icon and number can never drift apart.
-
-    // svg path `d` → CGPath. just enough of the spec for icon path data:
-    // M m L l H h V v C c S s Q q T t A a Z, implicit repeats, and the
-    // packed-number forms svg allows ("2.25-2.25", "1.125.504").
-    static func cgPath(_ d: String) -> CGPath {
-        let p = CGMutablePath()
-        var rest = Substring(d)
-        var cmd: Character = " "
-        var cur: CGPoint = .zero        // current point
-        var sub: CGPoint = .zero        // subpath start (Z returns here)
-        var lastC: CGPoint = .zero      // previous cubic control (S/s)
-        var lastQ: CGPoint = .zero      // previous quad control (T/t)
-
-        func num() -> CGFloat {
-            while rest.first == " " || rest.first == "," { rest = rest.dropFirst() }
-            var t = ""
-            var dot = false
-            if rest.first == "-" || rest.first == "+" { t.append(rest.removeFirst()) }
-            while let c = rest.first {
-                if c.isNumber { t.append(c); rest = rest.dropFirst() }
-                else if c == "." && !dot { dot = true; t.append(c); rest = rest.dropFirst() }
-                else { break }               // "1.125.504" → 1.125 | .504; "2.25-2.25" splits on the sign
-            }
-            return CGFloat(Double(t) ?? 0)
-        }
-
-        func arc(to end: CGPoint, rx rx0: CGFloat, ry ry0: CGFloat,
-                 rotation: CGFloat, large: Bool, sweep: Bool) {
-            // svg endpoint→center parameterization (W3C appendix); heroicons
-            // arcs are circular (rx == ry), which cg arcs are too
-            var rx = abs(rx0), ry = abs(ry0)
-            let φ = rotation * .pi / 180
-            let (cosφ, sinφ) = (cos(φ), sin(φ))
-            let dx = (cur.x - end.x) / 2, dy = (cur.y - end.y) / 2
-            let x1p = cosφ * dx + sinφ * dy
-            let y1p = -sinφ * dx + cosφ * dy
-            let λ = x1p * x1p / (rx * rx) + y1p * y1p / (ry * ry)
-            if λ > 1 { let f = sqrt(λ); rx *= f; ry *= f }
-            let num = rx * rx * ry * ry - rx * rx * y1p * y1p - ry * ry * x1p * x1p
-            let den = rx * rx * y1p * y1p + ry * ry * x1p * x1p
-            let co = ((large != sweep) ? 1.0 : -1.0) * sqrt(max(0, num / den))
-            let ccx = cosφ * (co * rx * y1p / ry) - sinφ * (-co * ry * x1p / rx) + (cur.x + end.x) / 2
-            let ccy = sinφ * (co * rx * y1p / ry) + cosφ * (-co * ry * x1p / rx) + (cur.y + end.y) / 2
-            let θ1 = atan2((y1p + co * ry * x1p / rx) / ry, (x1p - co * rx * y1p / ry) / rx)
-            var Δθ = atan2((-y1p + co * ry * x1p / rx) / ry, (-x1p - co * rx * y1p / ry) / rx) - θ1
-            if !sweep && Δθ > 0 { Δθ -= 2 * .pi }
-            if sweep && Δθ < 0 { Δθ += 2 * .pi }
-            p.addArc(center: CGPoint(x: ccx, y: ccy), radius: rx,
-                     startAngle: θ1, endAngle: θ1 + Δθ, clockwise: !sweep)
-            cur = end
-        }
-
-        while !rest.isEmpty {
-            if let c = rest.first, c.isLetter {
-                cmd = c
-                rest = rest.dropFirst()
-                if c == "Z" || c == "z" {
-                    p.closeSubpath()
-                    cur = sub
-                    continue
-                }
-            }
-            switch cmd {
-            case "M", "m":
-                var x = num(), y = num()
-                if cmd == "m" { x += cur.x; y += cur.y }
-                p.move(to: CGPoint(x: x, y: y))
-                cur = CGPoint(x: x, y: y); sub = cur
-                cmd = cmd == "M" ? "L" : "l"      // implicit linetos after a moveto
-            case "L", "l":
-                var x = num(), y = num()
-                if cmd == "l" { x += cur.x; y += cur.y }
-                p.addLine(to: CGPoint(x: x, y: y))
-                cur = CGPoint(x: x, y: y)
-            case "H", "h":
-                var x = num()
-                if cmd == "h" { x += cur.x }
-                p.addLine(to: CGPoint(x: x, y: cur.y))
-                cur = CGPoint(x: x, y: cur.y)
-            case "V", "v":
-                var y = num()
-                if cmd == "v" { y += cur.y }
-                p.addLine(to: CGPoint(x: cur.x, y: y))
-                cur = CGPoint(x: cur.x, y: y)
-            case "C", "c":
-                var a = (0..<6).map { _ in num() }
-                if cmd == "c" { for k in stride(from: 0, to: 6, by: 2) { a[k] += cur.x; a[k + 1] += cur.y } }
-                p.addCurve(to: CGPoint(x: a[4], y: a[5]),
-                           control1: CGPoint(x: a[0], y: a[1]),
-                           control2: CGPoint(x: a[2], y: a[3]))
-                lastC = CGPoint(x: a[2], y: a[3])
-                cur = CGPoint(x: a[4], y: a[5])
-            case "S", "s":
-                var a = (0..<4).map { _ in num() }
-                if cmd == "s" { for k in stride(from: 0, to: 4, by: 2) { a[k] += cur.x; a[k + 1] += cur.y } }
-                let r = CGPoint(x: 2 * cur.x - lastC.x, y: 2 * cur.y - lastC.y)
-                p.addCurve(to: CGPoint(x: a[2], y: a[3]),
-                           control1: r,
-                           control2: CGPoint(x: a[0], y: a[1]))
-                lastC = CGPoint(x: a[0], y: a[1])
-                cur = CGPoint(x: a[2], y: a[3])
-            case "Q", "q":
-                var a = (0..<4).map { _ in num() }
-                if cmd == "q" { for k in stride(from: 0, to: 4, by: 2) { a[k] += cur.x; a[k + 1] += cur.y } }
-                p.addQuadCurve(to: CGPoint(x: a[2], y: a[3]),
-                               control: CGPoint(x: a[0], y: a[1]))
-                lastQ = CGPoint(x: a[0], y: a[1])
-                cur = CGPoint(x: a[2], y: a[3])
-            case "T", "t":
-                var x = num(), y = num()
-                if cmd == "t" { x += cur.x; y += cur.y }
-                let c = CGPoint(x: 2 * cur.x - lastQ.x, y: 2 * cur.y - lastQ.y)
-                p.addQuadCurve(to: CGPoint(x: x, y: y), control: c)
-                lastQ = c
-                cur = CGPoint(x: x, y: y)
-            case "A", "a":
-                let rx = num(), ry = num(), rot = num()
-                let large = num() != 0, sweep = num() != 0
-                var x = num(), y = num()
-                if cmd == "a" { x += cur.x; y += cur.y }
-                arc(to: CGPoint(x: x, y: y), rx: rx, ry: ry, rotation: rot, large: large, sweep: sweep)
-            default:
-                rest = rest.dropFirst()
-            }
-        }
-        return p
-    }
-}
-
-// renders a heroicon `d` inside a slot: the 24 grid scaled to iconSize,
-// stroked at the svg's own 1.5 with round caps + joins (as authored)
-enum Heroicon {
-    // draws a heroicon `d` on its own 24 grid, uniformly scaled so the grid
-    // is `size` points — the same relation every heroicon has to every other
-    // one on heroicons.com. stroke is the authored 1.5 in grid units, so
-    // every icon carries the set's own weight, identically.
-    static func draw(_ d: String, color: NSColor, in slot: NSRect, size: CGFloat? = nil) {
-        let ctx = NSGraphicsContext.current!.cgContext
-        ctx.saveGState()
-        let s = (size ?? Theme.iconSize) / 24
-        ctx.translateBy(x: slot.midX, y: slot.midY)
-        ctx.scaleBy(x: s, y: s)
-        ctx.translateBy(x: -12, y: -12)
-        ctx.addPath(SVGPath.cgPath(d))
-        ctx.setLineWidth(Theme.stroke)    // 1.5 grid units — the authored weight
-        ctx.setLineCap(.round)
-        ctx.setLineJoin(.round)
-        color.setStroke()
-        ctx.strokePath()
-        ctx.restoreGState()
+// MARK: - SVG icons
+// AppKit loads the five SVG assets directly. The same loader, tint, cache,
+// and 24-unit layout apply to every SVG widget.
+enum SVGIcon {
+    enum Name: String {
+        case battery27 = "battery-27"
+        case calendar = "calendar-today"
+        case nightDay = "Night-Day"
+        case headphones, bluetooth, mic
     }
 
-    // a rect in svg-grid coordinates → view rect, for text inside a glyph
+    private static let assetDirectory = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".local/share/smalt")
+    private static var cache: [String: NSImage] = [:]
+
+    private static func hex(_ color: NSColor) -> String? {
+        guard let rgb = color.usingColorSpace(.deviceRGB) else { return nil }
+        return String(format: "#%02X%02X%02X",
+                      Int((rgb.redComponent * 255).rounded()),
+                      Int((rgb.greenComponent * 255).rounded()),
+                      Int((rgb.blueComponent * 255).rounded()))
+    }
+
+    private static func image(_ name: Name, color: NSColor) -> NSImage? {
+        guard let tint = hex(color) else { return nil }
+        let key = name.rawValue + tint
+        if let cached = cache[key] { return cached }
+        let url = assetDirectory.appendingPathComponent(name.rawValue + ".svg")
+        guard let xml = try? String(contentsOf: url, encoding: .utf8),
+              let data = xml.replacingOccurrences(of: "#e3e3e3", with: tint)
+                  .data(using: .utf8),
+              let image = NSImage(data: data) else { return nil }
+        cache[key] = image
+        return image
+    }
+
     static func gridRect(_ r: CGRect, in slot: NSRect) -> NSRect {
         let s = Theme.iconSize / 24
         return NSRect(x: slot.midX + (r.minX - 12) * s,
                       y: slot.midY + (r.minY - 12) * s,
                       width: r.width * s, height: r.height * s)
     }
+
+    static func draw(_ name: Name, color: NSColor, in slot: NSRect) {
+        let rect = gridRect(CGRect(x: 0, y: 0, width: 24, height: 24), in: slot)
+        draw(name, color: color, inRect: rect)
+    }
+
+    static func draw(_ name: Name, color: NSColor, inRect rect: NSRect,
+                     fraction: CGFloat = 1) {
+        image(name, color: color)?.draw(in: rect, from: .zero,
+                                        operation: .sourceOver, fraction: fraction,
+                                        respectFlipped: true, hints: nil)
+    }
 }
 
 // text centered on its ink — CoreText glyph bounds, not the line box
-func drawText(_ s: String, font: NSFont, color: NSColor, in r: NSRect) {
+func drawText(_ s: String, font: NSFont, color: NSColor, in r: NSRect, kern: CGFloat = 0) {
     let line = CTLineCreateWithAttributedString(NSAttributedString(
-        string: s, attributes: [.font: font, .foregroundColor: color]))
+        string: s, attributes: [.font: font, .foregroundColor: color, .kern: kern]))
     let inkBounds = CTLineGetBoundsWithOptions(line, .useGlyphPathBounds)
     let ctx = NSGraphicsContext.current!.cgContext
     ctx.saveGState()
@@ -654,10 +535,8 @@ enum KeyboardBrightness {
 
 // MARK: - widgets
 //
-// heroicons, verbatim: the svg `d` strings, stroked at their authored 1.5
-// on the 24 grid — one consistent ink, weight-matched to the tabular
-// digits. sources are permission-free: IOKit power sources, the clock,
-// ProcessInfo low-power state.
+// The SVG widgets use the shared AppKit loader above. Widget state comes
+// from IOKit power sources, the clock, and ProcessInfo low-power state.
 
 // IOKit power sources — the same thing the native battery item reads.
 // IOKit is not free, and every widget repaints at up to 120fps mid-spring —
@@ -680,34 +559,140 @@ func readBatteryLevel() -> (pct: Int, charging: Bool)? {
         guard let d = IOPSGetPowerSourceDescription(blob, ps)?.takeUnretainedValue() as? [String: Any],
               let cap = d[kIOPSCurrentCapacityKey] as? Int,
               let max = d[kIOPSMaxCapacityKey] as? Int, max > 0 else { continue }
-        return (Int((Double(cap) / Double(max) * 100).rounded()), d[kIOPSIsChargingKey] as? Bool == true)
+        // charging = on AC power, NOT kIOPSIsChargingKey — macOS pauses
+        // charge current (health management, full battery) while still
+        // attached, and IsCharging drops to false at exactly the moment the
+        // user would say "I'm charging". the power source state is the truth.
+        let charging = d[kIOPSPowerSourceStateKey] as? String == kIOPSACPowerValue
+        return (Int((Double(cap) / Double(max) * 100).rounded()), charging)
     }
     return nil
 }
 
-// heroicons battery, verbatim — no fill, just the glyph; the percentage
-// sits optically centered in the body. low power mode: icon + number in
-// one amber.
-func drawBattery(in slot: NSRect) {
-    guard let (pct, _) = batteryLevel() else { return }
-    let lowPower = ProcessInfo.processInfo.isLowPowerModeEnabled
-    let color = lowPower ? Theme.lpm : Theme.ink
-    Heroicon.draw(SVGPath.battery, color: color, in: slot)
+// the battery — iOS 27 style: a faint shell (Vector.svg, 27×14 grid:
+// capsule body + nub) with the charge fill drawn ON TOP of it as a solid
+// capsule. the shell shows through the empty side at every charge level,
+// and the fill always lays a floor behind whatever sits in the body later.
+enum Battery {
+    // the svg's own grid: body 0..24.7 wide, nub out to 27
+    static let grid = CGSize(width: 27, height: 14)
+    static let bodyWidth: CGFloat = 24.6981
 
-    // the number, inside the body (svg rect x1.5–21, y7.5–18): same tabular
-    // font as the clock, semibold so its stems match the icon's 1.5pt
-    // stroke, sized to fill the body VERTICALLY (SF Pro cap height ≈ 0.72em)
-    let body = Heroicon.gridRect(CGRect(x: 2.5, y: 8, width: 17.5, height: 9.5), in: slot)
-    var size = body.height / 0.72
-    // "100" has to fit the body width too — shrink only if it wouldn't
-    let wide = ("100" as NSString).size(withAttributes: [.font: NSFont.tabular(size, .semibold)]).width
-    if wide > body.width { size *= body.width / wide }
-    drawText("\(pct)", font: .tabular(size, .semibold), color: color, in: body)
+    // the shell body's EXACT path, traced from Vector.svg — a squircle, not
+    // a circular capsule. the fill clips to this so the fill's corners sit
+    // exactly on the shell's corners instead of rounding past them.
+    private static let bodyPath: NSBezierPath = {
+        let p = NSBezierPath()
+        p.move(to: NSPoint(x: 0.665982, y: 1.77772))
+        p.curve(to: NSPoint(x: 0.0, y: 7.0),
+                controlPoint1: NSPoint(x: 0.0, y: 2.78661),
+                controlPoint2: NSPoint(x: 0.0, y: 4.19108))
+        p.curve(to: NSPoint(x: 0.665982, y: 12.2223),
+                controlPoint1: NSPoint(x: 0.0, y: 9.80892),
+                controlPoint2: NSPoint(x: 0.0, y: 11.2134))
+        p.curve(to: NSPoint(x: 1.75625, y: 13.3259),
+                controlPoint1: NSPoint(x: 0.954292, y: 12.659),
+                controlPoint2: NSPoint(x: 1.32477, y: 13.034))
+        p.curve(to: NSPoint(x: 6.91548, y: 14.0),
+                controlPoint1: NSPoint(x: 2.75297, y: 14.0),
+                controlPoint2: NSPoint(x: 4.14047, y: 14.0))
+        p.line(to: NSPoint(x: 17.7827, y: 14.0))
+        p.curve(to: NSPoint(x: 22.9419, y: 13.3259),
+                controlPoint1: NSPoint(x: 20.5577, y: 14.0),
+                controlPoint2: NSPoint(x: 21.9452, y: 14.0))
+        p.curve(to: NSPoint(x: 24.0322, y: 12.2223),
+                controlPoint1: NSPoint(x: 23.3734, y: 13.034),
+                controlPoint2: NSPoint(x: 23.7438, y: 12.659))
+        p.curve(to: NSPoint(x: 24.6981, y: 7.0),
+                controlPoint1: NSPoint(x: 24.6981, y: 11.2134),
+                controlPoint2: NSPoint(x: 24.6981, y: 9.80892))
+        p.curve(to: NSPoint(x: 24.0322, y: 1.77772),
+                controlPoint1: NSPoint(x: 24.6981, y: 4.19108),
+                controlPoint2: NSPoint(x: 24.6981, y: 2.78661))
+        p.curve(to: NSPoint(x: 22.9419, y: 0.674122),
+                controlPoint1: NSPoint(x: 23.7438, y: 1.34096),
+                controlPoint2: NSPoint(x: 23.3734, y: 0.965956))
+        p.curve(to: NSPoint(x: 17.7827, y: 0.0),
+                controlPoint1: NSPoint(x: 21.9452, y: 0.0),
+                controlPoint2: NSPoint(x: 20.5577, y: 0.0))
+        p.line(to: NSPoint(x: 6.91548, y: 0.0))
+        p.curve(to: NSPoint(x: 1.75625, y: 0.674122),
+                controlPoint1: NSPoint(x: 4.14047, y: 0.0),
+                controlPoint2: NSPoint(x: 2.75297, y: 0.0))
+        p.curve(to: NSPoint(x: 0.665982, y: 1.77772),
+                controlPoint1: NSPoint(x: 1.32477, y: 0.965956),
+                controlPoint2: NSPoint(x: 0.954292, y: 1.34096))
+        p.close()
+        return p
+    }()
+
+    static func draw(pct: Int, in slot: NSRect) {
+        let f = CGFloat(max(0, min(100, pct))) / 100
+        let ink = ProcessInfo.processInfo.isLowPowerModeEnabled ? Theme.lpm : Theme.ink
+
+        // fit the svg's grid to the slot width, vertically centered — the
+        // grid decides, nothing hand-placed
+        let s = slot.width / grid.width
+        let frame = NSRect(x: slot.midX - grid.width * s / 2,
+                           y: slot.midY - grid.height * s / 2,
+                           width: grid.width * s, height: grid.height * s)
+
+        // the shell: faint at every state, exactly as exported
+        SVGIcon.draw(.battery27, color: ink, inRect: frame)
+
+        // the charge: the shell's own body path as the clip, filled from the
+        // left edge → f — solid where the shell is 30%, corners exactly on
+        // the shell's corners (a circular capsule here rounds past the
+        // squircle and the fill reads as a blob eating the shell)
+        if f > 0 {
+            let context = NSGraphicsContext.current!.cgContext
+            context.saveGState()
+            context.translateBy(x: frame.minX, y: frame.minY)
+            context.scaleBy(x: s, y: s)
+            bodyPath.addClip()
+            ink.setFill()
+            NSRect(x: 0, y: 0, width: bodyWidth * f, height: grid.height).fill()
+            context.restoreGState()
+        }
+
+        // the percentage: the figma spec verbatim — SF Pro Bold 11,
+        // −0.5 tracking, centered in the body on the fill (glass, so it
+        // reads as knocked out of the ink)
+        let text = "\(pct)"
+        let figmaFont = NSFont.systemFont(ofSize: 11, weight: .bold)
+        drawText(text, font: figmaFont, color: Theme.glass, in: NSRect(
+            x: frame.minX, y: frame.minY, width: bodyWidth * s, height: frame.height),
+            kern: -0.5)
+    }
 }
 
-// heroicons calendar-days, verbatim
+func drawBattery(in slot: NSRect) {
+    guard let (pct, _) = batteryLevel() else { return }
+    Battery.draw(pct: pct, in: slot)
+}
+
+// The calendar SVG leaves a 14×10-unit body for the day number.
 func drawCalendar(in slot: NSRect) {
-    Heroicon.draw(SVGPath.calendar, color: Theme.ink, in: slot)
+    SVGIcon.draw(.calendar, color: Theme.ink, in: slot)
+    let day = Calendar.current.component(.day, from: Date())
+    let body = SVGIcon.gridRect(CGRect(x: 5, y: 10, width: 14, height: 10), in: slot)
+    // Bold compensates for the smaller date size so its strokes sit beside
+    // the clock's 19pt medium digits.
+    drawText("\(day)", font: .tabular(Theme.dateSize, .bold),
+             color: Theme.ink, in: body)
+}
+
+// md3 audio glyphs, verbatim — headphones (out), bluetooth, mic (in)
+func drawHeadphones(in slot: NSRect) {
+    SVGIcon.draw(.headphones, color: Theme.ink, in: slot)
+}
+
+func drawBluetooth(in slot: NSRect) {
+    SVGIcon.draw(.bluetooth, color: Theme.ink, in: slot)
+}
+
+func drawMicrophone(in slot: NSRect) {
+    SVGIcon.draw(.mic, color: Theme.ink, in: slot)
 }
 
 // time: hour over minute — one CELL slot each, tabular SF Pro centered
@@ -766,9 +751,7 @@ func drawSlider(in slot: NSRect) {
     let face = max(0, min(1, Theme.sliderFace))
     let edgeAlpha: (CGFloat) -> CGFloat = { min(1, $0 * 4) }
 
-    // the % — tabular semibold, shrink-to-fit like the battery's "100".
-    // the size + stroke live in KnobFace so the sun below is built from
-    // the digits' own rendered metrics, by construction.
+    // the % — tabular semibold, sized so "100" fits inside the knob.
     let pct = Int((Theme.sliderValue * 100).rounded())
 
     if face > 0 {
@@ -777,95 +760,22 @@ func drawSlider(in slot: NSRect) {
     }
 
     if face < 1 {
-        // the sun, generated from the digits' own metrics — not a borrowed
-        // glyph (the old Phosphor path shipped 1.125pt strokes against
-        // 1.24pt stems). the stroke IS KnobFace.stem — measured off the
-        // rendered '0', because that's what the eye weighs the ring
-        // against — and the disc IS the cap height.
         let f = 1 - face
-        let stem = KnobFace.stem
-        let cap = KnobFace.pctFont.capHeight
-        let discD = cap                 // disc outer diameter == cap height
-        let air   = 1.1 * stem          // disc→ray air, a shade over a stem
-        let ray   = 1.4 * stem          // ray length: a stroke, not a dot
-        let ctx = NSGraphicsContext.current!.cgContext
-        ctx.saveGState()
-        ctx.translateBy(x: handle.midX, y: handle.midY)
-        ctx.scaleBy(x: f, y: f)         // implode/explode carries the crossfade
-        ctx.setLineWidth(stem)
-        ctx.setLineCap(.round)
-        Theme.glass.withAlphaComponent(edgeAlpha(f)).setStroke()
-        // ring: stroke is centered on the path, so radius = disc outer − stem/2
-        ctx.addArc(center: .zero, radius: discD / 2 - stem / 2,
-                   startAngle: 0, endAngle: 2 * .pi, clockwise: false)
-        // eight rays, round caps — the pill's one stroke language, everywhere
-        for i in 0..<8 {
-            let a = CGFloat(i) * .pi / 4
-            let c = cos(a), s = sin(a)
-            ctx.move(to: CGPoint(x: c * (discD / 2 + air), y: s * (discD / 2 + air)))
-            ctx.addLine(to: CGPoint(x: c * (discD / 2 + air + ray), y: s * (discD / 2 + air + ray)))
-        }
-        ctx.strokePath()
-        ctx.restoreGState()
+        let size = (knobSize - 6) * f
+        let iconRect = NSRect(x: handle.midX - size / 2,
+                              y: handle.midY - size / 2,
+                              width: size, height: size)
+        SVGIcon.draw(.nightDay, color: Theme.glass, inRect: iconRect,
+                     fraction: edgeAlpha(f))
     }
 }
 
-// the knob face's shared numbers — one font for the % and one stroke
-// width for both faces, measured (not estimated) so they can't drift.
+// The percentage face shrinks just enough for "100" to fit inside the knob.
 enum KnobFace {
-    // the shrink-to-fit size drawSlider's % settles at ("100" must fit)
     static let base: CGFloat = {
         var b: CGFloat = 12
         let wide = ("100" as NSString).size(withAttributes: [.font: NSFont.tabular(b, .semibold)]).width
         return wide > Theme.sliderHandle - 6 ? b * (Theme.sliderHandle - 6) / wide : b
-    }()
-
-    static let pctFont = NSFont.tabular(base, .semibold)
-
-    // the stroke width the eye actually sees on the digits: a scanline
-    // through an 8× rendered '0'. SF Pro cuts curved strokes fatter than
-    // the 'l' stem (~12% here — optical compensation), so measuring 'l'
-    // left the sun's ring visibly thin next to the number it swaps with.
-    static let stem: CGFloat = {
-        let font = NSFont.tabular(base, .semibold)
-        let s = 8, w = 32, h = 32
-        let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: w * s, pixelsHigh: h * s,
-                                   bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
-                                   isPlanar: false, colorSpaceName: .calibratedRGB,
-                                   bytesPerRow: 0, bitsPerPixel: 0)!
-        rep.size = NSSize(width: w, height: h)
-        NSGraphicsContext.saveGraphicsState()
-        let ctx = NSGraphicsContext(bitmapImageRep: rep)!
-        NSGraphicsContext.current = ctx
-        let line = CTLineCreateWithAttributedString(NSAttributedString(
-            string: "0", attributes: [.font: font, .foregroundColor: NSColor.black]))
-        ctx.cgContext.translateBy(x: 8, y: 8)   // clear of the edges
-        ctx.cgContext.textMatrix = .identity
-        CTLineDraw(line, ctx.cgContext)
-        NSGraphicsContext.restoreGraphicsState()
-        // locate the ink, then scan the row through its vertical middle —
-        // the '0' is widest at mid-height (vertical-tangent bowls), and
-        // anchoring to the rendered ink instead of the baseline makes the
-        // scan immune to context orientation/offset quirks.
-        var minX = w * s, maxX = 0, minY = h * s, maxY = 0
-        for py in 0..<(h * s) { for px in 0..<(w * s) {
-            if rep.colorAt(x: px, y: py)!.alphaComponent > 0.1 {
-                minX = min(minX, px); maxX = max(maxX, px)
-                minY = min(minY, py); maxY = max(maxY, py)
-            }
-        } }
-        guard maxX > minX else { return 1 }
-        let py = (minY + maxY) / 2
-        var best = CGFloat(0), run = 0
-        for px in 0..<(w * s) {
-            if rep.colorAt(x: px, y: py)!.alphaComponent > 0.5 {
-                run += 1
-            } else if run > 0 {
-                best = max(best, CGFloat(run) / CGFloat(s)); run = 0
-            }
-        }
-        if run > 0 { best = max(best, CGFloat(run) / CGFloat(s)) }
-        return best > 0 ? best : 1
     }()
 }
 

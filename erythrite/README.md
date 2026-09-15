@@ -1,4 +1,4 @@
-# vitallium
+# erythrite
 
 living wallpaper. a looping video — or a still image — behind everything:
 apps, widgets, desktop icons, the glass menu bar. every display gets its own,
@@ -10,7 +10,7 @@ not a hack of the native wallpaper: a daemon that owns one borderless window
 per display at the desktop window layer. above the static wallpaper, below
 the desktop icons, so the desktop keeps working (icons float over the video)
 and the menu bar / dock blur over it like glass. the native wallpaper is
-untouched and still there underneath — quit vitallium and it's back.
+untouched and still there underneath — quit erythrite and it's back.
 
 ## why it's safe
 
@@ -23,7 +23,7 @@ this is the point of the tool, so it's stated plainly:
   compiler, this file.
 - **no permissions.** no accessibility, no input monitoring, no screen
   capture, no sandbox escape. AppKit + AVFoundation only.
-- **no network.** the binary doesn't open a socket. verify: `lsof -p $(pgrep vitallium)`.
+- **no network.** the binary doesn't open a socket. verify: `lsof -p $(pgrep erythrite)`.
 
 read the source before you build it. it's ~450 lines. that's the whole point.
 
@@ -48,9 +48,9 @@ rebuild the windows.
 
 there is no default display. every monitor is bound by hand:
 
-    vitallium monitors                              # names, resolutions, what's playing
-    vitallium set --monitor "AG271QG4" ~/Movies/odyssey.mp4
-    vitallium set --monitor "Built-in Retina Display" ~/pics/dune.png --scrim 0.1
+    erythrite monitors                              # names, resolutions, what's playing
+    erythrite set --monitor "AG271QG4" ~/Movies/odyssey.mp4
+    erythrite set --monitor "Built-in Retina Display" ~/pics/dune.png --scrim 0.1
 
 any file works: **video** (mp4/mov, hevc/h264, loops) or **image** (png, jpg,
 heic, tiff, gif, bmp, webp — a still layer, zero decode cost, pause/resume
@@ -64,10 +64,10 @@ remembers itself.
 
 unconfigured displays show the native wallpaper and are left alone.
 
-## config — ~/.config/vitallium.conf
+## config — ~/.config/erythrite.conf
 
-one block per display, keyed by the name from `vitallium monitors`. you can
-hand-edit; the daemon picks up changes within 5s (or `vitallium reload`).
+one block per display, keyed by the name from `erythrite monitors`. you can
+hand-edit; the daemon picks up changes within 5s (or `erythrite reload`).
 
     battery-pause on              # freeze on battery + low power mode
 
@@ -81,16 +81,16 @@ hand-edit; the daemon picks up changes within 5s (or `vitallium reload`).
 
 ## commands
 
-    vitallium monitors                              # list displays + what's on them
-    vitallium set --monitor "NAME" FILE             # bind a video to a display
+    erythrite monitors                              # list displays + what's on them
+    erythrite set --monitor "NAME" FILE             # bind a video to a display
           [--scrim 0.15] [--gravity fill|fit]
-    vitallium pause                                 # freeze on the current frame
-    vitallium resume                                # unfreeze
-    vitallium reload                                # re-read the config
-    vitallium status                                # per-display state
+    erythrite pause                                 # freeze on the current frame
+    erythrite resume                                # unfreeze
+    erythrite reload                                # re-read the config
+    erythrite status                                # per-display state
 
 `install.sh` and `install.sh uninstall` install or remove the whole thing
-(binary + launchd agent `dev.cobalt.vitallium`).
+(binary + launchd agent `dev.cobalt.erythrite`).
 
 ## notes
 

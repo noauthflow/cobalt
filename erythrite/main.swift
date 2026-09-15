@@ -1,14 +1,14 @@
-// vitallium — living wallpaper daemon
+// erythrite — living wallpaper daemon
 // a looping video behind everything: apps, widgets, desktop icons, the glass
 // menu bar. one window per display at the desktop layer, AVPlayer under it.
 // every display is configured individually, by name, and remembered.
 //
-//     vitallium monitors                     list displays + what's on them
-//     vitallium set --monitor "NAME" FILE    bind a video to a display (flag required)
-//     vitallium pause                        freeze every display
-//     vitallium resume                       unfreeze
-//     vitallium reload                       re-read the config
-//     vitallium status                       per-display state
+//     erythrite monitors                     list displays + what's on them
+//     erythrite set --monitor "NAME" FILE    bind a video to a display (flag required)
+//     erythrite pause                        freeze every display
+//     erythrite resume                       unfreeze
+//     erythrite reload                       re-read the config
+//     erythrite status                       per-display state
 //
 // zero permissions, zero network, zero supply chain: built from this file,
 // on your machine, and nothing ever updates itself.
@@ -20,8 +20,8 @@ import IOKit.ps
 
 // MARK: - config
 
-// ~/.config/vitallium.conf — one block per display, keyed by the display's
-// name (`vitallium monitors` prints it). the file IS the cache: blocks for
+// ~/.config/erythrite.conf — one block per display, keyed by the display's
+// name (`erythrite monitors` prints it). the file IS the cache: blocks for
 // displays that aren't plugged in stay put and re-apply when they return.
 //
 //     # global
@@ -47,7 +47,7 @@ struct Config {
     var batteryPause = false   // off by default — freezing because of a power
                                // reading surprised nobody, ever
 
-    static let path = NSString(string: "~/.config/vitallium.conf").expandingTildeInPath
+    static let path = NSString(string: "~/.config/erythrite.conf").expandingTildeInPath
 
     static func load() -> Config {
         var c = Config()
@@ -119,7 +119,7 @@ struct Config {
         }
 
         // regenerate
-        var out = ["# vitallium — one block per display (names from: vitallium monitors)",
+        var out = ["# erythrite — one block per display (names from: erythrite monitors)",
                    batteryLine, ""]
         for n in order {
             let b = blocks[n] ?? [:]
@@ -142,7 +142,7 @@ struct Config {
 func log(_ s: String) {
     let f = DateFormatter()
     f.dateFormat = "HH:mm:ss"
-    FileHandle.standardError.write(Data("vitallium [\(f.string(from: Date()))] \(s)\n".utf8))
+    FileHandle.standardError.write(Data("erythrite [\(f.string(from: Date()))] \(s)\n".utf8))
 }
 
 func onBatteryPower() -> Bool {
@@ -205,7 +205,7 @@ final class Engine: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ note: Notification) {
         try? "\(ProcessInfo.processInfo.processIdentifier)".write(
-            toFile: "/tmp/vitallium.pid", atomically: true, encoding: .utf8)
+            toFile: "/tmp/erythrite.pid", atomically: true, encoding: .utf8)
 
         reload(quiet: false)
         applyPlayState()
@@ -537,7 +537,7 @@ final class PlayerHostView: NSView {
 // MARK: - cli
 
 func pidFromFile() -> pid_t? {
-    guard let s = try? String(contentsOfFile: "/tmp/vitallium.pid", encoding: .utf8) else { return nil }
+    guard let s = try? String(contentsOfFile: "/tmp/erythrite.pid", encoding: .utf8) else { return nil }
     guard let pid = pid_t(s.trimmingCharacters(in: .whitespacesAndNewlines)) else { return nil }
     return kill(pid, 0) == 0 ? pid : nil
 }
@@ -602,7 +602,7 @@ func cmdSet(_ rest: [String]) -> Never {
                 } else if let stray = strayFlag,
                           bestMatch(for: stray, in: liveDisplays()) != nil {
                     // the classic typo: --Built-in Retina Display instead of --monitor "Built-in..."
-                    hint = "\n  did you mean: vitallium set --monitor \"\(stray)\" <file> ?"
+                    hint = "\n  did you mean: erythrite set --monitor \"\(stray)\" <file> ?"
                 } else {
                     hint = "\n  (monitor names with spaces must be quoted: --monitor \"Built-in Retina Display\")"
                 }
@@ -617,8 +617,8 @@ func cmdSet(_ rest: [String]) -> Never {
         FileHandle.standardError.write(Data("""
         error: --monitor is required — there is no default display
 
-          vitallium monitors                    see the names
-          vitallium set --monitor "NAME" FILE   bind a video
+          erythrite monitors                    see the names
+          erythrite set --monitor "NAME" FILE   bind a video
 
         """.utf8))
         exit(1)
@@ -635,11 +635,11 @@ func cmdSet(_ rest: [String]) -> Never {
         }
     } else {
         guard let file = file else {
-            FileHandle.standardError.write(Data("error: no video file given\nusage: vitallium set --monitor \"NAME\" FILE\n".utf8)); exit(1)
+            FileHandle.standardError.write(Data("error: no video file given\nusage: erythrite set --monitor \"NAME\" FILE\n".utf8)); exit(1)
         }
         let expanded = NSString(string: file).expandingTildeInPath
         guard FileManager.default.fileExists(atPath: expanded) else {
-            FileHandle.standardError.write(Data("vitallium: no such file: \(expanded)\n".utf8)); exit(1)
+            FileHandle.standardError.write(Data("erythrite: no such file: \(expanded)\n".utf8)); exit(1)
         }
         // warn when the name doesn't match anything live (still saved — the
         // config is the cache, it applies whenever that display appears)
@@ -668,8 +668,8 @@ func cmdClear(_ rest: [String]) -> Never {
         FileHandle.standardError.write(Data("""
         error: --monitor is required — there is no default display
 
-          vitallium clear --monitor "NAME"    unbind a display (native wallpaper returns)
-          vitallium clear --monitor all       unbind everything
+          erythrite clear --monitor "NAME"    unbind a display (native wallpaper returns)
+          erythrite clear --monitor all       unbind everything
 
         """.utf8))
         exit(1)
@@ -712,16 +712,16 @@ func handleCommand(_ cmd: String, _ rest: [String]) -> Never {
         print("reloaded"); exit(0)
 
     case "stop", "quit":
-        let label = "dev.cobalt.vitallium"
+        let label = "dev.cobalt.erythrite"
         let gui = "gui/\(getuid())"
         shell("/bin/launchctl", ["bootout", "\(gui)/\(label)"])
         if let pid = pidFromFile() { kill(pid, SIGTERM) }
-        try? FileManager.default.removeItem(atPath: "/tmp/vitallium.pid")
-        print("stopped — the launchd agent is bootout'ed; it returns at next login or `vitallium start`")
+        try? FileManager.default.removeItem(atPath: "/tmp/erythrite.pid")
+        print("stopped — the launchd agent is bootout'ed; it returns at next login or `erythrite start`")
         exit(0)
 
     case "start":
-        let label = "dev.cobalt.vitallium"
+        let label = "dev.cobalt.erythrite"
         let gui = "gui/\(getuid())"
         let plist = NSString(string: "~/Library/LaunchAgents/\(label).plist").expandingTildeInPath
         guard FileManager.default.fileExists(atPath: plist) else {
@@ -737,7 +737,7 @@ func handleCommand(_ cmd: String, _ rest: [String]) -> Never {
     case "status":
         let config = Config.load()
         if pidFromFile() == nil {
-            print("not running (launchd agent: dev.cobalt.vitallium)")
+            print("not running (launchd agent: dev.cobalt.erythrite)")
             exit(0)
         }
         print("running")
@@ -752,7 +752,7 @@ func handleCommand(_ cmd: String, _ rest: [String]) -> Never {
 
     default:
         FileHandle.standardError.write(Data("""
-        usage: vitallium [command]
+        usage: erythrite [command]
           monitors                          list displays + what's on them
           set --monitor "NAME" FILE         bind a video/image to a display
               [--scrim 0.22] [--gravity fill|fit]
@@ -769,8 +769,8 @@ func handleCommand(_ cmd: String, _ rest: [String]) -> Never {
 
 func notRunning() -> Never {
     FileHandle.standardError.write(Data("""
-    vitallium: daemon not running
-      start it:  vitallium start   (or ./install.sh)
+    erythrite: daemon not running
+      start it:  erythrite start   (or ./install.sh)
 
     """.utf8))
     exit(1)
@@ -796,7 +796,7 @@ if args.count > 1 {
 // daemon mode: refuse to run twice — a second instance would fight the
 // launchd one for the desktop layer and leave a stale pid file behind
 if let existing = pidFromFile(), existing != ProcessInfo.processInfo.processIdentifier {
-    FileHandle.standardError.write(Data("vitallium: already running (pid \(existing)) — 'vitallium stop' quits it\n".utf8))
+    FileHandle.standardError.write(Data("erythrite: already running (pid \(existing)) — 'erythrite stop' quits it\n".utf8))
     exit(1)
 }
 

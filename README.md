@@ -9,7 +9,8 @@ A collection of small, self-contained desktop utilities for macOS (plus one cros
 | [cobalt-sync/](cobalt-sync/) | bookmarks + omnibox sync CLI | macOS, linux, windows (auto-detects browser paths; `avatar` subcommand is macOS + Chrome only) |
 | [cobalt-60/](cobalt-60/) | cursor wall daemon | macOS |
 | [smalt/](smalt/) | menu bar strip daemon | macOS |
-| [vitallium/](vitallium/) | living wallpaper daemon (looping video behind apps + widgets) | macOS |
+| [cerulean/](cerulean/) | completely enable/disable a display (compositor-level) | macOS |
+| [erythrite/](erythrite/) | living wallpaper daemon (looping video behind apps + widgets) | macOS |
 | [elgiloy-mac-arm/](elgiloy-mac-arm/) | tab overlay daemon | macOS (Apple Silicon) |
 | [elgiloy-linux/](elgiloy-linux/) | tab overlay daemon, linux port | linux (in progress) |
 | [stellite/](stellite/) | new tab page + shorts blocker Chrome extension + template theme | anywhere Chrome runs |
@@ -46,6 +47,14 @@ Same pipeline as cobalt-60: binary to `~/.local/bin/elgiloy`, launchd agent `dev
 
 - Requires: `swiftc`, the `cobalt-dev` signing identity
 - See `smalt/README.md` for specifics
+
+### cerulean
+
+Builds with `swiftc`, signs, copies the binary to `~/.local/bin/cerulean`. No launchd — plain CLI.
+
+- Requires: `swiftc`
+- Permissions: none (private SkyLight APIs, no TCC involvement)
+- `./install.sh uninstall` removes the binary (warns if a display is currently disabled)
 
 ### stellite
 
