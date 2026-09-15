@@ -350,16 +350,9 @@ final class StripView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
-        if let i = slotIndex(at: p) {
-            switch Theme.slots[i].kind {
-            case .slider:
-                dragSlot = i
-                setFaceTarget(1)
-            case .battery27:
-                batteryPctOverride = Int.random(in: 0...100)   // test dial: next random iteration
-            default:
-                break
-            }
+        if let i = slotIndex(at: p), Theme.slots[i].kind == .slider {
+            dragSlot = i
+            setFaceTarget(1)
         }
         updateSliderValue(at: p)
     }
@@ -439,7 +432,6 @@ enum SVGIcon {
     enum Name: String {
         case battery27 = "battery-27"
         case bolt = "bolt"
-        case boltOutline = "bolt-outline"
         case calendar = "calendar-today"
         case nightDay = "Night-Day"
         case headphones, bluetooth, mic
@@ -639,43 +631,18 @@ enum Battery {
         return p
     }()
 
-    // the nub — the svg's second path, the tip outside the body. part of
-    // the shell (#CDCDCD) at every level; joins the fill only at 100% —
-    // full means full, tip included
-    private static let nubPath: NSBezierPath = {
-        let p = NSBezierPath()
-        p.move(to: NSPoint(x: 27, y: 6.75))
-        p.curve(to: NSPoint(x: 25.6861, y: 8.75),
-                controlPoint1: NSPoint(x: 27, y: 7.62313),
-                controlPoint2: NSPoint(x: 26.4822, y: 8.41122))
-        p.line(to: NSPoint(x: 25.6861, y: 4.75))
-        p.curve(to: NSPoint(x: 27, y: 6.75),
-                controlPoint1: NSPoint(x: 26.4822, y: 5.08878),
-                controlPoint2: NSPoint(x: 27, y: 5.87687))
-        p.close()
-        return p
-    }()
-
-    // the palette — the slider's language: ONE value color, two weights.
-    // the fill is the slider's own value run (#75564F); the empty shell is
-    // that same color held to 30% over the glass (#D2C6C2 pre-composited —
-    // the svg tint is a solid). the only color state is low power mode:
-    // house amber fill, and the run flips to deep ink for contrast. the
-    // run's color is bound to the fill state, never to the fill %.
-    static let shellColor = NSColor(srgbRed: 0xD2/255.0, green: 0xC6/255.0, blue: 0xC2/255.0, alpha: 1)  // #D2C6C2
-    static let fillNormal   = Theme.sliderFill   // #75564F — the slider's value run
-    static let fillLowPower = Theme.lpm          // #CA8A04 — house amber
+    // the figma palette — fixed in ALL states: the shell never changes,
+    // the digits and bolt are always white; only the fill answers charge
+    static let shellColor = NSColor(srgbRed: 0xCD/255.0, green: 0xCD/255.0, blue: 0xCD/255.0, alpha: 1)   // #CDCDCD
+    static let textColor = NSColor.white                                                                 // #FFFFFF
+    static let fillNormal = NSColor(srgbRed: 0x12/255.0, green: 0x12/255.0, blue: 0x12/255.0, alpha: 1)  // #121212
+    static let fillLowPower = NSColor(srgbRed: 1, green: 0xCC/255.0, blue: 0x0A/255.0, alpha: 1)         // #FFCC0A
+    static let fillLow = NSColor(srgbRed: 1, green: 0, blue: 0, alpha: 1)                                // #FF0000
 
     static func draw(pct: Int, charging: Bool, in slot: NSRect) {
-        // visual floor: 1–4% fills draw at 5% — a hairline slither reads as
-        // a rendering glitch, not a battery
-        let f = pct <= 0 ? 0 : max(0.05, CGFloat(min(100, pct)) / 100)
-        // 100% is full, not charging — the bolt stands down; the nub
-        // joining the fill is the full marker
-        let fillColor = ProcessInfo.processInfo.isLowPowerModeEnabled ? fillLowPower : fillNormal
-        // the bolt wears the knob's own color — the slider knob #3A2D27 —
-        // so charging reads in the slider's exact two-color language
-        let runColor = Theme.knob
+        let f = CGFloat(max(0, min(100, pct))) / 100
+        let fillColor = pct < 20 ? fillLow
+            : ProcessInfo.processInfo.isLowPowerModeEnabled ? fillLowPower : fillNormal
 
         // fit the svg's grid to the slot width, vertically centered — the
         // grid decides, nothing hand-placed
@@ -684,7 +651,7 @@ enum Battery {
                            y: slot.midY - grid.height * s / 2,
                            width: grid.width * s, height: grid.height * s)
 
-        // the shell: glass-warmed grey in every state
+        // the shell: #CDCDCD in every state, low power included
         SVGIcon.draw(.battery27, color: shellColor, inRect: frame)
 
         // the charge: the shell's own body path as the clip, filled from the
@@ -698,54 +665,47 @@ enum Battery {
             fillColor.setFill()
             NSRect(x: 0, y: 0, width: bodyWidth * f, height: grid.height).fill()
             context.restoreGState()
-            // at 100% the nub joins the fill — drawn OUTSIDE the body clip,
-            // which would otherwise erase it (the nub lives past the body)
-            if pct >= 100 {
-                context.saveGState()
-                context.translateBy(x: frame.minX, y: frame.minY)
-                context.scaleBy(x: s, y: s)
-                fillColor.setFill()
-                nubPath.fill()
-                context.restoreGState()
-            }
         }
 
-        // the charge state: the bolt stands centered in the body when
-        // charging — the % digits are gone (they fought every ground and
-        // lost). the bolt color matches the digits' old white, always.
-        // the bolt stands a touch taller than the meter — stretched
-        // vertically only, the width keeps the glyph's natural bounds so
-        // it never gets fatter
-        let boltStretch: CGFloat = 1.22
-        let boltH = grid.height * s * boltStretch
-        let boltW = grid.height * s * 6.07094 / 8.26108
-        // the knockout: the outline asset is the same path, stroke-only,
-        // on a canvas grown 0.6 units a side — drawn in the GLASS color
-        // behind the bolt it erases the fill around the glyph, a gap that
-        // reads as transparent (the pill behind is that same glass)
-        let outlineMargin: CGFloat = 0.6
-        let oH = boltH + 2 * outlineMargin * s
-        let oW = boltW + 2 * outlineMargin * s   // horizontal margin only — no x stretch
+        // the percentage: SF Pro Bold 11, −0.5 tracking, white in all
+        // states. while charging below 100, the bolt stands beside the
+        // digits and the run centers as ONE collective — no shrinking, the
+        // digits draw at their natural size. at 100% the bolt is dropped:
+        // on a full battery macOS still reports AC power, but nothing is
+        // charging.
+        let text = "\(pct)"
+        let font = NSFont.systemFont(ofSize: 11, weight: .bold)
+        let boltH: CGFloat = 11
+        let boltW = boltH * 6.07094 / 8.26108   // the bolt glyph's tight bounds
+        let gap: CGFloat = 0.5
+        let showBolt = charging && pct < 100
+        let boltRun: CGFloat = showBolt ? gap + boltW : 0
+
+        func inkWidth() -> CGFloat {
+            let line = CTLineCreateWithAttributedString(NSAttributedString(
+                string: text, attributes: [.font: font, .kern: -0.5]))
+            return CTLineGetBoundsWithOptions(line, .useGlyphPathBounds).width
+        }
+        let textW = inkWidth()
+
+        // centered on the BODY (not the nub), placed by INK width so side
+        // bearings can't shove the bolt right of where the math put it
         let bodyCenter = frame.minX + bodyWidth * s / 2
-        if charging {
-            SVGIcon.draw(.boltOutline, color: Theme.glass, inRect: NSRect(
-                x: bodyCenter - oW / 2, y: frame.midY - oH / 2,
-                width: oW, height: oH))
-            SVGIcon.draw(.bolt, color: runColor, inRect: NSRect(
-                x: bodyCenter - boltW / 2, y: frame.midY - boltH / 2,
+        let x0 = bodyCenter - (textW + boltRun) / 2
+        drawText(text, font: font, color: textColor, in: NSRect(
+            x: x0, y: frame.minY, width: textW, height: frame.height),
+            kern: -0.5)
+        if showBolt {
+            SVGIcon.draw(.bolt, color: textColor, inRect: NSRect(
+                x: x0 + textW + gap, y: frame.midY - boltH / 2,
                 width: boltW, height: boltH))
         }
     }
 }
 
-// demo override: click the battery slot to cycle the displayed % through
-// random values (a test dial, not a state) — charging and low-power still
-// answer to the hardware, so fills/bolt/reactivity stay honest
-var batteryPctOverride: Int? = nil
-
 func drawBattery(in slot: NSRect) {
-    guard let hw = batteryLevel() else { return }
-    Battery.draw(pct: batteryPctOverride ?? hw.pct, charging: true, in: slot)
+    guard let (pct, charging) = batteryLevel() else { return }
+    Battery.draw(pct: pct, charging: charging, in: slot)
 }
 
 // The calendar SVG leaves a 14×10-unit body for the day number.
@@ -1304,14 +1264,6 @@ func runDaemon() -> Never {
     // accessory = no dock icon.
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
-
-    // never App Nap: an accessory app with no active windows gets its
-    // timers suspended while idle — the fade and the clock tick would
-    // freeze until the mouse moves. one activity claim pins the run loop
-    // for the daemon's lifetime.
-    _ = ProcessInfo.processInfo.beginActivity(
-        options: .userInitiated,
-        reason: "smalt: menu strip timers")
 
     // hardware sync: F5/F6 and the auto-brightness daemon change the
     // backlight behind our back. there is no push channel at our privilege
