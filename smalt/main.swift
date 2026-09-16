@@ -123,6 +123,8 @@ enum Theme {
     static var nightOff = false              // true = the Night Shift schedule is Off (face says OFF, not 0%)
     static var knobHover: CGFloat = 0        // 0→1 while the cursor is on the KNOB itself — drives the knob swell
     static var knobPop: CGFloat = 0          // damped wobble (1 → 0, overshooting) fired on the first KNOB hover each summon
+    static var nightKnobHover: CGFloat = 0   // the night knob's own swell — same component, warm ink
+    static var nightKnobPop: CGFloat = 0     // the night knob's first-hover wobble
     static var powerHover: CGFloat = 0       // 0→1 while the cursor is on the power button — drives its swell, disc tint, and the power⇄moon face crossfade
 
     // the pill is exactly its grid — derived from the slot stack, never hand-counted
@@ -292,6 +294,10 @@ final class StripView: NSView {
                 || oldValue == Theme.slots.firstIndex(where: { $0.kind == .power }) {
                 powerSpring.start()
             }
+            // hover haptic: the power button only — the one button that gets it.
+            if hoverSlot >= 0, Theme.slots[hoverSlot].kind == .power {
+                hapticTick(.alignment)
+            }
         }
     }
 
@@ -446,39 +452,113 @@ final class StripView: NSView {
     // (recomputed every check, so it tracks the handle as it travels). this —
     // and only this — drives the knob swell + first-hover wobble.
     private var knobWasHovered = false
-    private lazy var knobSpring = ChaseTimer(
-        get: { Theme.knobHover },
-        set: { v in Theme.knobHover = v; tab.needsDisplay = true },
-        target: { [weak self] in (self?.knobHovered ?? false) ? 1 : 0 },
-        rate: 0.25, epsilon: 0.004)
+    // the KNOB's own hover, position-driven: cursor vs the knob's live rect
+    // (recomputed every check, so it tracks the handle as it travels). this —
+    // and only this — drives the knob swell + first-hover wobble. ONE
+    // machinery, TWO sliders: the brightness knob and the night knob are
+    // the same component, differing only in which state they read and write.
+    private final class KnobHoverMachine {
+        private let hovered: () -> Bool
+        private let read: () -> CGFloat
+        private let write: (CGFloat) -> Void
+        private let popWrite: (CGFloat) -> Void
+        private let latch: () -> Bool          // summon's shared first-hover latch
+        private let setLatch: () -> Void
+        private(set) var wasHovered = false
+        private lazy var spring = ChaseTimer(
+            get: read,
+            set: write,
+            target: { [weak self] in (self?.hovered() ?? false) ? 1 : 0 },
+            rate: 0.25, epsilon: 0.004)
+        private var popTimer: Timer?
+        private var pop: CGFloat = 0
+        private var popV: CGFloat = 0
 
-    private func knobRect() -> NSRect {
-        let i = Theme.slots.firstIndex { $0.kind == .slider } ?? 0
+        init(hovered: @escaping () -> Bool, read: @escaping () -> CGFloat,
+             write: @escaping (CGFloat) -> Void, popWrite: @escaping (CGFloat) -> Void,
+             latch: @escaping () -> Bool, setLatch: @escaping () -> Void) {
+            self.hovered = hovered; self.read = read
+            self.write = write; self.popWrite = popWrite
+            self.latch = latch; self.setLatch = setLatch
+        }
+
+        // called wherever the cursor↔knob relationship may have changed. the
+        // FIRST knob hover of a summon (a shared latch the daemon poll clears
+        // on park) also fires the wobble.
+        func sync() {
+            let h = hovered()
+            if h, !wasHovered, glassDocked, !latch() {
+                setLatch()
+                firePop()
+            }
+            wasHovered = h
+            spring.start()
+        }
+
+        // the first-hover bounce: an underdamped spring released from
+        // displacement 1 — the knob swells ~12% and wobbles back to rest
+        // (ω ≈ 20.5 rad/s, ζ ≈ 0.34 → two visible overshoots, ~0.5s). its own
+        // 120fps integrator, started on demand, self-stopping at rest.
+        private func firePop() {
+            pop = 1
+            popV = 0
+            guard popTimer == nil else { return }
+            let t = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in
+                guard let self else { return }
+                let K: CGFloat = 420, C: CGFloat = 14, dt: CGFloat = 1.0 / 120.0
+                popV += (-K * pop - C * popV) * dt
+                pop += popV * dt
+                if abs(pop) < 0.002, abs(popV) < 0.02 {
+                    pop = 0
+                    popTimer?.invalidate(); popTimer = nil
+                }
+                popWrite(pop)
+                tab.needsDisplay = true
+            }
+            RunLoop.main.add(t, forMode: .common)
+            popTimer = t
+        }
+    }
+
+    // one per slider — the brightness knob and the night knob are the same
+    // component; only the state they read/write differs.
+    private lazy var sliderKnob = KnobHoverMachine(
+        hovered: { [weak self] in self?.knobHovered(.slider) ?? false },
+        read: { Theme.knobHover },
+        write: { v in Theme.knobHover = v; tab.needsDisplay = true },
+        popWrite: { Theme.knobPop = $0 },
+        latch: { [weak self] in self?.bouncedThisSummon ?? true },
+        setLatch: { [weak self] in self?.bouncedThisSummon = true })
+    private lazy var nightKnob = KnobHoverMachine(
+        hovered: { [weak self] in self?.knobHovered(.night) ?? false },
+        read: { Theme.nightKnobHover },
+        write: { v in Theme.nightKnobHover = v; tab.needsDisplay = true },
+        popWrite: { Theme.nightKnobPop = $0 },
+        latch: { [weak self] in self?.bouncedThisSummon ?? true },
+        setLatch: { [weak self] in self?.bouncedThisSummon = true })
+
+    private func knobRect(_ kind: Theme.Kind) -> NSRect {
+        let i = Theme.slots.firstIndex { $0.kind == kind } ?? 0
         let r = Theme.slot(i, in: bounds)
         let yBottom = r.maxY - Theme.sliderHandle / 2
         let yTop = r.minY + Theme.sliderHandle / 2
-        let hc = yBottom + (yTop - yBottom) * max(0, min(1, Theme.sliderDisplay))
+        let v = kind == .slider ? Theme.sliderDisplay : Theme.nightDisplay
+        let hc = yBottom + (yTop - yBottom) * max(0, min(1, v))
         return NSRect(x: r.midX - Theme.sliderHandle / 2, y: hc - Theme.sliderHandle / 2,
                       width: Theme.sliderHandle, height: Theme.sliderHandle)
     }
 
-    private var knobHovered: Bool {
+    private func knobHovered(_ kind: Theme.Kind) -> Bool {
         guard glassDocked, let p = cursorPoint else { return false }
-        return knobRect().insetBy(dx: -3, dy: -3).contains(p)
+        return knobRect(kind).insetBy(dx: -3, dy: -3).contains(p)
     }
 
     // called wherever the cursor↔knob relationship may have changed: the 30Hz
     // poll (via reassertCursor — covers a stationary cursor while the knob
-    // moves under it), cursorUpdate, and drags. on the FIRST knob hover of a
-    // summon it also fires the wobble.
+    // moves under it), cursorUpdate, and drags. BOTH knobs sync here.
     func syncKnobHover() {
-        let h = knobHovered
-        if h, !knobWasHovered, glassDocked, !bouncedThisSummon {
-            bouncedThisSummon = true
-            fireKnobPop()
-        }
-        knobWasHovered = h
-        knobSpring.start()
+        sliderKnob.sync()
+        nightKnob.sync()
     }
 
     // the power button's hover blend: 1 while the cursor sits on its slot of
@@ -495,31 +575,6 @@ final class StripView: NSView {
             return 1
         },
         rate: 0.22, epsilon: 0.004)
-
-    // the knob's first-hover bounce: an underdamped spring released from
-    // displacement 1 — the knob swells ~12% and wobbles back to rest
-    // (ω ≈ 20.5 rad/s, ζ ≈ 0.34 → two visible overshoots, ~0.5s). its own
-    // 120fps integrator, started on demand, self-stopping at rest.
-    private var popTimer: Timer?
-    private var popV: CGFloat = 0
-    private func fireKnobPop() {
-        Theme.knobPop = 1
-        popV = 0
-        guard popTimer == nil else { return }
-        let t = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            let K: CGFloat = 420, C: CGFloat = 14, dt: CGFloat = 1.0 / 120.0
-            popV += (-K * Theme.knobPop - C * popV) * dt
-            Theme.knobPop += popV * dt
-            if abs(Theme.knobPop) < 0.002, abs(popV) < 0.02 {
-                Theme.knobPop = 0
-                popTimer?.invalidate(); popTimer = nil
-            }
-            tab.needsDisplay = true
-        }
-        RunLoop.main.add(t, forMode: .common)
-        popTimer = t
-    }
 
     // crossfade the knob face (Night-Day ⇄ %) — the face spring runs only while the
     // blend has distance to cover
@@ -545,6 +600,26 @@ final class StripView: NSView {
     // one drag mapping, two writers: the value the cursor maps to is
     // written straight through to whichever hardware owns the slot —
     // keyboard backlight or Night Shift strength.
+    // ── haptics ── the trackpad "tickle": NSHapticFeedbackManager is what
+    // System Settings' sliders use for detents. one .levelChange ratchet
+    // tick per 5% crossed DURING A DRAG — nothing on hover, nothing on
+    // grab. the system throttles levelChange so a fast scrub reads as
+    // notch-to-notch, and unsupported hardware no-ops silently.
+    private var hapticStep = Int.min
+
+    private func hapticTick(_ pattern: NSHapticFeedbackManager.FeedbackPattern) {
+        NSHapticFeedbackManager.defaultPerformer.perform(pattern, performanceTime: .now)
+    }
+
+    // prime the ratchet at the grab position without firing — the first
+    // levelChange waits for real motion, not just the press.
+    private func armHapticStep(at p: NSPoint) {
+        guard let i = dragSlot else { return }
+        let r = Theme.slot(i, in: bounds)
+        let v = min(1, max(0, (r.maxY - p.y) / r.height))
+        hapticStep = Int((v * 20).rounded(.down))
+    }
+
     private func updateSliderValue(at p: NSPoint) {
         guard let i = dragSlot else { return }
         let r = Theme.slot(i, in: bounds)
@@ -563,6 +638,13 @@ final class StripView: NSView {
         default:
             break
         }
+        // detent tick: one .levelChange per 5% crossed — the ratchet. fire
+        // only when the step index actually moves, so holding still is silent.
+        let step = Int((v * 20).rounded(.down))
+        if step != hapticStep {
+            hapticStep = step
+            hapticTick(.levelChange)
+        }
         needsDisplay = true
     }
 
@@ -573,10 +655,12 @@ final class StripView: NSView {
         case .slider:
             dragSlot = i
             setFaceTarget(1)
+            armHapticStep(at: p)
             updateSliderValue(at: p)
         case .night:
             dragSlot = i
             setNightFaceTarget(1)
+            armHapticStep(at: p)
             updateSliderValue(at: p)
         case .power:
             sleepSystem()
@@ -592,6 +676,7 @@ final class StripView: NSView {
 
     override func mouseUp(with event: NSEvent) {
         dragSlot = nil
+        hapticStep = Int.min                   // fresh ratchet next grab
         setFaceTarget(0)        // back to the Night-Day icon on release — no debounce
         setNightFaceTarget(0)   // …and back to the moon on the night knob
     }
@@ -666,6 +751,8 @@ enum SVGIcon {
     enum Name: String {
         case battery, calendar, audio, bluetooth, mic, power, moon
         case nightDay = "Night-Day"
+        case night = "night"            // the night-shift moon (Material bedtime_off, filled)
+        case nightOff = "night-off"     // the slashed moon — shown when Night Shift is fully off
     }
 
     private static let assetDirectory = FileManager.default.homeDirectoryForCurrentUser
@@ -1397,13 +1484,17 @@ enum KnobFace {
 // the night-shift slider — drawSlider's twin with warm ink and a moon
 // face: the value run is lamp amber (the ink of the thing it controls),
 // the knob stays in the knob family, and the face crossfades moon ⇄ %.
-// the knob doesn't swell or pop — that theater belongs to the brightness
-// slider's knob; this one is a dial, not a button.
+// the knob swells and wobbles like the brightness knob — one
+// KnobHoverMachine per slider, the same theater in the same place.
 func drawNightSlider(in slot: NSRect) {
     let v = max(0, min(1, Theme.nightDisplay))
     let slotHover = max(0, min(1, Theme.nightHover))   // whole slot: the fill tint
+    let knobHover = max(0, min(1, Theme.nightKnobHover))  // knob only: the swell
     let cx = slot.midX
-    let knobSize = Theme.sliderHandle
+    // the knob breathes: a touch bigger while the KNOB itself is hovered,
+    // plus the first-hover wobble swinging both ways around that —
+    // drawSlider's own arithmetic, same constants
+    let knobSize = max(18, Theme.sliderHandle * (1 + 0.08 * knobHover + 0.12 * Theme.nightKnobPop))
 
     // handle center travel: v=0 (shallow/off) parks at the bottom, v=1
     // (intensive) at the top — up means more, matching the drag mapping
@@ -1455,9 +1546,12 @@ func drawNightSlider(in slot: NSRect) {
     if face < 1 {
         let f = 1 - face
         let size = (knobSize - 6) * f
-        SVGIcon.draw(.moon, color: Theme.glass, inRect: NSRect(x: handle.midX - size / 2,
-                                                               y: handle.midY - size / 2,
-                                                               width: size, height: size),
+        // the face glyph follows the schedule: the night moon while it runs,
+        // the slashed moon when the schedule is fully off
+        SVGIcon.draw(Theme.nightOff ? .nightOff : .night, color: Theme.glass,
+                     inRect: NSRect(x: handle.midX - size / 2,
+                                    y: handle.midY - size / 2,
+                                    width: size, height: size),
                      fraction: edgeAlpha(f))
     }
 }
