@@ -63,6 +63,10 @@ enum Theme {
     // a widget can claim multiple cells via `span`: a span-5 slider is one
     // continuous 5-cell region — cells inside a span have no gap between
     // them; the gap only separates widgets.
+    //
+    // the column reads as a narrative, top to bottom:
+    //   date → time → device power → connection
+    //   (the warm track) → control (the sliders) → sleep (power)
     enum Kind {
         case battery, calendar, hour, minute, slider, night, audio, bluetooth, microphone, power
     }
@@ -72,10 +76,10 @@ enum Theme {
         init(_ kind: Kind, span: Int = 1) { self.kind = kind; self.span = span }
     }
     static let slots: [SlotDef] = [
-        .init(.battery),
+        .init(.calendar),
         .init(.hour),
         .init(.minute),
-        .init(.calendar),
+        .init(.battery),       // status groups with status: charge above connection
         .init(.bluetooth),
         .init(.audio),
         .init(.microphone),
@@ -116,8 +120,8 @@ enum Theme {
     // stems 2.3pt — measurably heavier than every glyph next to it; the
     // calendar's number sits at semibold — lighter than bold, still solid
     // inside the glyph's 2pt outline.)
-    static let typeSize: CGFloat = 24     // clock digits — ink-normalized like the icons:
-                                          // "14" lays down 25.5pt of ink vs the glyphs' 26.25pt
+    static let typeSize: CGFloat = 22    // the clock — SF Mono (system mono): digits in
+                                         // a true monospace face, one fused two-line block
     static let dateSize: CGFloat = 12     // sized for the calendar's number area
 
     // slider — material design 3's shape language in smalt's skin. the
@@ -261,7 +265,7 @@ var fillBlend: CGFloat = 1                         // LPM fill crossfade
 // the battery's charge fill — the slider palette end to end: the normal
 // state wears the brightness slider's value run, low power mode wears the
 // night-shift slider's warm run (the lamp amber, not a separate yellow)
-func batteryFillColor(_ lpm: Bool) -> NSColor { lpm ? Theme.nightFill : Theme.sliderFill }
+func batteryFillColor(_ lpm: Bool) -> NSColor { lpm ? Theme.nightFill : Theme.trioInk }
 
 // two opaque colors blended on device rgb
 func lerp(_ a: NSColor, _ b: NSColor, _ t: CGFloat) -> NSColor {
@@ -744,8 +748,7 @@ final class StripView: NSView {
         // the collective pill: one warm stadium behind the connectable
         // trio — bluetooth · audio · microphone — drawn in the sliders'
         // exact track language: same width (sliderTrack), same capsule
-        // rounding, running the trio's full span of slots so it reads as
-        // another track above the two below it.
+        // rounding, running the trio's full span of slots.
         if let first = Theme.slots.firstIndex(where: { $0.kind == .bluetooth }),
            let last = Theme.slots.firstIndex(where: { $0.kind == .microphone }) {
             let top = Theme.slot(first, in: bounds)
@@ -1424,14 +1427,14 @@ func drawBattery(in slot: NSRect) {
 // the live render, the digits sat ~1.3 grid units low (7.5px air above vs
 // 4px below at 2x); the well is raised half of that to true it.
 func drawCalendar(in slot: NSRect) {
-    SVGIcon.draw(.calendar, color: Theme.ink, in: slot)
+    SVGIcon.draw(.calendar, color: Theme.trioInk, in: slot)
     let day = Calendar.current.component(.day, from: Date())
     let body = SVGIcon.gridRect(CGRect(x: 4.5, y: 9.85, width: 15, height: 9.5),
                                 for: .calendar, in: slot)
     // semibold — lighter than the old bold; at 12pt, bold's 1.9pt stems
     // read chunkier than the glyph's own 2pt outline
     drawText("\(day)", font: .tabular(Theme.dateSize, .semibold),
-             color: Theme.ink, in: body)
+             color: Theme.trioInk, in: body)
 }
 
 // heroicons, one 24 grid — audio (out), bluetooth, mic (in). the trio
@@ -1504,9 +1507,12 @@ func drawMicrophone(in slot: NSRect, ink: NSColor) {
 }
 
 // time: hour over minute — one CELL slot each, tabular SF Pro centered
+// the clock: hour over minute — one CELL slot each, SF Mono digits centered,
+// in the spine's trio ink like every other glyph on the warm track
 func drawClock(_ component: Calendar.Component, in slot: NSRect) {
     let value = String(format: "%02d", Calendar.current.component(component, from: Date()))
-    drawText(value, font: .tabular(Theme.typeSize, .regular), color: Theme.ink, in: slot)
+    drawText(value, font: NSFont.monospacedSystemFont(ofSize: Theme.typeSize, weight: .regular),
+             color: Theme.trioInk, in: slot)
 }
 
 // material design 3 slider, vertical, in smalt's skin — M3's own metrics
