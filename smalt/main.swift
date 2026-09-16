@@ -20,7 +20,7 @@ import IOKit.ps
 //   smoothly — no completion-handler races, no flicker.
 //
 //   the pill shows six widgets on one grid, each in its own fixed slot:
-//   battery · calendar · hour · minute · headphones · bluetooth · microphone
+//   battery · calendar · hour · minute · audio · bluetooth · microphone
 //   (the span-5 brightness slider rides below the stack)
 //   mission control    off the stage — it's not part of the expose grid
 //
@@ -55,7 +55,7 @@ enum Theme {
     // continuous 5-cell region — cells inside a span have no gap between
     // them; the gap only separates widgets.
     enum Kind {
-        case battery27, calendar, hour, minute, slider, headphones, bluetooth, microphone
+        case battery, calendar, hour, minute, slider, audio, bluetooth, microphone
     }
     struct SlotDef {
         let kind: Kind
@@ -63,29 +63,33 @@ enum Theme {
         init(_ kind: Kind, span: Int = 1) { self.kind = kind; self.span = span }
     }
     static let slots: [SlotDef] = [
-        .init(.battery27),
-        .init(.calendar),
+        .init(.battery),
         .init(.hour),
         .init(.minute),
-        .init(.headphones),
+        .init(.calendar),
         .init(.bluetooth),
+        .init(.audio),
         .init(.microphone),
         .init(.slider, span: 5),
     ]
     static var slotCount: Int { slots.count }
 
-    // SVG icons use one shared 24 grid and one uniform scale. AppKit loads
-    // the assets; SVGIcon caches them and draws them in these slots.
-    static let iconSize: CGFloat = 30       // grid 24 → 30pt, all icons
+    // SVG icons are ink-normalized: each glyph's ink is scaled to one
+    // optical size (see SVGIcon.frame) and centered in these 30pt slots.
+    static let iconSize: CGFloat = 30       // the 24 grid's base scale, all icons
 
     // grid debug: stroke every slot + the padding bounds so the layout is
     // visible. red = widget slots, blue = where the padding ends. flip to
     // false when done squinting at it.
     static let debugGrid = false
 
-    // type — SF Pro tabular digits at a weight whose stems sit at the icon
-    // stroke weight (medium at 15pt ≈ 1.2pt vs 1.25pt strokes)
-    static let typeSize: CGFloat = 19     // clock digits
+    // type — SF Pro tabular digits, weight-matched to the icon strokes:
+    // regular at 19pt stems ≈ 1.9pt vs the icons' rendered ~2.0pt. (medium
+    // stems 2.3pt — measurably heavier than every glyph next to it; the
+    // calendar's number sits at semibold — lighter than bold, still solid
+    // inside the glyph's 2pt outline.)
+    static let typeSize: CGFloat = 24     // clock digits — ink-normalized like the icons:
+                                          // "14" lays down 25.5pt of ink vs the glyphs' 26.25pt
     static let dateSize: CGFloat = 12     // sized for the calendar's number area
 
     // slider — material design 3's shape language in smalt's skin: 4dp
@@ -380,9 +384,9 @@ final class StripView: NSView {
         for i in 0..<Theme.slotCount {
             let r = Theme.slot(i, in: bounds)
             switch Theme.slots[i].kind {
-            case .battery27: drawBattery(in: r)
+            case .battery: drawBattery(in: r)
             case .calendar: drawCalendar(in: r)
-            case .headphones: drawHeadphones(in: r)
+            case .audio: drawAudio(in: r)
             case .bluetooth: drawBluetooth(in: r)
             case .microphone: drawMicrophone(in: r)
             case .slider: drawSlider(in: r)
@@ -420,7 +424,8 @@ final class StripView: NSView {
 // MARK: - drawing primitives
 //
 // two rules keep everything on its spot:
-//   · SVG icons draw on their shared 24×24 grid, centered in each slot
+//   · SVG icons draw ink-normalized on their 24×24 grid, centered in
+//     each slot (SVGIcon.frame)
 //   · text draws centered by INK (glyph bounds), not line height —
 //     line-height centering leaves digits riding high, which is exactly
 //     the "percentage isn't in the middle" bug
@@ -430,10 +435,8 @@ final class StripView: NSView {
 // and 24-unit layout apply to every SVG widget.
 enum SVGIcon {
     enum Name: String {
-        case battery27 = "battery-27"
-        case calendar = "calendar-today"
+        case battery, calendar, audio, bluetooth, mic
         case nightDay = "Night-Day"
-        case headphones, bluetooth, mic
     }
 
     private static let assetDirectory = FileManager.default.homeDirectoryForCurrentUser
@@ -452,32 +455,253 @@ enum SVGIcon {
         guard let tint = hex(color) else { return nil }
         let key = name.rawValue + tint
         if let cached = cache[key] { return cached }
-        let url = assetDirectory.appendingPathComponent(name.rawValue + ".svg")
-        guard let xml = try? String(contentsOf: url, encoding: .utf8),
-              let data = xml.replacingOccurrences(of: "#e3e3e3", with: tint)
-                  .data(using: .utf8),
+        var svg = try? String(contentsOf: assetDirectory.appendingPathComponent(name.rawValue + ".svg"),
+                              encoding: .utf8)
+        // ink normalization rescales each glyph — and its stroke with it
+        // (calendar grows 8%, battery shrinks 7%). compensate: stroke-width
+        // ÷ the glyph's scale, so every icon strokes at the same final
+        // weight — 1.5 grid units at the base scale, unfitted glyphs included.
+        var stroke: CGFloat?
+        if let b = ink[name] {
+            let f = optical / max(b.width, b.height)
+            if abs(f - 1) > 0.001 { stroke = 1.5 / f }
+        }
+        if let stroke {
+            svg = svg?.replacingOccurrences(of: "stroke-width=\"1.5\"",
+                                            with: String(format: "stroke-width=\"%.3f\"", stroke))
+        }
+        guard let svg, let data = svg
+            .replacingOccurrences(of: "#e3e3e3", with: tint)
+            .data(using: .utf8),
               let image = NSImage(data: data) else { return nil }
         cache[key] = image
         return image
     }
 
-    static func gridRect(_ r: CGRect, in slot: NSRect) -> NSRect {
-        let s = Theme.iconSize / 24
-        return NSRect(x: slot.midX + (r.minX - 12) * s,
-                      y: slot.midY + (r.minY - 12) * s,
-                      width: r.width * s, height: r.height * s)
+    // heroicons share a stroke weight, not a footprint: each glyph's ink
+    // (bounds measured off the rendered paths, stroke included) sits on a
+    // different piece of the 24 grid — battery squat, calendar square, mic
+    // tall — so drawing on the raw grid gave every widget its own optical
+    // size. each ink is scaled to one OPTICAL max-dimension and pinned by
+    // its ink-center to the slot's center instead. the per-icon scale costs
+    // a few % of stroke weight between glyphs — the trade for even sizes.
+    private static let ink: [Name: CGRect] = [
+        .battery:   CGRect(x: 0.75, y: 6.75, width: 22.5, height: 12),
+        .calendar:  CGRect(x: 2.25, y: 2.25, width: 19.5, height: 19.5),
+        .audio:     CGRect(x: 1.5,  y: 2.5,  width: 21,   height: 19),
+        .bluetooth: CGRect(x: 6.25, y: 1.75, width: 11.5, height: 20.5),
+        .mic:       CGRect(x: 5.25, y: 0.75, width: 13.5, height: 22.5),
+    ]
+    static let optical: CGFloat = 21   // ink target (longest side), 24-grid units
+
+    // where the glyph's 24-unit grid lands in the slot: ink scaled to
+    // `optical`, ink-center on the slot center. anything that must align
+    // with a glyph (the battery's charge fill, the calendar's day number)
+    // maps its grid coords through this frame — glyph and overlay can
+    // never disagree.
+    static func frame(_ name: Name, in slot: NSRect) -> NSRect {
+        let k: CGFloat, c: CGPoint
+        if let b = ink[name] {
+            k = Theme.iconSize / 24 * (optical / max(b.width, b.height))
+            c = CGPoint(x: b.midX, y: b.midY)
+        } else {
+            k = Theme.iconSize / 24          // unfitted (material) glyphs fill the grid
+            c = CGPoint(x: 12, y: 12)
+        }
+        return NSRect(x: slot.midX - c.x * k, y: slot.midY - c.y * k,
+                      width: 24 * k, height: 24 * k)
     }
 
     static func draw(_ name: Name, color: NSColor, in slot: NSRect) {
-        let rect = gridRect(CGRect(x: 0, y: 0, width: 24, height: 24), in: slot)
-        draw(name, color: color, inRect: rect)
+        draw(name, color: color, inRect: frame(name, in: slot))
+    }
+
+    // a rect in the glyph's 24 grid, through its fitted frame
+    static func gridRect(_ r: CGRect, for name: Name, in slot: NSRect) -> NSRect {
+        let f = frame(name, in: slot)
+        let s = f.width / 24
+        return NSRect(x: f.minX + r.minX * s, y: f.minY + r.minY * s,
+                      width: r.width * s, height: r.height * s)
     }
 
     static func draw(_ name: Name, color: NSColor, inRect rect: NSRect,
-                     fraction: CGFloat = 1) {
-        image(name, color: color)?.draw(in: rect, from: .zero,
+                     fraction: CGFloat = 1, stretch: Bool = false) {
+        // stretch: map the full 24 grid onto the rect as-is (non-uniform —
+        // for the bolt's taller-than-body frame); default aspect-fits
+        image(name, color: color)?.draw(in: rect,
+                                        from: stretch ? CGRect(x: 0, y: 0, width: 24, height: 24) : .zero,
                                         operation: .sourceOver, fraction: fraction,
                                         respectFlipped: true, hints: nil)
+    }
+}
+
+// MARK: - the charge bolt (SF Symbols bolt.fill)
+//
+// the bolt is the system's own bolt.fill symbol, resolved at runtime — no
+// glyph is embedded. it renders in two layers built from the symbol's
+// alpha silhouette: a DILATED copy in #FAF4F0 under the fill (the
+// dilation is the outside border), and the silhouette itself in the
+// battery's fill color on top. built once per tint, cached.
+enum ChargeBolt {
+    static let border = NSColor(srgbRed: 0xFA/255.0, green: 0xF4/255.0, blue: 0xF0/255.0, alpha: 1)  // #FAF4F0
+    private static let scale: CGFloat = 4                           // silhouette build scale (retina-crisp)
+    private static let borderPt: CGFloat = 1.0              // visible outside border
+    private static var cache: [String: (border: NSImage?, fill: NSImage?)] = [:]
+
+    private static func hex(_ color: NSColor) -> String {
+        guard let rgb = color.usingColorSpace(.deviceRGB) else { return "" }
+        return String(format: "%02X%02X%02X",
+                      Int((rgb.redComponent * 255).rounded()),
+                      Int((rgb.greenComponent * 255).rounded()),
+                      Int((rgb.blueComponent * 255).rounded()))
+    }
+
+    // the symbol's alpha silhouette as raw bytes (w×h, 1 byte/px), drawn
+    // at `scale`× its natural point size
+    private static func silhouette() -> (alpha: [UInt8], w: Int, h: Int)? {
+        guard let img = NSImage(systemSymbolName: "bolt.fill",
+                                accessibilityDescription: "charging") else { return nil }
+        let w = Int(round(img.size.width * scale))
+        let h = Int(round(img.size.height * scale))
+        guard w > 0, h > 0, let rep = NSBitmapImageRep(bitmapDataPlanes: nil,
+            pixelsWide: w, pixelsHigh: h, bitsPerSample: 8, samplesPerPixel: 4,
+            hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
+            bytesPerRow: 0, bitsPerPixel: 0) else { return nil }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        img.draw(in: NSRect(x: 0, y: 0, width: w, height: h), from: .zero,
+                 operation: .sourceOver, fraction: 1, respectFlipped: false, hints: nil)
+        NSGraphicsContext.restoreGraphicsState()
+        guard let data = rep.bitmapData else { return nil }
+        let stride = rep.bytesPerRow
+        var alpha = [UInt8](repeating: 0, count: w * h)
+        for y in 0..<h {
+            for x in 0..<w { alpha[y * w + x] = data[y * stride + x * 4 + 3] }
+        }
+        return (alpha, w, h)
+    }
+
+    // exact euclidean distance transform (Felzenszwalb–Huttenlocher), 1D pass
+    private static func edt1d(_ f: [Double]) -> [Double] {
+        let n = f.count
+        var d = [Double](repeating: 0, count: n)
+        var v = [Int](repeating: 0, count: n)
+        var z = [Double](repeating: 0, count: n + 1)
+        var k = 0
+        v[0] = 0; z[0] = -.infinity; z[1] = .infinity
+        for q in 1..<n {
+            var s = ((f[q] + Double(q * q)) - (f[v[k]] + Double(v[k] * v[k])))
+                / (2 * Double(q - v[k]))
+            while s <= z[k] {
+                k -= 1
+                s = ((f[q] + Double(q * q)) - (f[v[k]] + Double(v[k] * v[k])))
+                    / (2 * Double(q - v[k]))
+            }
+            k += 1
+            v[k] = q; z[k] = s; z[k + 1] = .infinity
+        }
+        k = 0
+        for q in 0..<n {
+            while z[k + 1] < Double(q) { k += 1 }
+            let dq = Double(q) - Double(v[k])
+            d[q] = dq * dq + f[v[k]]
+        }
+        return d
+    }
+
+    // squared distance from every pixel to the silhouette's edge
+    // (alpha ≥ 128 counts as inside, distance 0), computed column pass
+    // then row pass over the 0/∞ field
+    private static func outsideDist2(_ sil: (alpha: [UInt8], w: Int, h: Int),
+                                     pad: Int) -> (d2: [Double], W: Int, H: Int) {
+        let W = sil.w + 2 * pad, H = sil.h + 2 * pad
+        let INF = Double.greatestFiniteMagnitude / 4
+        var f = [Double](repeating: INF, count: W * H)
+        for y in 0..<sil.h {
+            for x in 0..<sil.w where sil.alpha[y * sil.w + x] >= 128 {
+                f[(y + pad) * W + (x + pad)] = 0
+            }
+        }
+        // columns
+        var g = [Double](repeating: 0, count: W * H)
+        for x in 0..<W {
+            var col = [Double](repeating: 0, count: H)
+            for y in 0..<H { col[y] = f[y * W + x] }
+            let r = edt1d(col)
+            for y in 0..<H { g[y * W + x] = r[y] }
+        }
+        // rows
+        var d2 = [Double](repeating: 0, count: W * H)
+        for y in 0..<H {
+            let r = edt1d(Array(g[y * W..<(y + 1) * W]))
+            for x in 0..<W { d2[y * W + x] = r[x] }
+        }
+        return (d2, W, H)
+    }
+
+    // tint an alpha field into an NSImage padded by `padPx` around the
+    // (w×h) region; image point size maps 1 byte = 1/scale pt
+    private static func tinted(alpha: [UInt8], w: Int, h: Int, padPx: Int,
+                               W: Int, H: Int, _ color: NSColor) -> NSImage? {
+        var buf = [UInt8](repeating: 0, count: W * H * 4)
+        let c = color.usingColorSpace(.deviceRGB)!
+        let rgb = [UInt8(c.redComponent * 255), UInt8(c.greenComponent * 255), UInt8(c.blueComponent * 255)]
+        for y in 0..<h {
+            for x in 0..<w {
+                let v = alpha[y * w + x]
+                guard v > 0 else { continue }
+                let i = ((y + padPx) * W + (x + padPx)) * 4
+                buf[i] = rgb[0]; buf[i + 1] = rgb[1]; buf[i + 2] = rgb[2]; buf[i + 3] = v
+            }
+        }
+        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: W,
+            pixelsHigh: H, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+            isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0,
+            bitsPerPixel: 0), let data = rep.bitmapData else { return nil }
+        let stride = rep.bytesPerRow
+        for y in 0..<H {
+            for x in 0..<W {
+                let i = (y * W + x) * 4
+                let d = y * stride + x * 4
+                data[d] = buf[i]; data[d + 1] = buf[i + 1]
+                data[d + 2] = buf[i + 2]; data[d + 3] = buf[i + 3]
+            }
+        }
+        rep.size = NSSize(width: CGFloat(W) / scale, height: CGFloat(H) / scale)
+        let img = NSImage()
+        img.addRepresentation(rep)
+        return img
+    }
+
+    static func draw(fill color: NSColor, in rect: NSRect) {
+        let key = hex(color)
+        if cache[key] == nil {
+            guard let sil = silhouette() else { return }
+            let R = CGFloat(borderPt * scale)               // border width, mask px
+            let pad = Int(R) + 2                            // slack so the ring fits the bitmap
+            let (d2, W, H) = outsideDist2(sil, pad: pad)
+            // border alpha: full inside and up to R−0.5px out, AA ramp to R+0.5
+            var bAlpha = [UInt8](repeating: 0, count: W * H)
+            for i in 0..<(W * H) {
+                let d = d2[i].squareRoot()
+                bAlpha[i] = UInt8(max(0, min(1, R + 0.5 - d)) * 255)
+            }
+            guard let border = tinted(alpha: bAlpha, w: W, h: H, padPx: 0,
+                                      W: W, H: H, border),
+                  let fill = tinted(alpha: sil.alpha, w: sil.w, h: sil.h, padPx: 0,
+                                    W: sil.w, H: sil.h, color) else { return }
+            cache[key] = (border, fill)
+        }
+        guard let imgs = cache[key], let b = imgs.border, let f = imgs.fill else { return }
+        // the border bitmap carries `pad` px of margin, which maps to
+        // pad/scale pt: expanded by that, its silhouette lands exactly on
+        // the rect, ring hanging outside it
+        let padPt = (CGFloat(borderPt * scale) + 2) / scale
+        let full = { (img: NSImage) in NSRect(origin: .zero, size: img.size) }
+        b.draw(in: rect.insetBy(dx: -padPt, dy: -padPt), from: full(b),
+               operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+        f.draw(in: rect, from: full(f), operation: .sourceOver,
+               fraction: 1, respectFlipped: true, hints: nil)
     }
 }
 
@@ -569,97 +793,60 @@ func readBatteryLevel() -> (pct: Int, charging: Bool)? {
     return nil
 }
 
-// the battery — iOS 27 style: a faint shell (Vector.svg, 27×14 grid:
-// capsule body + nub) with the charge fill drawn ON TOP of it as a solid
-// capsule. the shell shows through the empty side at every charge level,
-// and the fill always lays a floor behind whatever sits in the body later.
+// the battery — heroicons' outline battery (24 grid: body x 1.5..21,
+// y 7.5..18, r 2.25, nub beyond) with the charge fill drawn INSIDE the
+// stroke. the outline reads at every level; the fill runs from the left
+// edge under it, so the empty side is pure stroke, the full side is fill
+// edge to edge.
 enum Battery {
-    // the svg's own grid: body 0..24.7 wide, nub out to 27
-    static let grid = CGSize(width: 27, height: 14)
-    static let bodyWidth: CGFloat = 24.6981
-
-    // the shell body's EXACT path, traced from Vector.svg — a squircle, not
-    // a circular capsule. the fill clips to this so the fill's corners sit
-    // exactly on the shell's corners instead of rounding past them.
-    private static let bodyPath: NSBezierPath = {
-        let p = NSBezierPath()
-        p.move(to: NSPoint(x: 0.665982, y: 1.77772))
-        p.curve(to: NSPoint(x: 0.0, y: 7.0),
-                controlPoint1: NSPoint(x: 0.0, y: 2.78661),
-                controlPoint2: NSPoint(x: 0.0, y: 4.19108))
-        p.curve(to: NSPoint(x: 0.665982, y: 12.2223),
-                controlPoint1: NSPoint(x: 0.0, y: 9.80892),
-                controlPoint2: NSPoint(x: 0.0, y: 11.2134))
-        p.curve(to: NSPoint(x: 1.75625, y: 13.3259),
-                controlPoint1: NSPoint(x: 0.954292, y: 12.659),
-                controlPoint2: NSPoint(x: 1.32477, y: 13.034))
-        p.curve(to: NSPoint(x: 6.91548, y: 14.0),
-                controlPoint1: NSPoint(x: 2.75297, y: 14.0),
-                controlPoint2: NSPoint(x: 4.14047, y: 14.0))
-        p.line(to: NSPoint(x: 17.7827, y: 14.0))
-        p.curve(to: NSPoint(x: 22.9419, y: 13.3259),
-                controlPoint1: NSPoint(x: 20.5577, y: 14.0),
-                controlPoint2: NSPoint(x: 21.9452, y: 14.0))
-        p.curve(to: NSPoint(x: 24.0322, y: 12.2223),
-                controlPoint1: NSPoint(x: 23.3734, y: 13.034),
-                controlPoint2: NSPoint(x: 23.7438, y: 12.659))
-        p.curve(to: NSPoint(x: 24.6981, y: 7.0),
-                controlPoint1: NSPoint(x: 24.6981, y: 11.2134),
-                controlPoint2: NSPoint(x: 24.6981, y: 9.80892))
-        p.curve(to: NSPoint(x: 24.0322, y: 1.77772),
-                controlPoint1: NSPoint(x: 24.6981, y: 4.19108),
-                controlPoint2: NSPoint(x: 24.6981, y: 2.78661))
-        p.curve(to: NSPoint(x: 22.9419, y: 0.674122),
-                controlPoint1: NSPoint(x: 23.7438, y: 1.34096),
-                controlPoint2: NSPoint(x: 23.3734, y: 0.965956))
-        p.curve(to: NSPoint(x: 17.7827, y: 0.0),
-                controlPoint1: NSPoint(x: 21.9452, y: 0.0),
-                controlPoint2: NSPoint(x: 20.5577, y: 0.0))
-        p.line(to: NSPoint(x: 6.91548, y: 0.0))
-        p.curve(to: NSPoint(x: 1.75625, y: 0.674122),
-                controlPoint1: NSPoint(x: 4.14047, y: 0.0),
-                controlPoint2: NSPoint(x: 2.75297, y: 0.0))
-        p.curve(to: NSPoint(x: 0.665982, y: 1.77772),
-                controlPoint1: NSPoint(x: 1.32477, y: 0.965956),
-                controlPoint2: NSPoint(x: 0.954292, y: 1.34096))
-        p.close()
-        return p
-    }()
+    // the fill clips to the outline's OWN rect (path at x 1.5..21,
+    // y 7.5..18, r 2.25, in the svg's 24 grid) — tucking UNDER the stroke,
+    // which draws on top. an inset clip here leaves a hairline antialiasing
+    // seam where the fill edge meets the stroke edge; under the stroke
+    // there is no seam.
+    static let bodyRect = CGRect(x: 1.5, y: 7.5, width: 19.5, height: 10.5)
+    static let bodyRadius: CGFloat = 2.25
 
     static func draw(pct: Int, charging: Bool, in slot: NSRect) {
         let f = CGFloat(max(0, min(100, pct))) / 100
-        // one color per state, all from the palette: a pastel sage green
-        // while charging, house amber in low power mode, the deep ink
-        // otherwise. the fill IS the read — no digits, no bolt.
-        let fillCharging = NSColor(srgbRed: 0x6F/255.0, green: 0x8A/255.0, blue: 0x5A/255.0, alpha: 1)  // #6F8A5A — deep sage
-        let fillColor = charging ? fillCharging
-            : ProcessInfo.processInfo.isLowPowerModeEnabled ? Theme.lpm
-            : Theme.inkDeep
+        // two fills, all from the palette: house amber in low power mode,
+        // the slider's warm run color otherwise (the battery and the slider
+        // share one fill voice). charging is signaled by the bolt alone
+        // (drawn below) — the fill never changes for it.
+        let fillColor = ProcessInfo.processInfo.isLowPowerModeEnabled ? Theme.lpm
+            : Theme.sliderFill
 
-        // fit the svg's grid to the slot width, vertically centered — the
-        // grid decides, nothing hand-placed
-        let s = slot.width / grid.width
-        let frame = NSRect(x: slot.midX - grid.width * s / 2,
-                           y: slot.midY - grid.height * s / 2,
-                           width: grid.width * s, height: grid.height * s)
+        // the glyph's fitted frame decides placement — fill and shell map
+        // through the same transform, so they can never disagree
+        let frame = SVGIcon.frame(.battery, in: slot)
+        let s = frame.width / 24
 
-        // the shell: faint at every state, exactly as exported — the svg
-        // carries its own 30% opacity, so the tint never lands on it
-        SVGIcon.draw(.battery27, color: fillColor, inRect: frame)
-
-        // the charge: the shell's own body path as the clip, filled from the
-        // left edge → f — solid where the shell is 30%, corners exactly on
-        // the shell's corners (a circular capsule here rounds past the
-        // squircle and the fill reads as a blob eating the shell)
+        // the charge first: the body's interior as the clip, filled from
+        // the left edge → f, then the shell stroke drawn ON TOP — crisp at
+        // every level, never painted over by the fill
         if f > 0 {
             let context = NSGraphicsContext.current!.cgContext
             context.saveGState()
             context.translateBy(x: frame.minX, y: frame.minY)
             context.scaleBy(x: s, y: s)
-            bodyPath.addClip()
+            NSBezierPath(roundedRect: bodyRect,
+                         xRadius: bodyRadius, yRadius: bodyRadius).addClip()
             fillColor.setFill()
-            NSRect(x: 0, y: 0, width: bodyWidth * f, height: grid.height).fill()
+            NSRect(x: bodyRect.minX, y: bodyRect.minY,
+                   width: bodyRect.width * f, height: bodyRect.height).fill()
             context.restoreGState()
+        }
+        SVGIcon.draw(.battery, color: fillColor, inRect: frame)
+
+        // the charge bolt: the system's own bolt.fill symbol (ChargeBolt),
+        // breaking the body's top and bottom edges — outside border under,
+        // fill on top
+        if charging {
+            let w = 13.3 * s, h = 19 * s
+            let boltRect = NSRect(x: frame.minX + bodyRect.midX * s - w / 2,
+                                  y: frame.minY + bodyRect.midY * s - h / 2,
+                                  width: w, height: h)
+            ChargeBolt.draw(fill: fillColor, in: boltRect)
         }
     }
 }
@@ -669,20 +856,25 @@ func drawBattery(in slot: NSRect) {
     Battery.draw(pct: pct, charging: charging, in: slot)
 }
 
-// The calendar SVG leaves a 14×10-unit body for the day number.
+// the heroicon calendar's day-number well: between the header band
+// (the curve through y≈9–11.25) and the body's bottom inner edge (y≈20.25).
+// the well is NOT the naive geometric center of that band — measured off
+// the live render, the digits sat ~1.3 grid units low (7.5px air above vs
+// 4px below at 2x); the well is raised half of that to true it.
 func drawCalendar(in slot: NSRect) {
     SVGIcon.draw(.calendar, color: Theme.ink, in: slot)
     let day = Calendar.current.component(.day, from: Date())
-    let body = SVGIcon.gridRect(CGRect(x: 5, y: 10, width: 14, height: 10), in: slot)
-    // Bold compensates for the smaller date size so its strokes sit beside
-    // the clock's 19pt medium digits.
-    drawText("\(day)", font: .tabular(Theme.dateSize, .bold),
+    let body = SVGIcon.gridRect(CGRect(x: 4.5, y: 9.85, width: 15, height: 9.5),
+                                for: .calendar, in: slot)
+    // semibold — lighter than the old bold; at 12pt, bold's 1.9pt stems
+    // read chunkier than the glyph's own 2pt outline
+    drawText("\(day)", font: .tabular(Theme.dateSize, .semibold),
              color: Theme.ink, in: body)
 }
 
-// md3 audio glyphs, verbatim — headphones (out), bluetooth, mic (in)
-func drawHeadphones(in slot: NSRect) {
-    SVGIcon.draw(.headphones, color: Theme.ink, in: slot)
+// heroicons, one 24 grid — audio (out), bluetooth, mic (in)
+func drawAudio(in slot: NSRect) {
+    SVGIcon.draw(.audio, color: Theme.ink, in: slot)
 }
 
 func drawBluetooth(in slot: NSRect) {
@@ -696,7 +888,7 @@ func drawMicrophone(in slot: NSRect) {
 // time: hour over minute — one CELL slot each, tabular SF Pro centered
 func drawClock(_ component: Calendar.Component, in slot: NSRect) {
     let value = String(format: "%02d", Calendar.current.component(component, from: Date()))
-    drawText(value, font: .tabular(Theme.typeSize), color: Theme.ink, in: slot)
+    drawText(value, font: .tabular(Theme.typeSize, .regular), color: Theme.ink, in: slot)
 }
 
 // material design 3 slider, vertical, in smalt's skin — M3's own metrics
@@ -1220,7 +1412,33 @@ let strip: NSWindow = {
 
 // MARK: - daemon
 
+// one-shot diagnostic (SMALT_SNAPSHOT=1): render the strip's widgets into
+// a png and exit — lets the agent see exactly what the glass draws without
+// screen-recording permission.
+func snapshotStrip() {
+    let scale: CGFloat = 2
+    let W = tab.bounds.width, H = tab.bounds.height
+    let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(W * scale),
+        pixelsHigh: Int(H * scale), bitsPerSample: 8, samplesPerPixel: 4,
+        hasAlpha: true, isPlanar: false, colorSpaceName: .calibratedRGB,
+        bytesPerRow: 0, bitsPerPixel: 0)!
+    let cg = NSGraphicsContext(bitmapImageRep: rep)!.cgContext
+    cg.saveGState()
+    // the glass's flipped space: y counts down, points not pixels
+    cg.translateBy(x: 0, y: H * scale)
+    cg.scaleBy(x: scale, y: -scale)
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = NSGraphicsContext(cgContext: cg, flipped: true)
+    tab.draw(tab.bounds)
+    NSGraphicsContext.restoreGraphicsState()
+    cg.restoreGState()
+    try? rep.representation(using: .png, properties: [:])!
+        .write(to: URL(fileURLWithPath: "/tmp/smalt-strip.png"))
+    exit(0)
+}
+
 func runDaemon() -> Never {
+    if ProcessInfo.processInfo.environment["SMALT_SNAPSHOT"] != nil { snapshotStrip() }
     // NSApplication is required for workspace/screen notifications to fire.
     // accessory = no dock icon.
     let app = NSApplication.shared
