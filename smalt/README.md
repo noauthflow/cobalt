@@ -115,6 +115,22 @@ anyway, so any permission a later version earns survives rebuilds.)
   channel at user privilege: CoreBrightness posts no darwin notification
   and the Keyboard Backlight HID device rejects listeners (privileged) —
   both were tested; sampling is the only channel macOS gives us
+- the night slider below the brightness slider is the same M3 language in
+  warm ink — lamp amber (#A8732A value run, #7E5414 under the cursor); the
+  knob face is the moon SVG at rest, the % while you drag, OFF at zero
+  when the schedule is off. it is live too: it drives `CBBlueLightClient`
+  — the Night Shift pane's own client class — `getStrength:` /
+  `setStrength:commit:`, the pane's own call path. the slider IS the live
+  strength (0 = shallow, 1 = intensive; System Settings calls it
+  Less/More) and samples it on the same 30Hz/2Hz clock, so the sunset →
+  sunrise ramp glides the knob on its own while you watch. two
+  hard-won system facts shaped it: the applied warmth is its own layer —
+  schedule Off alone leaves the screen warm, so OFF also pins the applied
+  CCT to neutral 6000K; and the client caches the schedule, so every call
+  builds a FRESH client (a long-lived one reads stale — that's the bug
+  that once made drag-back-up fail to re-arm). dragging to zero switches
+  the schedule Off; dragging back up re-arms exactly what was there.
+  verify from the terminal: `smalt night status | off | <0..1>`
 - the pill is clickable; widgets don't do anything yet — v1 flips that
 - focus: hover = attention. while the cursor is on the glass the panel
   takes KEY status (`OverlayPanel` canBecomeKey + `strip.makeKey()`) —
