@@ -40,7 +40,15 @@ enum Theme {
     static let glass   = NSColor(srgbRed: 0xFA/255.0, green: 0xF6/255.0, blue: 0xF3/255.0, alpha: 1)  // #FAF6F3 pill glass
     static let ink     = NSColor(srgbRed: 0x99/255.0, green: 0x94/255.0, blue: 0x7F/255.0, alpha: 1)  // #99947F strokes + labels
     static let inkDeep = NSColor(srgbRed: 0x3D/255.0, green: 0x38/255.0, blue: 0x29/255.0, alpha: 1)  // #3D3829 the darker on-palette ink
-    static let lpm     = NSColor(srgbRed: 0xCA/255.0, green: 0x8A/255.0, blue: 0x04/255.0, alpha: 1)  // #CA8A04 low-power amber — icon + percentage, one color
+    static let warm    = NSColor(srgbRed: 0xFF/255.0, green: 0xE9/255.0, blue: 0xE5/255.0, alpha: 1)  // #FFE9E5 track wash behind bluetooth · audio · mic
+    static let trioInk = NSColor(srgbRed: 0x70/255.0, green: 0x56/255.0, blue: 0x51/255.0, alpha: 1)  // #705651 the trio's glyphs — stepped down from plain ink so they sit INSIDE the warm track
+
+    // the trio's ink standard: every glyph renders with the SAME ink
+    // footprint area (345pt² of bounding box), tuned so the widest glyph
+    // (the speaker) matches the knob faces' ~19pt of ink at the current
+    // sliderHandle. equal area keeps the different aspects — the tall
+    // rune, the square speaker, the tall mic — at identical visual mass.
+    static let trioInkArea: CGFloat = 345
 
     // grid — one uniform CELL slot per widget, stacked top to bottom
     static let cell: CGFloat = 30
@@ -81,6 +89,23 @@ enum Theme {
     // optical size (see SVGIcon.frame) and centered in these 30pt slots.
     static let iconSize: CGFloat = 30       // the 24 grid's base scale, all icons
 
+    // the trio's hover band: ONE darkened segment of the warm track, full
+    // track width and one cell tall, that GLIDES from icon to icon as the
+    // cursor moves (position in slot-index space) and crossfades away when
+    // the cursor leaves the trio. two springs: alpha + position.
+    static var trioBandAlpha: CGFloat = 0
+    static var trioBandPos: CGFloat = 0      // band center, slot-index space
+    static var trioBandTarget: Int = -1      // hovered trio slot, -1 = none
+
+    static func isIcon(_ kind: Kind) -> Bool {
+        switch kind {
+        case .bluetooth, .audio, .microphone:
+            return true
+        default:
+            return false
+        }
+    }
+
     // grid debug: stroke every slot + the padding bounds so the layout is
     // visible. red = widget slots, blue = where the padding ends. flip to
     // false when done squinting at it.
@@ -95,11 +120,13 @@ enum Theme {
                                           // "14" lays down 25.5pt of ink vs the glyphs' 26.25pt
     static let dateSize: CGFloat = 12     // sized for the calendar's number area
 
-    // slider — material design 3's shape language in smalt's skin: 4dp
-    // track, round handle. vertical, one CELL tall... spans 5 below the
-    // time. v0 drew a fixed value; the live hardware wiring is further down.
-    static let sliderTrack: CGFloat = 24   // = sliderHandle: knob and track are the same width
-    static let sliderHandle: CGFloat = 24
+    // slider — material design 3's shape language in smalt's skin. the
+    // track is the glyphs' FULL ink width (iconSize/24 × optical = 26.25),
+    // so the two sliders and the trio's warm stadium align exactly with
+    // the battery/calendar's span above them — one width, everywhere.
+    // the knob stays 24: a disc slightly prouder than its track, M3-style.
+    static var sliderTrack: CGFloat { iconSize / 24 * 21 }   // = 26.25 — the ink-normalized glyph width
+    static var sliderHandle: CGFloat { sliderTrack }         // the knob: same width, one disc
     static let sliderFill = NSColor(srgbRed: 0x75/255.0, green: 0x56/255.0, blue: 0x4F/255.0, alpha: 1)  // #75564F value run
     static let sliderHoverFill = NSColor(srgbRed: 0x5E/255.0, green: 0x46/255.0, blue: 0x3F/255.0, alpha: 1)  // #5E463F value run under the cursor — one step TOWARD THE KNOB, darker, never near the empty run
     static let knob      = NSColor(srgbRed: 0x3A/255.0, green: 0x2D/255.0, blue: 0x27/255.0, alpha: 1)  // #3A2D27 knob bg
@@ -231,7 +258,10 @@ var boltAlpha: CGFloat = 0                         // bolt crossfade
 var fillFrom = Theme.sliderFill, fillTo = Theme.sliderFill
 var fillBlend: CGFloat = 1                         // LPM fill crossfade
 
-func batteryFillColor(_ lpm: Bool) -> NSColor { lpm ? Theme.lpm : Theme.sliderFill }
+// the battery's charge fill — the slider palette end to end: the normal
+// state wears the brightness slider's value run, low power mode wears the
+// night-shift slider's warm run (the lamp amber, not a separate yellow)
+func batteryFillColor(_ lpm: Bool) -> NSColor { lpm ? Theme.nightFill : Theme.sliderFill }
 
 // two opaque colors blended on device rgb
 func lerp(_ a: NSColor, _ b: NSColor, _ t: CGFloat) -> NSColor {
@@ -298,6 +328,14 @@ final class StripView: NSView {
             if hoverSlot >= 0, Theme.slots[hoverSlot].kind == .power {
                 hapticTick(.alignment)
             }
+            // the trio's hover band: retarget and wake both springs — the
+            // band glides to the new segment, or crossfades out off the trio
+            Theme.trioBandTarget = (hoverSlot >= 0 && Theme.isIcon(Theme.slots[hoverSlot].kind)) ? hoverSlot : -1
+            if Theme.trioBandAlpha < 0.001, Theme.trioBandTarget >= 0 {
+                Theme.trioBandPos = CGFloat(Theme.trioBandTarget)   // first show: bloom in place, don't glide from stale pos
+            }
+            trioBandAlphaSpring.start()
+            trioBandPosSpring.start()
         }
     }
 
@@ -447,6 +485,20 @@ final class StripView: NSView {
             return 1
         },
         rate: 0.22, epsilon: 0.004)
+
+    // the band's two springs: alpha answers "is a trio slot hovered on a
+    // PARKED glass", position glides toward the hovered slot's index and
+    // holds still while the band fades out off the trio.
+    private lazy var trioBandAlphaSpring = ChaseTimer(
+        get: { Theme.trioBandAlpha },
+        set: { Theme.trioBandAlpha = $0; tab.needsDisplay = true },
+        target: { glassDocked && Theme.trioBandTarget >= 0 ? 1 : 0 },
+        rate: 0.25, epsilon: 0.004)
+    private lazy var trioBandPosSpring = ChaseTimer(
+        get: { Theme.trioBandPos },
+        set: { Theme.trioBandPos = $0; tab.needsDisplay = true },
+        target: { Theme.trioBandTarget >= 0 ? CGFloat(Theme.trioBandTarget) : Theme.trioBandPos },
+        rate: 0.3, epsilon: 0.002)
 
     // the KNOB's own hover, position-driven: cursor vs the knob's live rect
     // (recomputed every check, so it tracks the handle as it travels). this —
@@ -689,33 +741,70 @@ final class StripView: NSView {
         path.fill()
         window?.invalidateShadow()   // the shadow follows the tab silhouette
 
+        // the collective pill: one warm stadium behind the connectable
+        // trio — bluetooth · audio · microphone — drawn in the sliders'
+        // exact track language: same width (sliderTrack), same capsule
+        // rounding, running the trio's full span of slots so it reads as
+        // another track above the two below it.
+        if let first = Theme.slots.firstIndex(where: { $0.kind == .bluetooth }),
+           let last = Theme.slots.firstIndex(where: { $0.kind == .microphone }) {
+            let top = Theme.slot(first, in: bounds)
+            let bot = Theme.slot(last, in: bounds)
+            let track = NSRect(x: top.midX - Theme.sliderTrack / 2, y: top.minY,
+                               width: Theme.sliderTrack, height: bot.maxY - top.minY)
+            Theme.warm.setFill()
+            NSBezierPath(roundedRect: track, xRadius: Theme.sliderTrack / 2,
+                         yRadius: Theme.sliderTrack / 2).fill()
+
+            // the hover band: one cell-tall segment, full track width,
+            // darkened — clipped to the stadium so its ends follow the
+            // track's own rounding. glides between slots on the springs.
+            if Theme.trioBandAlpha > 0.001 {
+                let yc = top.minY + (Theme.trioBandPos - CGFloat(first))
+                    * (Theme.cell + Theme.gap) + Theme.cell / 2
+                let band = NSRect(x: track.minX, y: yc - Theme.cell / 2,
+                                  width: track.width, height: Theme.cell)
+                if let ctx = NSGraphicsContext.current?.cgContext {
+                    ctx.saveGState()
+                    NSBezierPath(roundedRect: track, xRadius: Theme.sliderTrack / 2,
+                                 yRadius: Theme.sliderTrack / 2).addClip()
+                    // the band is its own capsule — always rounded, even mid-track
+                    Theme.trioInk.withAlphaComponent(0.15 * Theme.trioBandAlpha).setFill()
+                    NSBezierPath(roundedRect: band, xRadius: band.width / 2,
+                                 yRadius: band.width / 2).fill()
+                    ctx.restoreGState()
+                }
+            }
+        }
+
         // the grid: each entry of Theme.slots draws in its own uniform
         // slot — the container is built from the same list, so widget and
         // window can never disagree
         for i in 0..<Theme.slotCount {
             let r = Theme.slot(i, in: bounds)
-            switch Theme.slots[i].kind {
+            let kind = Theme.slots[i].kind
+
+            // the trio rides the hover band (drawn with the pill above);
+            // the glyphs themselves never move
+            if Theme.isIcon(kind) {
+                switch kind {
+                case .bluetooth: drawBluetooth(in: r, ink: Theme.trioInk)
+                case .audio: drawAudio(in: r, ink: Theme.trioInk)
+                case .microphone: drawMicrophone(in: r, ink: Theme.trioInk)
+                default: break
+                }
+                continue
+            }
+
+            switch kind {
             case .battery: drawBattery(in: r)
             case .calendar: drawCalendar(in: r)
-            case .audio: drawAudio(in: r)
-            case .bluetooth: drawBluetooth(in: r)
-            case .microphone: drawMicrophone(in: r)
             case .slider: drawSlider(in: r)
             case .night: drawNightSlider(in: r)
             case .hour: drawClock(.hour, in: r)
             case .minute: drawClock(.minute, in: r)
             case .power: drawPower(in: r)
-            }
-
-            // hover wash: a soft ink tint filling the whole slot, so the
-            // slot itself is the hit target — same fixed grid, nothing moves.
-            // the slider opts out: its dark knob is feedback enough, and the
-            // wash over the thick track just made mud. power opts out too —
-            // it carries its own hover state (the disc itself lightens).
-            if i == hoverSlot && Theme.slots[i].kind != .slider && Theme.slots[i].kind != .night && Theme.slots[i].kind != .power {
-                Theme.ink.withAlphaComponent(0.12).setFill()
-                NSBezierPath(roundedRect: r.insetBy(dx: 1, dy: 1),
-                             xRadius: 5, yRadius: 5).fill()
+            default: break   // the trio: handled above, behind the lens
             }
         }
 
@@ -804,9 +893,9 @@ enum SVGIcon {
     private static let ink: [Name: CGRect] = [
         .battery:   CGRect(x: 0.75, y: 6.75, width: 22.5, height: 12),
         .calendar:  CGRect(x: 2.25, y: 2.25, width: 19.5, height: 19.5),
-        .audio:     CGRect(x: 1.5,  y: 2.5,  width: 21,   height: 19),
-        .bluetooth: CGRect(x: 6.25, y: 1.75, width: 11.5, height: 20.5),
-        .mic:       CGRect(x: 5.25, y: 0.75, width: 13.5, height: 22.5),
+        .audio:     CGRect(x: 1.5,  y: 3.0,  width: 18.8, height: 18.0),  // solid: body + two waves
+        .bluetooth: CGRect(x: 5.0, y: 2.0, width: 12.71, height: 20.0), // material filled rune
+        .mic:       CGRect(x: 4.5,  y: 0.75, width: 15.0, height: 22.5),  // solid: capsule + stand
         .power:     CGRect(x: 3,    y: 3,    width: 18,   height: 18),
     ]
     static let optical: CGFloat = 21   // ink target (longest side), 24-grid units
@@ -816,10 +905,10 @@ enum SVGIcon {
     // with a glyph (the battery's charge fill, the calendar's day number)
     // maps its grid coords through this frame — glyph and overlay can
     // never disagree.
-    static func frame(_ name: Name, in slot: NSRect) -> NSRect {
+    static func frame(_ name: Name, in slot: NSRect, optical target: CGFloat? = nil) -> NSRect {
         let k: CGFloat, c: CGPoint
         if let b = ink[name] {
-            k = Theme.iconSize / 24 * (optical / max(b.width, b.height))
+            k = Theme.iconSize / 24 * ((target ?? optical) / max(b.width, b.height))
             c = CGPoint(x: b.midX, y: b.midY)
         } else {
             k = Theme.iconSize / 24          // unfitted (material) glyphs fill the grid
@@ -829,8 +918,24 @@ enum SVGIcon {
                       width: 24 * k, height: 24 * k)
     }
 
-    static func draw(_ name: Name, color: NSColor, in slot: NSRect) {
-        draw(name, color: color, inRect: frame(name, in: slot))
+    // ink-AREA normalization: the glyph's bounding box covers exactly
+    // `area` rendered points² regardless of aspect — equal mass, equal
+    // presence, one rule. centered on the ink like everything else.
+    static func frame(_ name: Name, in slot: NSRect, inkArea area: CGFloat) -> NSRect {
+        guard let b = ink[name] else { return frame(name, in: slot) }
+        let k = (area / (b.width * b.height)).squareRoot()
+        let c = CGPoint(x: b.midX, y: b.midY)
+        return NSRect(x: slot.midX - c.x * k, y: slot.midY - c.y * k,
+                      width: 24 * k, height: 24 * k)
+    }
+
+    static func draw(_ name: Name, color: NSColor, in slot: NSRect,
+                     optical target: CGFloat? = nil) {
+        draw(name, color: color, inRect: frame(name, in: slot, optical: target))
+    }
+
+    static func draw(_ name: Name, color: NSColor, in slot: NSRect, inkArea area: CGFloat) {
+        draw(name, color: color, inRect: frame(name, in: slot, inkArea: area))
     }
 
     // a rect in the glyph's 24 grid, through its fitted frame
@@ -856,13 +961,14 @@ enum SVGIcon {
 //
 // the bolt is the system's own bolt.fill symbol, resolved at runtime — no
 // glyph is embedded. it renders in two layers built from the symbol's
-// alpha silhouette: a DILATED copy in #FAF4F0 under the fill (the
+// alpha silhouette: a DILATED copy in the glass color under the fill (the
 // dilation is the outside border), and the silhouette itself in the
-// battery's fill color on top. built once per tint, cached.
+// knob ink on top — the darker head both sliders share. built once per
+// tint, cached.
 enum ChargeBolt {
-    static let border = NSColor(srgbRed: 0xFA/255.0, green: 0xF4/255.0, blue: 0xF0/255.0, alpha: 1)  // #FAF4F0
+    static let border = NSColor(srgbRed: 0xFA/255.0, green: 0xF6/255.0, blue: 0xF3/255.0, alpha: 1)  // the glass — the border must vanish into it
     private static let scale: CGFloat = 4                   // silhouette build scale (retina-crisp)
-    private static let borderPt: CGFloat = 1.0              // visible outside border
+    private static let borderPt: CGFloat = 1.25             // visible outside border
     private static var borderImg: NSImage?                  // tint-independent — built once
     private static var fillImgs: [String: NSImage] = [:]    // silhouette tinted per body color
     private static var sil: (alpha: [UInt8], w: Int, h: Int)?
@@ -1266,12 +1372,14 @@ enum Battery {
         // the charge bolt: the system's own bolt.fill symbol (ChargeBolt),
         // breaking the body's top and bottom edges — outside border under,
         // fill on top. crossfaded on plug/unplug while the glass is up.
+        // the bolt reads in the KNOB ink — the head both sliders share —
+        // one darker step than either fill, normal and LPM alike.
         if boltAlpha > 0.001 {
             let w = 13.3 * s, h = 19 * s
             let boltRect = NSRect(x: frame.minX + bodyRect.midX * s - w / 2,
                                   y: frame.minY + bodyRect.midY * s - h / 2,
                                   width: w, height: h)
-            ChargeBolt.draw(fill: fillColor, alpha: boltAlpha, in: boltRect)
+            ChargeBolt.draw(fill: Theme.knob, alpha: boltAlpha, in: boltRect)
         }
     }
 }
@@ -1326,13 +1434,21 @@ func drawCalendar(in slot: NSRect) {
              color: Theme.ink, in: body)
 }
 
-// heroicons, one 24 grid — audio (out), bluetooth, mic (in)
-func drawAudio(in slot: NSRect) {
-    SVGIcon.draw(.audio, color: Theme.ink, in: slot)
+// heroicons, one 24 grid — audio (out), bluetooth, mic (in). the trio
+// rides its collective warm track (see draw), so each glyph draws at
+// track scale — the slot inset to the track's own 24pt footprint — and
+// in trioInk, not plain ink, so it sits inside the wash instead of on
+// the bare glass.
+private func drawTrio(_ name: SVGIcon.Name, in slot: NSRect, ink: NSColor) {
+    SVGIcon.draw(name, color: ink, in: slot, inkArea: Theme.trioInkArea)
 }
 
-func drawBluetooth(in slot: NSRect) {
-    SVGIcon.draw(.bluetooth, color: Theme.ink, in: slot)
+func drawAudio(in slot: NSRect, ink: NSColor) {
+    drawTrio(.audio, in: slot, ink: ink)
+}
+
+func drawBluetooth(in slot: NSRect, ink: NSColor) {
+    drawTrio(.bluetooth, in: slot, ink: ink)
 }
 
 // heroicon power — the destructive action gets a BODY, not another outline
@@ -1383,8 +1499,8 @@ func sleepSystem() {
     try? p.run()
 }
 
-func drawMicrophone(in slot: NSRect) {
-    SVGIcon.draw(.mic, color: Theme.ink, in: slot)
+func drawMicrophone(in slot: NSRect, ink: NSColor) {
+    drawTrio(.mic, in: slot, ink: ink)
 }
 
 // time: hour over minute — one CELL slot each, tabular SF Pro centered
@@ -1414,12 +1530,19 @@ func drawSlider(in slot: NSRect) {
 
     // track: one thick rounded bar the full slot height. the quiet run is
     // the value color held to 30%, FIXED — the value run must stay clearly
-    // darker than the empty run in every state
+    // darker than the empty run in every state. at 0% the value run hides
+    // entirely under the knob, so hover answers on the QUIET run instead:
+    // the empty track is what lights.
+    let zero = v < 0.005
     let trackRect = NSRect(x: cx - Theme.sliderTrack / 2, y: slot.minY,
                            width: Theme.sliderTrack, height: slot.height)
     let stadium = NSBezierPath(roundedRect: trackRect, xRadius: Theme.sliderTrack / 2,
                                yRadius: Theme.sliderTrack / 2)
-    Theme.sliderFill.withAlphaComponent(0.3).setFill()
+    let quiet = zero
+        ? lerp(Theme.sliderFill, Theme.sliderHoverFill, slotHover)
+            .withAlphaComponent(0.3 + 0.25 * slotHover)
+        : Theme.sliderFill.withAlphaComponent(0.3)
+    quiet.setFill()
     stadium.fill()
     // active run: FLAT-top fill from the knob's center line down. a rounded
     // top here bulges up at the center while the knob's circle bulges down —
@@ -1502,12 +1625,19 @@ func drawNightSlider(in slot: NSRect) {
     let yTop = slot.minY + knobSize / 2
     let hc = yBottom + (yTop - yBottom) * v
 
-    // track: same stadium, quiet run the night color held to 30%
+    // track: same stadium, quiet run the night color held to 30% — and
+    // the same 0% rule: no visible value run means hover lights the quiet
+    // run instead.
+    let zero = v < 0.005
     let trackRect = NSRect(x: cx - Theme.sliderTrack / 2, y: slot.minY,
                            width: Theme.sliderTrack, height: slot.height)
     let stadium = NSBezierPath(roundedRect: trackRect, xRadius: Theme.sliderTrack / 2,
                                yRadius: Theme.sliderTrack / 2)
-    Theme.nightFill.withAlphaComponent(0.3).setFill()
+    let quiet = zero
+        ? lerp(Theme.nightFill, Theme.nightHoverFill, slotHover)
+            .withAlphaComponent(0.3 + 0.25 * slotHover)
+        : Theme.nightFill.withAlphaComponent(0.3)
+    quiet.setFill()
     stadium.fill()
     // active run: FLAT-top fill from the knob's center line down, clipped
     // to the track — same geometry, warm ink; hover deepens it one step
