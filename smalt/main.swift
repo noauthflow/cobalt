@@ -431,7 +431,6 @@ final class StripView: NSView {
 enum SVGIcon {
     enum Name: String {
         case battery27 = "battery-27"
-        case bolt = "bolt"
         case calendar = "calendar-today"
         case nightDay = "Night-Day"
         case headphones, bluetooth, mic
@@ -483,8 +482,7 @@ enum SVGIcon {
 }
 
 // text centered on its ink — CoreText glyph bounds, not the line box
-func drawText(_ s: String, font: NSFont, color: NSColor, in r: NSRect,
-              kern: CGFloat = 0, hScale: CGFloat = 1) {
+func drawText(_ s: String, font: NSFont, color: NSColor, in r: NSRect, kern: CGFloat = 0) {
     let line = CTLineCreateWithAttributedString(NSAttributedString(
         string: s, attributes: [.font: font, .foregroundColor: color, .kern: kern]))
     let inkBounds = CTLineGetBoundsWithOptions(line, .useGlyphPathBounds)
@@ -492,10 +490,7 @@ func drawText(_ s: String, font: NSFont, color: NSColor, in r: NSRect,
     ctx.saveGState()
     ctx.translateBy(x: r.midX, y: r.midY)   // to the slot center…
     ctx.scaleBy(x: 1, y: -1)                // …unflip for CoreText (y-up)
-    ctx.scaleBy(x: hScale, y: 1)            // horizontal squeeze, ink stays centered
-    ctx.textMatrix = .identity              // reset: CTLineDraw leaves a mutated
-                                            // text matrix behind, which would
-                                            // squish every widget drawn after us
+    ctx.textMatrix = .identity
     ctx.translateBy(x: -inkBounds.midX, y: -inkBounds.midY)
     CTLineDraw(line, ctx)
     ctx.restoreGState()
@@ -631,18 +626,9 @@ enum Battery {
         return p
     }()
 
-    // the figma palette — fixed in ALL states: the shell never changes,
-    // the digits and bolt are always white; only the fill answers charge
-    static let shellColor = NSColor(srgbRed: 0xCD/255.0, green: 0xCD/255.0, blue: 0xCD/255.0, alpha: 1)   // #CDCDCD
-    static let textColor = NSColor.white                                                                 // #FFFFFF
-    static let fillNormal = NSColor(srgbRed: 0x12/255.0, green: 0x12/255.0, blue: 0x12/255.0, alpha: 1)  // #121212
-    static let fillLowPower = NSColor(srgbRed: 1, green: 0xCC/255.0, blue: 0x0A/255.0, alpha: 1)         // #FFCC0A
-    static let fillLow = NSColor(srgbRed: 1, green: 0, blue: 0, alpha: 1)                                // #FF0000
-
-    static func draw(pct: Int, charging: Bool, in slot: NSRect) {
+    static func draw(pct: Int, in slot: NSRect) {
         let f = CGFloat(max(0, min(100, pct))) / 100
-        let fillColor = pct < 20 ? fillLow
-            : ProcessInfo.processInfo.isLowPowerModeEnabled ? fillLowPower : fillNormal
+        let ink = ProcessInfo.processInfo.isLowPowerModeEnabled ? Theme.lpm : Theme.ink
 
         // fit the svg's grid to the slot width, vertically centered — the
         // grid decides, nothing hand-placed
@@ -651,61 +637,38 @@ enum Battery {
                            y: slot.midY - grid.height * s / 2,
                            width: grid.width * s, height: grid.height * s)
 
-        // the shell: #CDCDCD in every state, low power included
-        SVGIcon.draw(.battery27, color: shellColor, inRect: frame)
+        // the shell: faint at every state, exactly as exported
+        SVGIcon.draw(.battery27, color: ink, inRect: frame)
 
         // the charge: the shell's own body path as the clip, filled from the
-        // left edge → f — corners exactly on the shell's corners
+        // left edge → f — solid where the shell is 30%, corners exactly on
+        // the shell's corners (a circular capsule here rounds past the
+        // squircle and the fill reads as a blob eating the shell)
         if f > 0 {
             let context = NSGraphicsContext.current!.cgContext
             context.saveGState()
             context.translateBy(x: frame.minX, y: frame.minY)
             context.scaleBy(x: s, y: s)
             bodyPath.addClip()
-            fillColor.setFill()
+            ink.setFill()
             NSRect(x: 0, y: 0, width: bodyWidth * f, height: grid.height).fill()
             context.restoreGState()
         }
 
-        // the percentage: SF Pro Bold 11, −0.5 tracking, white in all
-        // states. while charging below 100, the bolt stands beside the
-        // digits and the run centers as ONE collective — no shrinking, the
-        // digits draw at their natural size. at 100% the bolt is dropped:
-        // on a full battery macOS still reports AC power, but nothing is
-        // charging.
+        // the percentage: the figma spec verbatim — SF Pro Bold 11,
+        // −0.5 tracking, centered in the body on the fill (glass, so it
+        // reads as knocked out of the ink)
         let text = "\(pct)"
-        let font = NSFont.systemFont(ofSize: 11, weight: .bold)
-        let boltH: CGFloat = 11
-        let boltW = boltH * 6.07094 / 8.26108   // the bolt glyph's tight bounds
-        let gap: CGFloat = 0.5
-        let showBolt = charging && pct < 100
-        let boltRun: CGFloat = showBolt ? gap + boltW : 0
-
-        func inkWidth() -> CGFloat {
-            let line = CTLineCreateWithAttributedString(NSAttributedString(
-                string: text, attributes: [.font: font, .kern: -0.5]))
-            return CTLineGetBoundsWithOptions(line, .useGlyphPathBounds).width
-        }
-        let textW = inkWidth()
-
-        // centered on the BODY (not the nub), placed by INK width so side
-        // bearings can't shove the bolt right of where the math put it
-        let bodyCenter = frame.minX + bodyWidth * s / 2
-        let x0 = bodyCenter - (textW + boltRun) / 2
-        drawText(text, font: font, color: textColor, in: NSRect(
-            x: x0, y: frame.minY, width: textW, height: frame.height),
+        let figmaFont = NSFont.systemFont(ofSize: 11, weight: .bold)
+        drawText(text, font: figmaFont, color: Theme.glass, in: NSRect(
+            x: frame.minX, y: frame.minY, width: bodyWidth * s, height: frame.height),
             kern: -0.5)
-        if showBolt {
-            SVGIcon.draw(.bolt, color: textColor, inRect: NSRect(
-                x: x0 + textW + gap, y: frame.midY - boltH / 2,
-                width: boltW, height: boltH))
-        }
     }
 }
 
 func drawBattery(in slot: NSRect) {
-    guard let (pct, charging) = batteryLevel() else { return }
-    Battery.draw(pct: pct, charging: charging, in: slot)
+    guard let (pct, _) = batteryLevel() else { return }
+    Battery.draw(pct: pct, in: slot)
 }
 
 // The calendar SVG leaves a 14×10-unit body for the day number.
@@ -1264,6 +1227,14 @@ func runDaemon() -> Never {
     // accessory = no dock icon.
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
+
+    // never App Nap: an accessory app with no active windows gets its
+    // timers suspended while idle — the clock tick would freeze until the
+    // mouse moves. one activity claim pins the run loop for the daemon's
+    // lifetime.
+    _ = ProcessInfo.processInfo.beginActivity(
+        options: .userInitiated,
+        reason: "smalt: menu strip timers")
 
     // hardware sync: F5/F6 and the auto-brightness daemon change the
     // backlight behind our back. there is no push channel at our privilege
