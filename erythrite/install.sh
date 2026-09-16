@@ -1,58 +1,32 @@
 #!/bin/bash
-# erythrite — living wallpaper daemon: build, sign, install to ~/.local/bin, register launchd agent
-#   ./install.sh            build + install + start
-#   ./install.sh uninstall  stop agent, remove plist + binary (config + video stay)
+# erythrite — install the aerial injector CLI into ~/.local/bin
+#   ./install.sh            install (symlink)
+#   ./install.sh uninstall  remove symlink
 set -euo pipefail
 cd "$(dirname "$0")"
 
-NAME="erythrite"
-LABEL="dev.cobalt.$NAME"
-BIN_LOCAL="$HOME/.local/bin/$NAME"
-PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
-GUI="gui/$(id -u)"
+BIN="$HOME/.local/bin/erythrite"
 
 if [[ "${1:-}" == "uninstall" ]]; then
-  launchctl bootout "$GUI/$LABEL" 2>/dev/null || true
-  rm -f "$PLIST" "$BIN_LOCAL" /tmp/$NAME.pid
-  echo "uninstalled: agent stopped, plist + $BIN_LOCAL removed"
-  echo "(config at ~/.config/$NAME.conf and your videos were left alone)"
+  rm -f "$BIN"
+  echo "removed: $BIN"
+  echo "note: injected aerials stay until removed with \`erythrite remove\`"
   exit 0
 fi
 
-command -v swiftc >/dev/null || { echo "swiftc is required (xcode-select --install)"; exit 1; }
+command -v python3 >/dev/null || { echo "python3 is required"; exit 1; }
+command -v ffmpeg  >/dev/null || { echo "ffmpeg is required (brew install ffmpeg)"; exit 1; }
 
-if security find-identity -v -p codesigning | grep -q "cobalt-dev"; then
-  IDENTITY="cobalt-dev"
-else
-  echo "note: no 'cobalt-dev' identity found — signing ad-hoc (fine, no permissions needed)"
-  IDENTITY="-"
+# scrub leftovers from the old window-daemon incarnation
+if [[ -f "$HOME/Library/LaunchAgents/dev.cobalt.erythrite.plist" ]]; then
+  launchctl unload "$HOME/Library/LaunchAgents/dev.cobalt.erythrite.plist" 2>/dev/null || true
+  rm -f "$HOME/Library/LaunchAgents/dev.cobalt.erythrite.plist"
+  echo "removed old daemon launchd plist"
 fi
+rm -f "$HOME/.local/bin/azurite"
 
-echo "building (swiftc)"
+chmod +x "$PWD/erythrite"
 mkdir -p "$HOME/.local/bin"
-swiftc -O -o "$BIN_LOCAL" main.swift \
-  -framework AppKit -framework AVFoundation -framework QuartzCore -framework IOKit
-codesign --force --sign "$IDENTITY" "$BIN_LOCAL"
-if [[ "$IDENTITY" != "-" ]]; then echo "signed (cobalt-dev)"; fi
+ln -sfn "$PWD/erythrite" "$BIN"
 
-launchctl bootout "$GUI/$LABEL" 2>/dev/null || true
-cat > "$PLIST" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>$LABEL</string>
-  <key>ProgramArguments</key><array><string>$BIN_LOCAL</string></array>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>StandardErrorPath</key><string>/tmp/$NAME.err</string>
-</dict></plist>
-EOF
-launchctl bootstrap "$GUI" "$PLIST"
-
-echo
-echo "installed: $BIN_LOCAL"
-echo "launchd:   $LABEL — starts at login, restarts on crash, logs: /tmp/$NAME.err"
-echo
-echo "permissions: none — no accessibility, no input monitoring, no network"
-echo "next step:  $NAME monitors"
-echo "            $NAME set --monitor \"<name from monitors>\" <video-file>"
+echo "installed: $BIN -> $PWD/erythrite"

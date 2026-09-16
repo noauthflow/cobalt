@@ -1,111 +1,117 @@
 # erythrite
 
-living wallpaper. a looping video — or a still image — behind everything:
-apps, widgets, desktop icons, the glass menu bar. every display gets its own,
-bound by name and remembered. the thing macOS won't give you: different
-wallpapers per display, *and* per-display videos, on the desktop layer, with
-a legibility scrim.
+custom videos as **native macOS aerials** — fully animated on the lock screen,
+rendered by Apple's own WallpaperAgent. not an overlay, not a daemon, not a
+hack of a window layer: the video becomes a first-class aerial indistinguishable
+from the ones Apple ships.
 
-not a hack of the native wallpaper: a daemon that owns one borderless window
-per display at the desktop window layer. above the static wallpaper, below
-the desktop icons, so the desktop keeps working (icons float over the video)
-and the menu bar / dock blur over it like glass. the native wallpaper is
-untouched and still there underneath — quit erythrite and it's back.
+## history
 
-## why it's safe
+this tool had two incarnations.
 
-this is the point of the tool, so it's stated plainly:
+**v1 (the window daemon):** a Swift launchd agent owning one borderless
+`NSWindow` per display at the desktop window layer, `AVPlayerLayer` looping
+video behind the desktop icons, scrims, per-monitor bindings, battery pausing.
+it worked, but it fought the compositor: windows to manage, Accessibility-adjacent
+behaviors, a daemon to keep alive, and the lock screen was untouchable no
+matter what.
 
-- **built from source, on your machine.** `swiftc main.swift`. the binary in
-  `~/.local/bin` is compiled from the one file in this folder and nothing else.
-- **no updater.** no Sparkle, no feed, no phone-home. the binary only changes
-  when you re-run `install.sh` yourself. the supply chain is: you, your
-  compiler, this file.
-- **no permissions.** no accessibility, no input monitoring, no screen
-  capture, no sandbox escape. AppKit + AVFoundation only.
-- **no network.** the binary doesn't open a socket. verify: `lsof -p $(pgrep erythrite)`.
+**v2 (this, formerly a separate experiment called azurite):** macOS 26/27
+renders the lock screen — and the desktop's still snapshot — from one
+user-writable aerials store. erythrite writes entries there the way Apple's
+own pipeline does, and macOS plays your file believing it's theirs. no daemon,
+no windows, no permissions, nothing to crash. the old `main.swift` is gone
+from the tree (still in git history); the store is the only thing that
+remembers anything.
 
-read the source before you build it. it's ~450 lines. that's the whole point.
+the trade: the desktop shows a **still** — Apple's policy for every aerial,
+ours included (video decode never runs behind your icons). the lock screen is
+fully animated. v1 animated the desktop and couldn't touch the lock screen;
+v2 owns the lock screen natively and accepts Apple's still desktop. if desktop
+video ever matters again, that's a window-layer problem, and git history has
+the code.
 
 ## how it works
 
-one borderless `NSWindow` per display at `kCGDesktopWindowLevel`, with:
+    ~/Library/Application Support/com.apple.wallpaper/aerials/
+      manifest/entries.json    asset catalog (plain JSON, user-writable)
+      videos/<UUID>.mov        HEVC hvc1
+      thumbnails/<UUID>.png
+      TVIdleScreenStrings.bundle/.../Localizable.nocache.loctable
 
-- `ignoresMouseEvents` — the desktop stays fully clickable through the video
-- `canJoinAllSpaces + stationary` — present on every space, out of Mission Control
-- `AVPlayerLayer` + `AVPlayerLooper` — gapless loop, hardware HEVC decode, muted
+`erythrite add` puts your video in `videos/`, a thumbnail in `thumbnails/`, an
+entry in `entries.json`, and a display-name key in the loctable — exactly the
+shape Apple's pipeline writes. it then selects the asset in the wallpaper
+store (`Store/Index.plist`) and SIGKILLs WallpaperAgent, which launchd
+immediately respawns onto the new state. that's the whole trick.
 
-one `AVQueuePlayer` feeds every display's layer, so the loop stays in sync
-across monitors. a `CALayer` scrim (default 22% black) sits over the video
-for legibility — tune per video in the config.
+## the four landmines
 
-power discipline: on battery, low power mode, or sleeping displays the
-player freezes on the current frame (`rate = 0`, decode stops) and resumes
-when power returns. display connect/disconnect and resolution changes
-rebuild the windows.
+the aerials extension validates injected assets and silently falls back to a
+baked-in Golden Gate clip when any of these are violated. each was found by
+bisecting a byte-identical clone of a real Apple aerial:
 
-## displays are set individually, by name
+1. **file:// URLs must be percent-encoded.** the manifest's `url-*` and
+   `previewImage` fields are parsed with `URL(string:)`; a raw space in
+   `Application Support` yields nil and the asset is rejected.
+2. **`localizedNameKey` must exist in the loctable.** an unknown key rejects
+   the asset even if the video bytes are Apple's own. erythrite injects the
+   name into all 45 locales.
+3. **`subcategories` must be non-empty.** the extension indexes assets by
+   subcategory; an empty array rejects the asset.
+4. **your own gallery section requires a custom *category*.** subcategories
+   only group rows inside Apple's existing sections (Landscapes, Cities, …).
+   erythrite creates one shared "Erythrite" top-level category and files
+   every injection there.
 
-there is no default display. every monitor is bound by hand:
+symptom of any violation: Golden Gate still background,
+`WallpaperAerialsExtensionError (0)` in the log, `FigVideoQueue: 0 frames
+enqueued`. the one-liner diagnostic:
 
-    erythrite monitors                              # names, resolutions, what's playing
-    erythrite set --monitor "AG271QG4" ~/Movies/odyssey.mp4
-    erythrite set --monitor "Built-in Retina Display" ~/pics/dune.png --scrim 0.1
+    lsof -p $(pgrep -f WallpaperAerialsExtension.appex) | grep mov
 
-any file works: **video** (mp4/mov, hevc/h264, loops) or **image** (png, jpg,
-heic, tiff, gif, bmp, webp — a still layer, zero decode cost, pause/resume
-no-op). mix freely: video on one display, image on another.
-
-`--monitor` is required — even with a single display. the config file is the
-cache: each display's binding is remembered, so a monitor keeps its video
-across reboots, and a display that isn't connected right now keeps its block
-and re-applies the moment it appears. dock at home, dock away — each setup
-remembers itself.
-
-unconfigured displays show the native wallpaper and are left alone.
-
-## config — ~/.config/erythrite.conf
-
-one block per display, keyed by the name from `erythrite monitors`. you can
-hand-edit; the daemon picks up changes within 5s (or `erythrite reload`).
-
-    battery-pause on              # freeze on battery + low power mode
-
-    monitor "Built-in Retina Display"
-    video ~/Movies/TOP G.mp4
-    scrim 0.15                    # black veil, 0–1 (legibility dial)
-    gravity fill                  # fill (crop) or fit (letterbox)
-
-    monitor "AG271QG4"
-    video ~/Movies/odyssey.mp4
+shows exactly which file the renderer opened.
 
 ## commands
 
-    erythrite monitors                              # list displays + what's on them
-    erythrite set --monitor "NAME" FILE             # bind a video to a display
-          [--scrim 0.15] [--gravity fill|fit]
-    erythrite pause                                 # freeze on the current frame
-    erythrite resume                                # unfreeze
-    erythrite reload                                # re-read the config
-    erythrite status                                # per-display state
+    erythrite list                      # injected aerials + what's selected
+    erythrite add ~/Movies/odyssey.mp4  # transcode → inject → activate
+    erythrite add clip.mov --name "Odyssey" --no-activate
+    erythrite add clip.mov --fast       # hardware encode (videotoolbox)
+    erythrite use "Odyssey"             # select by name or id (Apple's too)
+    erythrite remove Odyssey            # injected assets only; Apple's protected
+    erythrite verify --fix              # re-inject after OS updates clobber the store
+    erythrite restart                   # restart WallpaperAgent
 
-`install.sh` and `install.sh uninstall` install or remove the whole thing
-(binary + launchd agent `dev.cobalt.erythrite`).
+add `--dry-run` to anything to preview without writing.
+
+every injected asset is marked `shotID=ERYTHRITE_*` and tracked in a ledger at
+`~/.config/erythrite.json`. `remove` only ever touches those; Apple's assets
+are untouchable. `entries.json` is backed up (10 deep) before every write.
+
+## installing
+
+    ./install.sh          # symlink into ~/.local/bin (also scrubs old-daemon leftovers)
+    ./install.sh uninstall
+
+requires python3 and ffmpeg. no permissions, no network, no daemon, no
+launchd, no signing identity.
 
 ## notes
 
-- desktop icons show through. that's the design — the video is *behind* the
-  desktop, not *instead of* it. hide the icons if you want a pure wall.
-- fullscreen apps cover it (a fullscreen app owns the screen) — it's still
-  playing underneath, costs the same, and is there when you come back.
-- hevc/h264 mp4 or mov, any resolution. 4k 60fps plays fine on m-series;
-  expect a few % cpu while playing, ~0 while frozen.
-- the lock screen is Apple's domain — its wallpaper is drawn by WallpaperAgent
-  in another session's context, and no third-party process can draw there.
-  (wallspace gets in via a private `WallpaperExtensionKit` appex — the
-  sanctioned-but-undocumented route. possible someday; not in scope here.)
+- **format:** sources are probed; anything that isn't HEVC `hvc1` `.mov` is
+  re-encoded to HEVC Main10 to match Apple's aerials (audio stripped — the
+  lock screen has no business making noise; `--keep-audio` preserves it).
+  already-compatible files are copied as-is. `--fast` uses Apple's hardware
+  encoder (near-realtime, larger files); default is libx265 CRF 22 (visually
+  transparent, not lossless).
+- **activation order matters:** write the store *after* SIGKILLing the agent
+  (SIGTERM lets it rewrite the store on quit), then kickstart.
+- **OS updates can rewrite the manifest.** that's what `verify --fix` is for:
+  the ledger remembers every injection and re-writes the entries (including
+  loctable keys). run it if your wallpaper reverts after an update.
+- **shuffle:** injected assets set `includeInShuffle: false`, so the aerial
+  shuffle never picks them.
+- removing an asset leaves its loctable name key behind — harmless, bytes.
 
-## install
-
-    ./install.sh            build, sign, install, register launchd agent, start
-    ./install.sh uninstall  stop agent, remove plist + installed binary
+read the source before you trust it. it's one python file, ~600 lines.

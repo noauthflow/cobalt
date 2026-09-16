@@ -1,0 +1,647 @@
+#!/usr/bin/env python3
+"""
+erythrite — custom videos as native macOS aerials.
+
+macOS 26/27 renders the desktop AND the lock screen from one aerials store:
+  ~/Library/Application Support/com.apple.wallpaper/aerials/
+    manifest/entries.json   (asset catalog, user-writable JSON)
+    videos/<UUID>.mov       (HEVC hvc1)
+    thumbnails/<UUID>.png
+    manifest/TVIdleScreenStrings.bundle/.../Localizable.nocache.loctable
+
+erythrite writes entries there the way Apple's own pipeline does, so
+WallpaperAgent plays the video natively — lock screen, unlock transitions,
+System Settings gallery, the lot. No overlay windows, no daemon, no
+permissions, nothing to crash or relaunch. This replaces the old erythrite
+window-layer daemon entirely: the desktop shows a still snapshot either way
+(that's Apple's policy for all aerials — video decode never runs behind your
+icons), but the lock screen is fully animated and genuinely native.
+
+Everything learned the hard way (each violation silently falls back to the
+Golden Gate default — see README "the four landmines"):
+  1. file:// URLs must be percent-encoded. URL(string:) returns nil on raw
+     spaces ("Application Support") and the asset is rejected.
+  2. localizedNameKey must exist in the loctable. Unknown key → asset rejected.
+     erythrite injects the name into all 45 locales.
+  3. subcategories must be non-empty. The extension indexes assets by
+     subcategory; an empty array → asset rejected.
+  4. your own top-level gallery section requires a custom *category* (not a
+     subcategory — those only group rows inside Apple's sections). erythrite
+     creates one shared "Erythrite" category.
+
+commands:
+  list                    injected aerials + what's currently selected
+  add FILE                transcode if needed, inject, and activate
+  use NAME|ID             select an aerial (injected or Apple's)
+  remove NAME|ID          remove an injected aerial (Apple's are protected)
+  verify [--fix]          check injected assets are intact; --fix re-injects
+  restart                 restart WallpaperAgent
+global:
+  --dry-run               print what would happen, change nothing
+
+see README.md.
+"""
+
+import argparse
+import datetime
+import json
+import os
+import plistlib
+import re
+import shutil
+import subprocess
+import sys
+import time
+import uuid
+from urllib.parse import quote
+
+BASE = os.path.expanduser("~/Library/Application Support/com.apple.wallpaper")
+MANIFEST = os.path.join(BASE, "aerials", "manifest", "entries.json")
+VIDEOS = os.path.join(BASE, "aerials", "videos")
+THUMBS = os.path.join(BASE, "aerials", "thumbnails")
+LOCTABLE = os.path.join(BASE, "aerials", "manifest",
+                        "TVIdleScreenStrings.bundle", "Contents", "Resources",
+                        "Localizable.nocache.loctable")
+STORE = os.path.join(BASE, "Store", "Index.plist")
+LEDGER = os.path.expanduser("~/.config/erythrite.json")
+
+AGENT = "com.apple.wallpaper.agent"
+SHOT_PREFIX = "ERYTHRITE_"
+CAT_NAME_KEY = "ERYTHRITE_CAT_NAME"
+CAT_DESC_KEY = "ERYTHRITE_CAT_DESCRIPTION"
+MAX_WIDTH = 3840
+THUMB_WIDTH = 712
+BACKUPS_KEPT = 10
+
+
+# ---------------------------------------------------------------- ledger
+
+def load_ledger():
+    try:
+        with open(LEDGER, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {"entries": {}, "category": None, "subcategory": None}
+
+
+def save_ledger(ledger):
+    os.makedirs(os.path.dirname(LEDGER), exist_ok=True)
+    tmp = LEDGER + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(ledger, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, LEDGER)
+
+
+# ---------------------------------------------------------------- manifest
+
+def load_manifest():
+    with open(MANIFEST, "rb") as f:
+        return json.load(f)
+
+
+def backup_manifest():
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    bak = f"{MANIFEST}.bak-{stamp}"
+    shutil.copy2(MANIFEST, bak)
+    baks = sorted(
+        p for p in os.listdir(os.path.dirname(MANIFEST))
+        if p.startswith("entries.json.bak-"))
+    for old in baks[:-BACKUPS_KEPT]:
+        os.remove(os.path.join(os.path.dirname(MANIFEST), old))
+    return bak
+
+
+def save_manifest(d):
+    tmp = MANIFEST + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(d, f, indent=1)
+        f.write("\n")
+    os.replace(tmp, MANIFEST)
+
+
+def injected_assets(d):
+    return [a for a in d.get("assets", [])
+            if a.get("shotID", "").startswith(SHOT_PREFIX)]
+
+
+def find_asset(d, key):
+    """match by uuid prefix or accessibilityLabel (case-insensitive)"""
+    k = key.lower()
+    hits = [a for a in d.get("assets", [])
+            if a["id"].lower().startswith(k)
+            or a.get("accessibilityLabel", "").lower() == k]
+    if len(hits) > 1:
+        die(f"ambiguous: {key} matches " +
+            ", ".join(sorted({a.get("accessibilityLabel", a["id"]) for a in hits})) +
+            " — use a longer prefix or `erythrite use <uuid>`")
+    return hits[0] if hits else None
+
+
+# ---------------------------------------------------------------- loctable
+
+def loctable_put(key, value):
+    """inject a display-name key into every locale. the aerials extension
+    rejects assets whose localizedNameKey is missing from this table."""
+    with open(LOCTABLE, "rb") as f:
+        loc = plistlib.load(f)
+    for strings in loc.values():
+        strings[key] = value
+    tmp = LOCTABLE + ".tmp"
+    with open(tmp, "wb") as f:
+        plistlib.dump(loc, f, fmt=plistlib.FMT_BINARY)
+    os.replace(tmp, LOCTABLE)
+    return len(loc)
+
+
+def ensure_group(ledger, first_asset=None):
+    """one shared 'Erythrite' category (+ its subcategory) — a custom
+    top-level section in the gallery. categories are what Settings renders
+    as sections; subcategories only group rows inside Apple's sections
+    (landmine #4). all injections live here."""
+    if ledger.get("category") and ledger.get("subcategory"):
+        return ledger["category"], ledger["subcategory"]
+
+    d = load_manifest()
+    n = loctable_put(CAT_NAME_KEY, "Erythrite")
+    loctable_put(CAT_DESC_KEY, "Custom injected wallpapers")
+    cat_id = ledger.get("category") or str(uuid.uuid4()).upper()
+    sub_id = ledger.get("subcategory") or str(uuid.uuid4()).upper()
+    preview = (first_asset or {}).get("previewImage",
+                                      file_url(os.path.join(THUMBS, "placeholder.png")))
+    rep = (first_asset or {}).get("id", "")
+    cat = next((c for c in d["categories"] if c["id"] == cat_id), None)
+    if cat is None:
+        cat = {
+            "id": cat_id,
+            "localizedDescriptionKey": CAT_DESC_KEY,
+            "localizedNameKey": CAT_NAME_KEY,
+            "preferredOrder": 6,
+            "previewImage": preview,
+            "representativeAssetID": rep,
+            "subcategories": [],
+        }
+        d["categories"].append(cat)
+    if not any(s["id"] == sub_id for s in cat["subcategories"]):
+        cat["subcategories"].append({
+            "id": sub_id,
+            "localizedDescriptionKey": CAT_DESC_KEY,
+            "localizedNameKey": CAT_NAME_KEY,
+            "preferredOrder": 0,
+            "previewImage": preview,
+            "representativeAssetID": rep,
+        })
+    save_manifest(d)
+    ledger["category"] = cat_id
+    ledger["subcategory"] = sub_id
+    save_ledger(ledger)
+    print(f'  group: category "Erythrite" ready ({cat_id}), {n} locale strings written')
+    return cat_id, sub_id
+
+
+def point_group_at(d, cat_id, sub_id, asset):
+    """section cover should showcase one of ours once one exists"""
+    cat = next((c for c in d["categories"] if c["id"] == cat_id), None)
+    if not cat:
+        return
+    if not cat.get("representativeAssetID"):
+        cat["representativeAssetID"] = asset["id"]
+        cat["previewImage"] = asset["previewImage"]
+    sub = next((s for s in cat["subcategories"] if s["id"] == sub_id), None)
+    if sub and not sub.get("representativeAssetID"):
+        sub["representativeAssetID"] = asset["id"]
+        sub["previewImage"] = asset["previewImage"]
+
+
+# ---------------------------------------------------------------- store
+
+def file_url(path):
+    """percent-encoded file:// URL — raw spaces yield nil in URL(string:) and
+    the asset gets rejected (landmine #1)"""
+    return "file://" + quote(os.path.abspath(path), safe="/")
+
+
+def load_store():
+    with open(STORE, "rb") as f:
+        return plistlib.load(f)
+
+
+def current_asset_id(store):
+    for slot in ("AllSpacesAndDisplays", "SystemDefault"):
+        try:
+            conf = plistlib.loads(
+                store[slot]["Linked"]["Content"]["Choices"][0]["Configuration"])
+            return conf.get("assetID")
+        except (KeyError, IndexError, TypeError, plistlib.InvalidFileException):
+            continue
+    return None
+
+
+def select_asset(store, asset_id):
+    """point every linked slot at asset_id; Configuration is an embedded bplist"""
+    now = datetime.datetime.now()
+    touched = []
+    for slot in ("AllSpacesAndDisplays", "SystemDefault"):
+        try:
+            link = store[slot]["Linked"]
+            choices = link["Content"]["Choices"]
+        except (KeyError, IndexError, TypeError):
+            continue
+        for choice in choices:
+            if choice.get("Provider") != "com.apple.wallpaper.choice.aerials":
+                continue
+            conf = plistlib.loads(choice["Configuration"])
+            conf["assetID"] = asset_id
+            choice["Configuration"] = plistlib.dumps(conf, fmt=plistlib.FMT_BINARY)
+            link["LastSet"] = now
+            link["LastUse"] = now
+            touched.append(slot)
+    return touched
+
+
+def save_store(store):
+    tmp = STORE + ".tmp"
+    with open(tmp, "wb") as f:
+        plistlib.dump(store, f, fmt=plistlib.FMT_BINARY)
+    os.replace(tmp, STORE)
+
+
+def kill_agent():
+    """SIGTERM lets the agent rewrite the store on quit — use SIGKILL, and
+    track the exact pid: launchd respawns instantly, so pgrep-still-exists
+    is not evidence the old one survived"""
+    r = subprocess.run(["pgrep", "-x", "WallpaperAgent"],
+                       capture_output=True, text=True)
+    old = r.stdout.split()
+    subprocess.run(["killall", "-9", "WallpaperAgent"], check=False)
+    for _ in range(40):
+        r = subprocess.run(["pgrep", "-x", "WallpaperAgent"],
+                           capture_output=True, text=True)
+        new = r.stdout.split()
+        if old and not any(p in new for p in old):
+            return True
+        time.sleep(0.25)
+    return False
+
+
+def restart_agent():
+    subprocess.run(["launchctl", "kickstart",
+                    f"gui/{os.getuid()}/{AGENT}"], check=False)
+
+
+# ---------------------------------------------------------------- ffmpeg
+
+def run(cmd, **kw):
+    return subprocess.run(cmd, capture_output=True, text=True, **kw)
+
+
+def die(msg, code=1):
+    print(f"erythrite: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def probe(path):
+    r = run(["ffprobe", "-v", "error", "-print_format", "json",
+             "-show_streams", "-show_format", path])
+    if r.returncode != 0:
+        die(f"ffprobe failed for {path}:\n{r.stderr.strip()}")
+    return json.loads(r.stdout)
+
+
+def transcode(src, dst, keep_audio=False, fast=False):
+    """HEVC Main10 hvc1 .mov, matching Apple's aerial encoding"""
+    vf = []
+    if probe(src).get("streams", [{}])[0].get("width", 0) > MAX_WIDTH:
+        vf.append(f"scale='min({MAX_WIDTH},iw)':-2")
+    cmd = ["ffmpeg", "-y", "-v", "error", "-i", src]
+    if vf:
+        cmd += ["-vf", ",".join(vf)]
+    if fast:
+        cmd += ["-c:v", "hevc_videotoolbox", "-tag:v", "hvc1",
+                "-profile:v", "main10", "-pix_fmt", "yuv420p10le",
+                "-b:v", "12M", "-realtime", "0"]
+    else:
+        cmd += ["-c:v", "libx265", "-tag:v", "hvc1", "-profile:v", "main10",
+                "-pix_fmt", "yuv420p10le", "-crf", "22", "-preset", "medium"]
+    cmd += ["-movflags", "+faststart", "-f", "mov"]
+    cmd += (["-map", "0:a:0?", "-c:a", "aac", "-b:a", "160k"] if keep_audio
+            else ["-an"])
+    cmd += [dst]
+    r = run(cmd)
+    if r.returncode != 0:
+        die(f"ffmpeg failed:\n{r.stderr.strip()[-800:]}")
+
+
+def is_native_aerial(info):
+    v = next((s for s in info.get("streams", [])
+              if s.get("codec_type") == "video"), {})
+    return (v.get("codec_name") == "hevc"
+            and v.get("codec_tag_string") == "hvc1"
+            and "mov" in info.get("format", {}).get("format_name", ""))
+
+
+def make_thumb(src, dst):
+    dur = float(probe(src).get("format", {}).get("duration", 0) or 0)
+    at = min(1.0, dur / 4) if dur > 0 else 0
+    r = run(["ffmpeg", "-y", "-v", "error", "-ss", str(at), "-i", src,
+             "-frames:v", "1", "-vf", f"scale={THUMB_WIDTH}:-2",
+             "-update", "1", dst])
+    if r.returncode != 0:
+        die(f"thumbnail failed:\n{r.stderr.strip()[-500:]}")
+
+
+# ---------------------------------------------------------------- commands
+
+def cmd_list(_args):
+    d = load_manifest()
+    ledger = load_ledger()["entries"]
+    cur = current_asset_id(load_store())
+    inj = injected_assets(d)
+    if not inj:
+        print("no injected aerials")
+    for a in inj:
+        meta = ledger.get(a["id"], {})
+        mark = "  <- current" if a["id"] == cur else ""
+        print(f'{a["id"]}  {meta.get("name", a.get("accessibilityLabel", "?"))}'
+              f'{mark}')
+    name = next((a.get("accessibilityLabel", "?") for a in d["assets"]
+                 if a["id"] == cur), "?")
+    kind = "injected" if cur in ledger else "apple"
+    print(f'\ncurrent: {cur} ({name}, {kind})')
+
+
+def cmd_add(args):
+    src = os.path.abspath(os.path.expanduser(args.file))
+    if not os.path.isfile(src):
+        die(f"no such file: {src}")
+
+    probe(src)
+    name = args.name or os.path.splitext(os.path.basename(src))[0]
+    asset_id = str(uuid.uuid4()).upper()
+    vid_dst = os.path.join(VIDEOS, f"{asset_id}.mov")
+    thumb_dst = os.path.join(THUMBS, f"{asset_id}.png")
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", name).strip("_")[:40] or "AERIAL"
+
+    print(f'injecting: {name}')
+    print(f'  id:      {asset_id}')
+    if args.dry_run:
+        native = is_native_aerial(probe(src))
+        print(f'  video:   {"copy (already HEVC hvc1)" if native else "transcode to HEVC Main10"}')
+        print(f'  -> {vid_dst}')
+        print(f'  thumb:   {thumb_dst}')
+        print(f'  manifest: ERYTHRITE_{slug}, Erythrite section, name key in loctable, backup first')
+        print(f'  activate: {"yes" if not args.no_activate else "no"} + SIGKILL/restart WallpaperAgent')
+        return
+
+    os.makedirs(VIDEOS, exist_ok=True)
+    os.makedirs(THUMBS, exist_ok=True)
+
+    if is_native_aerial(probe(src)) and not args.force_transcode:
+        print('  video:   copy (already HEVC hvc1)')
+        shutil.copy2(src, vid_dst)
+    else:
+        how = 'hardware (videotoolbox)' if args.fast else 'software (libx265)'
+        print(f'  video:   transcoding to HEVC Main10, {how}{" (audio stripped)" if not args.keep_audio else ""} ...')
+        transcode(src, vid_dst, keep_audio=args.keep_audio, fast=args.fast)
+
+    print('  thumb:   extracting ...')
+    make_thumb(vid_dst, thumb_dst)
+
+    ledger = load_ledger()
+    bak = backup_manifest()
+    print(f'  manifest: backup -> {os.path.basename(bak)}')
+    d = load_manifest()
+    order = max((a.get("preferredOrder", 0) for a in d["assets"]), default=0) + 1
+    entry = {
+        "accessibilityLabel": name,
+        "categories": [ledger.get("category") or "PENDING"],
+        "id": asset_id,
+        "includeInShuffle": False,
+        "localizedNameKey": name,          # landmine #2: key injected below
+        "pointsOfInterest": {},
+        "preferredOrder": order,
+        "previewImage": file_url(thumb_dst),
+        "shotID": SHOT_PREFIX + slug,
+        "showInTopLevel": True,
+        "subcategories": [ledger.get("subcategory") or "PENDING"],
+        "url-4K-SDR-240FPS": file_url(vid_dst),
+    }
+    cat_id, sub_id = ensure_group(ledger, first_asset=entry)
+    entry["categories"] = [cat_id]
+    entry["subcategories"] = [sub_id]
+    d["assets"].append(entry)
+    point_group_at(d, cat_id, sub_id, entry)
+    save_manifest(d)
+    print(f'  manifest: entry added (position {len(d["assets"])})')
+
+    n = loctable_put(name, name)
+    print(f'  loctable: name key injected into {n} locales')
+
+    ledger["entries"][asset_id] = {
+        "name": name,
+        "source": src,
+        "shotID": SHOT_PREFIX + slug,
+        "added": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+    save_ledger(ledger)
+
+    if not args.no_activate:
+        print('  activate: selecting ...')
+        store = load_store()
+        touched = select_asset(store, asset_id)
+        if not kill_agent():
+            print('  warning: could not confirm WallpaperAgent death; '
+                  'store edit may be overwritten')
+        save_store(store)
+        restart_agent()
+        print(f'  activate: {", ".join(touched) or "nothing"} selected')
+    else:
+        print('  activate: skipped (--no-activate); pick it in System Settings or `erythrite use`')
+
+    print('done. lock screen is animated; desktop shows a still (Apple policy '
+          'for every aerial). also in the Erythrite section of System Settings.')
+
+
+def cmd_use(args):
+    d = load_manifest()
+    a = find_asset(d, args.target)
+    if not a:
+        die(f'no aerial matching "{args.target}" (see: erythrite list, or System Settings)')
+    if args.dry_run:
+        print(f'would select: {a["id"]} ({a.get("accessibilityLabel", "?")}) + restart agent')
+        return
+    store = load_store()
+    touched = select_asset(store, a["id"])
+    if not kill_agent():
+        print('warning: could not confirm WallpaperAgent death; '
+              'store edit may be overwritten')
+    save_store(store)
+    restart_agent()
+    print(f'selected: {a["id"]} ({a.get("accessibilityLabel", "?")}) in {", ".join(touched)}')
+
+
+def cmd_remove(args):
+    d = load_manifest()
+    a = find_asset(d, args.target)
+    if not a:
+        die(f'no aerial matching "{args.target}"')
+    if not a.get("shotID", "").startswith(SHOT_PREFIX):
+        die(f'{a.get("accessibilityLabel", a["id"])} is an Apple asset — refusing. '
+            f'only ERYTHRITE_* injected assets can be removed.')
+    if args.dry_run:
+        print(f'would remove: {a["id"]} ({a.get("accessibilityLabel", "?")}) '
+              f'+ video + thumbnail + manifest entry')
+        return
+
+    cur = current_asset_id(load_store())
+    was_current = cur == a["id"]
+
+    for p in (os.path.join(VIDEOS, f'{a["id"]}.mov'),
+              os.path.join(THUMBS, f'{a["id"]}.png')):
+        if os.path.exists(p):
+            os.remove(p)
+    backup_manifest()
+    d["assets"].remove(a)
+    save_manifest(d)
+
+    ledger = load_ledger()
+    ledger["entries"].pop(a["id"], None)
+    save_ledger(ledger)
+
+    print(f'removed: {a.get("accessibilityLabel", a["id"])}')
+    if was_current:
+        apple = sorted((x for x in d["assets"]
+                        if not x.get("shotID", "").startswith(SHOT_PREFIX)),
+                       key=lambda x: x.get("preferredOrder", 999))
+        if apple:
+            print(f'it was the active wallpaper; falling back to '
+                  f'{apple[0].get("accessibilityLabel", apple[0]["id"])}')
+            store = load_store()
+            select_asset(store, apple[0]["id"])
+            if kill_agent():
+                save_store(store)
+            restart_agent()
+    print('done. (loctable name keys are left behind — harmless, tiny)')
+
+
+def cmd_verify(args):
+    d = load_manifest()
+    ledger_all = load_ledger()
+    ledger = ledger_all["entries"]
+    in_manifest = {a["id"] for a in injected_assets(d)}
+    problems = []
+    for asset_id, meta in sorted(ledger.items()):
+        vid = os.path.join(VIDEOS, f"{asset_id}.mov")
+        thumb = os.path.join(THUMBS, f"{asset_id}.png")
+        missing = []
+        if asset_id not in in_manifest:
+            missing.append("manifest entry")
+        if not os.path.exists(vid):
+            missing.append("video")
+        if not os.path.exists(thumb):
+            missing.append("thumbnail")
+        if missing:
+            problems.append((asset_id, meta.get("name", "?"), missing))
+        else:
+            print(f'ok       {meta.get("name", "?")}  ({asset_id})')
+    for asset_id, name, missing in problems:
+        print(f'MISSING  {name}  ({asset_id}): {", ".join(missing)}')
+
+    orphaned = in_manifest - set(ledger)
+    for asset_id in orphaned:
+        print(f'orphan   {asset_id} in manifest but not in ledger')
+
+    if problems and args.fix:
+        print("\nre-injecting missing manifest entries ...")
+        for asset_id, _name, missing in problems:
+            if "manifest entry" not in missing:
+                continue
+            meta = load_ledger()["entries"].get(asset_id)
+            if not meta or not os.path.exists(os.path.join(VIDEOS, f"{asset_id}.mov")):
+                print(f'  cannot re-inject {asset_id}: no ledger/video. re-run `erythrite add`.')
+                continue
+            backup_manifest()
+            dd = load_manifest()
+            cat_id, sub_id = ensure_group(ledger_all)
+            dd["assets"].append({
+                "accessibilityLabel": meta["name"],
+                "categories": [cat_id],
+                "id": asset_id,
+                "includeInShuffle": False,
+                "localizedNameKey": meta["name"],
+                "pointsOfInterest": {},
+                "preferredOrder": max((a.get("preferredOrder", 0)
+                                       for a in dd["assets"]), default=0) + 1,
+                "previewImage": file_url(os.path.join(THUMBS, f"{asset_id}.png")),
+                "shotID": meta.get("shotID", SHOT_PREFIX + "AERIAL"),
+                "showInTopLevel": True,
+                "subcategories": [sub_id],
+                "url-4K-SDR-240FPS": file_url(os.path.join(VIDEOS, f"{asset_id}.mov")),
+            })
+            save_manifest(dd)
+            loctable_put(meta["name"], meta["name"])
+            print(f'  re-injected {meta["name"]}')
+        restart_agent()
+    elif problems:
+        print("\nrun `erythrite verify --fix` to re-inject missing manifest entries "
+              "(e.g. after an OS update).")
+
+
+def cmd_restart(_args):
+    if args.dry_run:
+        print("would restart WallpaperAgent")
+        return
+    kill_agent()
+    restart_agent()
+    print("WallpaperAgent restarted")
+
+
+# ---------------------------------------------------------------- cli
+
+def main():
+    global args
+    p = argparse.ArgumentParser(prog="erythrite",
+                                description="inject custom videos as native macOS aerials "
+                                            "(animated lock screen, still desktop)")
+    p.add_argument("--dry-run", action="store_true",
+                   help="print what would happen, change nothing")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("list", help="injected aerials + current selection")
+    sub.add_parser("current", help="alias for list")
+
+    sp = sub.add_parser("add", help="inject a video and activate it")
+    sp.add_argument("file")
+    sp.add_argument("--name", help="gallery label (default: filename)")
+    sp.add_argument("--no-activate", action="store_true",
+                    help="inject but don't select it")
+    sp.add_argument("--keep-audio", action="store_true",
+                    help="don't strip the audio track (aerials are silent)")
+    sp.add_argument("--force-transcode", action="store_true",
+                    help="re-encode even if the source is already HEVC hvc1")
+    sp.add_argument("--fast", action="store_true",
+                    help="hardware encode (videotoolbox): much faster, bigger files")
+
+    sp = sub.add_parser("use", help="select an aerial by name or id")
+    sp.add_argument("target")
+
+    sp = sub.add_parser("remove", help="remove an injected aerial")
+    sp.add_argument("target")
+
+    sp = sub.add_parser("verify", help="check injected assets are intact")
+    sp.add_argument("--fix", action="store_true",
+                    help="re-inject missing manifest entries")
+
+    sub.add_parser("restart", help="restart WallpaperAgent")
+
+    args = p.parse_args()
+    if not os.path.isdir(os.path.dirname(MANIFEST)):
+        die(f"no aerials store at {BASE} — needs macOS 26+")
+
+    {"list": cmd_list, "current": cmd_list, "add": cmd_add, "use": cmd_use,
+     "remove": cmd_remove, "verify": cmd_verify, "restart": cmd_restart,
+     }[args.cmd](args)
+
+
+if __name__ == "__main__":
+    main()

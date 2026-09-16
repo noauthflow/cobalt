@@ -10,7 +10,7 @@ A collection of small, self-contained desktop utilities for macOS (plus one cros
 | [cobalt-60/](cobalt-60/) | cursor wall daemon | macOS |
 | [smalt/](smalt/) | menu bar strip daemon | macOS |
 | [cerulean/](cerulean/) | completely enable/disable a display (compositor-level) | macOS |
-| [erythrite/](erythrite/) | living wallpaper daemon (looping video behind apps + widgets) | macOS |
+| [erythrite/](erythrite/) | custom videos as native aerials: animated lock screen wallpaper | macOS 26+ |
 | [elgiloy-mac-arm/](elgiloy-mac-arm/) | tab overlay daemon | macOS (Apple Silicon) |
 | [elgiloy-linux/](elgiloy-linux/) | tab overlay daemon, linux port | linux (in progress) |
 | [stellite/](stellite/) | new tab page + shorts blocker Chrome extension + template theme | anywhere Chrome runs |
@@ -28,6 +28,14 @@ Symlinks the CLI to `~/.local/bin/cobalt`.
 
 - Requires: Python 3.8+
 - Permissions: none (writes browser profile files directly; quit browsers first)
+
+### erythrite
+
+Symlinks the CLI to `~/.local/bin/erythrite`. The old v1 window daemon (`main.swift`, launchd agent) is retired — this incarnation injects into the system aerials store instead: no daemon, no signing identity, no permissions.
+
+- Requires: Python 3.8+, `ffmpeg`
+- Permissions: none (writes the user-writable aerials store; restarts WallpaperAgent)
+- Injected assets are ledgered and removable (`erythrite remove`); run `erythrite verify --fix` after OS updates
 
 ### cobalt-60
 
