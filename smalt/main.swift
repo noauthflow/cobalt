@@ -626,9 +626,15 @@ enum Battery {
         return p
     }()
 
-    static func draw(pct: Int, in slot: NSRect) {
+    static func draw(pct: Int, charging: Bool, in slot: NSRect) {
         let f = CGFloat(max(0, min(100, pct))) / 100
-        let ink = ProcessInfo.processInfo.isLowPowerModeEnabled ? Theme.lpm : Theme.ink
+        // one color per state, all from the palette: a pastel sage green
+        // while charging, house amber in low power mode, the deep ink
+        // otherwise. the fill IS the read — no digits, no bolt.
+        let fillCharging = NSColor(srgbRed: 0x6F/255.0, green: 0x8A/255.0, blue: 0x5A/255.0, alpha: 1)  // #6F8A5A — deep sage
+        let fillColor = charging ? fillCharging
+            : ProcessInfo.processInfo.isLowPowerModeEnabled ? Theme.lpm
+            : Theme.inkDeep
 
         // fit the svg's grid to the slot width, vertically centered — the
         // grid decides, nothing hand-placed
@@ -637,8 +643,9 @@ enum Battery {
                            y: slot.midY - grid.height * s / 2,
                            width: grid.width * s, height: grid.height * s)
 
-        // the shell: faint at every state, exactly as exported
-        SVGIcon.draw(.battery27, color: ink, inRect: frame)
+        // the shell: faint at every state, exactly as exported — the svg
+        // carries its own 30% opacity, so the tint never lands on it
+        SVGIcon.draw(.battery27, color: fillColor, inRect: frame)
 
         // the charge: the shell's own body path as the clip, filled from the
         // left edge → f — solid where the shell is 30%, corners exactly on
@@ -650,25 +657,16 @@ enum Battery {
             context.translateBy(x: frame.minX, y: frame.minY)
             context.scaleBy(x: s, y: s)
             bodyPath.addClip()
-            ink.setFill()
+            fillColor.setFill()
             NSRect(x: 0, y: 0, width: bodyWidth * f, height: grid.height).fill()
             context.restoreGState()
         }
-
-        // the percentage: the figma spec verbatim — SF Pro Bold 11,
-        // −0.5 tracking, centered in the body on the fill (glass, so it
-        // reads as knocked out of the ink)
-        let text = "\(pct)"
-        let figmaFont = NSFont.systemFont(ofSize: 11, weight: .bold)
-        drawText(text, font: figmaFont, color: Theme.glass, in: NSRect(
-            x: frame.minX, y: frame.minY, width: bodyWidth * s, height: frame.height),
-            kern: -0.5)
     }
 }
 
 func drawBattery(in slot: NSRect) {
-    guard let (pct, _) = batteryLevel() else { return }
-    Battery.draw(pct: pct, in: slot)
+    guard let (pct, charging) = batteryLevel() else { return }
+    Battery.draw(pct: pct, charging: charging, in: slot)
 }
 
 // The calendar SVG leaves a 14×10-unit body for the day number.
