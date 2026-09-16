@@ -195,6 +195,34 @@ final class ChaseTimer {
     }
 }
 
+// battery display state — what the battery slot is currently drawing,
+// plus the two crossfade springs: the bolt fades on plug/unplug, the fill
+// color fades on low power mode. springs chase targets on the glass's
+// repaint loop, same as the slider's.
+var batteryShown = (charging: false, lpm: false)   // the state being drawn
+var batteryStateInit = false                       // first draw adopts the real state unfaded
+var boltAlpha: CGFloat = 0                         // bolt crossfade
+var fillFrom = Theme.sliderFill, fillTo = Theme.sliderFill
+var fillBlend: CGFloat = 1                         // LPM fill crossfade
+
+func batteryFillColor(_ lpm: Bool) -> NSColor { lpm ? Theme.lpm : Theme.sliderFill }
+
+// two opaque colors blended on device rgb
+func lerp(_ a: NSColor, _ b: NSColor, _ t: CGFloat) -> NSColor {
+    let x = a.usingColorSpace(.deviceRGB)!, y = b.usingColorSpace(.deviceRGB)!
+    return NSColor(srgbRed: x.redComponent + (y.redComponent - x.redComponent) * t,
+                   green: x.greenComponent + (y.greenComponent - x.greenComponent) * t,
+                   blue: x.blueComponent + (y.blueComponent - x.blueComponent) * t,
+                   alpha: 1)
+}
+
+let boltSpring = ChaseTimer(get: { boltAlpha },
+    set: { boltAlpha = $0; tab.needsDisplay = true },
+    target: { batteryShown.charging ? 1 : 0 }, rate: 0.2, epsilon: 0.01)
+let fillSpring = ChaseTimer(get: { fillBlend },
+    set: { fillBlend = $0; tab.needsDisplay = true },
+    target: { 1 }, rate: 0.2, epsilon: 0.005)
+
 final class StripView: NSView {
     override var isFlipped: Bool { true }   // y counts down from the pill top
 
@@ -354,10 +382,9 @@ final class StripView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
-        if let i = slotIndex(at: p), Theme.slots[i].kind == .slider {
-            dragSlot = i
-            setFaceTarget(1)
-        }
+        guard let i = slotIndex(at: p), Theme.slots[i].kind == .slider else { return }
+        dragSlot = i
+        setFaceTarget(1)
         updateSliderValue(at: p)
     }
 
@@ -544,9 +571,11 @@ enum SVGIcon {
 // battery's fill color on top. built once per tint, cached.
 enum ChargeBolt {
     static let border = NSColor(srgbRed: 0xFA/255.0, green: 0xF4/255.0, blue: 0xF0/255.0, alpha: 1)  // #FAF4F0
-    private static let scale: CGFloat = 4                           // silhouette build scale (retina-crisp)
+    private static let scale: CGFloat = 4                   // silhouette build scale (retina-crisp)
     private static let borderPt: CGFloat = 1.0              // visible outside border
-    private static var cache: [String: (border: NSImage?, fill: NSImage?)] = [:]
+    private static var borderImg: NSImage?                  // tint-independent — built once
+    private static var fillImgs: [String: NSImage] = [:]    // silhouette tinted per body color
+    private static var sil: (alpha: [UInt8], w: Int, h: Int)?
 
     private static func hex(_ color: NSColor) -> String {
         guard let rgb = color.usingColorSpace(.deviceRGB) else { return "" }
@@ -557,28 +586,30 @@ enum ChargeBolt {
     }
 
     // the symbol's alpha silhouette as raw bytes (w×h, 1 byte/px), drawn
-    // at `scale`× its natural point size
-    private static func silhouette() -> (alpha: [UInt8], w: Int, h: Int)? {
+    // at `scale`× its natural point size — resolved once
+    private static func getSilhouette() -> Bool {
+        if sil != nil { return true }
         guard let img = NSImage(systemSymbolName: "bolt.fill",
-                                accessibilityDescription: "charging") else { return nil }
+                                accessibilityDescription: "charging") else { return false }
         let w = Int(round(img.size.width * scale))
         let h = Int(round(img.size.height * scale))
         guard w > 0, h > 0, let rep = NSBitmapImageRep(bitmapDataPlanes: nil,
             pixelsWide: w, pixelsHigh: h, bitsPerSample: 8, samplesPerPixel: 4,
             hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
-            bytesPerRow: 0, bitsPerPixel: 0) else { return nil }
+            bytesPerRow: 0, bitsPerPixel: 0) else { return false }
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
         img.draw(in: NSRect(x: 0, y: 0, width: w, height: h), from: .zero,
                  operation: .sourceOver, fraction: 1, respectFlipped: false, hints: nil)
         NSGraphicsContext.restoreGraphicsState()
-        guard let data = rep.bitmapData else { return nil }
+        guard let data = rep.bitmapData else { return false }
         let stride = rep.bytesPerRow
         var alpha = [UInt8](repeating: 0, count: w * h)
         for y in 0..<h {
             for x in 0..<w { alpha[y * w + x] = data[y * stride + x * 4 + 3] }
         }
-        return (alpha, w, h)
+        sil = (alpha, w, h)
+        return true
     }
 
     // exact euclidean distance transform (Felzenszwalb–Huttenlocher), 1D pass
@@ -610,19 +641,17 @@ enum ChargeBolt {
     }
 
     // squared distance from every pixel to the silhouette's edge
-    // (alpha ≥ 128 counts as inside, distance 0), computed column pass
-    // then row pass over the 0/∞ field
-    private static func outsideDist2(_ sil: (alpha: [UInt8], w: Int, h: Int),
+    // (alpha ≥ 128 counts as inside, distance 0), column pass then row pass
+    private static func outsideDist2(_ a: [UInt8], w: Int, h: Int,
                                      pad: Int) -> (d2: [Double], W: Int, H: Int) {
-        let W = sil.w + 2 * pad, H = sil.h + 2 * pad
+        let W = w + 2 * pad, H = h + 2 * pad
         let INF = Double.greatestFiniteMagnitude / 4
         var f = [Double](repeating: INF, count: W * H)
-        for y in 0..<sil.h {
-            for x in 0..<sil.w where sil.alpha[y * sil.w + x] >= 128 {
+        for y in 0..<h {
+            for x in 0..<w where a[y * w + x] >= 128 {
                 f[(y + pad) * W + (x + pad)] = 0
             }
         }
-        // columns
         var g = [Double](repeating: 0, count: W * H)
         for x in 0..<W {
             var col = [Double](repeating: 0, count: H)
@@ -630,7 +659,6 @@ enum ChargeBolt {
             let r = edt1d(col)
             for y in 0..<H { g[y * W + x] = r[y] }
         }
-        // rows
         var d2 = [Double](repeating: 0, count: W * H)
         for y in 0..<H {
             let r = edt1d(Array(g[y * W..<(y + 1) * W]))
@@ -639,69 +667,75 @@ enum ChargeBolt {
         return (d2, W, H)
     }
 
-    // tint an alpha field into an NSImage padded by `padPx` around the
-    // (w×h) region; image point size maps 1 byte = 1/scale pt
-    private static func tinted(alpha: [UInt8], w: Int, h: Int, padPx: Int,
-                               W: Int, H: Int, _ color: NSColor) -> NSImage? {
-        var buf = [UInt8](repeating: 0, count: W * H * 4)
+    // alpha field + color → premultiplied RGBA CGImage
+    private static func cgImage(alpha: [UInt8], w: Int, h: Int, _ color: NSColor) -> CGImage? {
         let c = color.usingColorSpace(.deviceRGB)!
-        let rgb = [UInt8(c.redComponent * 255), UInt8(c.greenComponent * 255), UInt8(c.blueComponent * 255)]
-        for y in 0..<h {
-            for x in 0..<w {
-                let v = alpha[y * w + x]
-                guard v > 0 else { continue }
-                let i = ((y + padPx) * W + (x + padPx)) * 4
-                buf[i] = rgb[0]; buf[i + 1] = rgb[1]; buf[i + 2] = rgb[2]; buf[i + 3] = v
-            }
+        let r = c.redComponent, g = c.greenComponent, b = c.blueComponent
+        var px = [UInt8](repeating: 0, count: w * h * 4)
+        for i in 0..<(w * h) {
+            let a = alpha[i]
+            px[i * 4] = UInt8(r * 255 * Double(a) / 255.0)
+            px[i * 4 + 1] = UInt8(g * 255 * Double(a) / 255.0)
+            px[i * 4 + 2] = UInt8(b * 255 * Double(a) / 255.0)
+            px[i * 4 + 3] = a
         }
-        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: W,
-            pixelsHigh: H, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
-            isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0,
-            bitsPerPixel: 0), let data = rep.bitmapData else { return nil }
-        let stride = rep.bytesPerRow
-        for y in 0..<H {
-            for x in 0..<W {
-                let i = (y * W + x) * 4
-                let d = y * stride + x * 4
-                data[d] = buf[i]; data[d + 1] = buf[i + 1]
-                data[d + 2] = buf[i + 2]; data[d + 3] = buf[i + 3]
+        var bytes = px
+        guard let provider = CGDataProvider(data: CFDataCreate(nil, &bytes, bytes.count)) else { return nil }
+        return CGImage(width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 32,
+                       bytesPerRow: w * 4, space: CGColorSpaceCreateDeviceRGB(),
+                       bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                       provider: provider, decode: nil, shouldInterpolate: true,
+                       intent: .defaultIntent)
+    }
+
+    private static func nsImage(_ cg: CGImage) -> NSImage {
+        NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+    }
+
+    private static func borderImage() -> NSImage? {
+        if borderImg == nil {
+            guard getSilhouette(), let a = sil else { return nil }
+            let R = borderPt * scale
+            let pad = Int(R) + 2
+            let (d2, W, H) = outsideDist2(a.alpha, w: a.w, h: a.h, pad: pad)
+            var ring = [UInt8](repeating: 0, count: W * H)
+            for i in 0..<(W * H) {
+                let v = max(0, min(1, R + 0.5 - d2[i].squareRoot()))
+                ring[i] = UInt8(v * 255)
             }
+            guard let cg = cgImage(alpha: ring, w: W, h: H, border) else { return nil }
+            borderImg = nsImage(cg)
         }
-        rep.size = NSSize(width: CGFloat(W) / scale, height: CGFloat(H) / scale)
-        let img = NSImage()
-        img.addRepresentation(rep)
+        return borderImg
+    }
+
+    private static func fillImage(_ color: NSColor) -> NSImage? {
+        let key = hex(color)
+        if let img = fillImgs[key] { return img }
+        if fillImgs.count > 32 { fillImgs.removeAll() }   // the LPM fade walks ~100 tints once
+        guard getSilhouette(), let a = sil,
+              let cg = cgImage(alpha: a.alpha, w: a.w, h: a.h, color) else { return nil }
+        let img = nsImage(cg)
+        fillImgs[key] = img
         return img
     }
 
-    static func draw(fill color: NSColor, in rect: NSRect) {
-        let key = hex(color)
-        if cache[key] == nil {
-            guard let sil = silhouette() else { return }
-            let R = CGFloat(borderPt * scale)               // border width, mask px
-            let pad = Int(R) + 2                            // slack so the ring fits the bitmap
-            let (d2, W, H) = outsideDist2(sil, pad: pad)
-            // border alpha: full inside and up to R−0.5px out, AA ramp to R+0.5
-            var bAlpha = [UInt8](repeating: 0, count: W * H)
-            for i in 0..<(W * H) {
-                let d = d2[i].squareRoot()
-                bAlpha[i] = UInt8(max(0, min(1, R + 0.5 - d)) * 255)
-            }
-            guard let border = tinted(alpha: bAlpha, w: W, h: H, padPx: 0,
-                                      W: W, H: H, border),
-                  let fill = tinted(alpha: sil.alpha, w: sil.w, h: sil.h, padPx: 0,
-                                    W: sil.w, H: sil.h, color) else { return }
-            cache[key] = (border, fill)
-        }
-        guard let imgs = cache[key], let b = imgs.border, let f = imgs.fill else { return }
-        // the border bitmap carries `pad` px of margin, which maps to
-        // pad/scale pt: expanded by that, its silhouette lands exactly on
-        // the rect, ring hanging outside it
-        let padPt = (CGFloat(borderPt * scale) + 2) / scale
+    // border ring under, fill over — the fill is the body's own color, so
+    // what reads is the thin outside border; `alpha` crossfades the bolt
+    static func draw(fill color: NSColor, alpha: CGFloat, in rect: NSRect) {
+        guard alpha > 0.001, let border = borderImage() else { return }
+        // the border bitmap carries pad px of margin, mapping to pad/scale
+        // pt: expanded by that, its silhouette lands exactly on the rect,
+        // ring hanging outside it
+        let padPt = (borderPt * scale + 2) / scale
         let full = { (img: NSImage) in NSRect(origin: .zero, size: img.size) }
-        b.draw(in: rect.insetBy(dx: -padPt, dy: -padPt), from: full(b),
-               operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
-        f.draw(in: rect, from: full(f), operation: .sourceOver,
-               fraction: 1, respectFlipped: true, hints: nil)
+        border.draw(in: rect.insetBy(dx: -padPt, dy: -padPt), from: full(border),
+                    operation: .sourceOver, fraction: alpha,
+                    respectFlipped: true, hints: nil)
+        if let fill = fillImage(color) {
+            fill.draw(in: rect, from: full(fill), operation: .sourceOver,
+                      fraction: alpha, respectFlipped: true, hints: nil)
+        }
     }
 }
 
@@ -768,6 +802,14 @@ enum KeyboardBrightness {
 // staleness is finer than the 10s widget tick that drives most repaints.
 var batteryCache: (result: (pct: Int, charging: Bool)?, stamp: CFTimeInterval)?
 
+// push, not poll: plug/unplug, low power mode and charge-level changes
+// invalidate the battery cache the moment they land — the 10s widget tick
+// never has to be the thing that notices.
+func invalidateBatteryState() {
+    batteryCache = nil
+    DispatchQueue.main.async { tab.needsDisplay = true }
+}
+
 func batteryLevel() -> (pct: Int, charging: Bool)? {
     let now = CACurrentMediaTime()
     if let c = batteryCache, now - c.stamp < 5 { return c.result }
@@ -807,14 +849,12 @@ enum Battery {
     static let bodyRect = CGRect(x: 1.5, y: 7.5, width: 19.5, height: 10.5)
     static let bodyRadius: CGFloat = 2.25
 
-    static func draw(pct: Int, charging: Bool, in slot: NSRect) {
+    static func draw(pct: Int, boltAlpha: CGFloat,
+                     fillFrom: NSColor, fillTo: NSColor, fillBlend: CGFloat,
+                     in slot: NSRect) {
         let f = CGFloat(max(0, min(100, pct))) / 100
-        // two fills, all from the palette: house amber in low power mode,
-        // the slider's warm run color otherwise (the battery and the slider
-        // share one fill voice). charging is signaled by the bolt alone
-        // (drawn below) — the fill never changes for it.
-        let fillColor = ProcessInfo.processInfo.isLowPowerModeEnabled ? Theme.lpm
-            : Theme.sliderFill
+        // the body color crossfades between its two states (normal ⇄ LPM)
+        let fillColor = lerp(fillFrom, fillTo, fillBlend)
 
         // the glyph's fitted frame decides placement — fill and shell map
         // through the same transform, so they can never disagree
@@ -831,7 +871,12 @@ enum Battery {
             context.scaleBy(x: s, y: s)
             NSBezierPath(roundedRect: bodyRect,
                          xRadius: bodyRadius, yRadius: bodyRadius).addClip()
-            fillColor.setFill()
+            if fillBlend < 1 {
+                fillFrom.withAlphaComponent(1 - fillBlend).setFill()
+                NSRect(x: bodyRect.minX, y: bodyRect.minY,
+                       width: bodyRect.width * f, height: bodyRect.height).fill()
+            }
+            fillTo.withAlphaComponent(fillBlend).setFill()
             NSRect(x: bodyRect.minX, y: bodyRect.minY,
                    width: bodyRect.width * f, height: bodyRect.height).fill()
             context.restoreGState()
@@ -840,20 +885,49 @@ enum Battery {
 
         // the charge bolt: the system's own bolt.fill symbol (ChargeBolt),
         // breaking the body's top and bottom edges — outside border under,
-        // fill on top
-        if charging {
+        // fill on top. crossfaded on plug/unplug while the glass is up.
+        if boltAlpha > 0.001 {
             let w = 13.3 * s, h = 19 * s
             let boltRect = NSRect(x: frame.minX + bodyRect.midX * s - w / 2,
                                   y: frame.minY + bodyRect.midY * s - h / 2,
                                   width: w, height: h)
-            ChargeBolt.draw(fill: fillColor, in: boltRect)
+            ChargeBolt.draw(fill: fillColor, alpha: boltAlpha, in: boltRect)
         }
     }
 }
 
 func drawBattery(in slot: NSRect) {
-    guard let (pct, charging) = batteryLevel() else { return }
-    Battery.draw(pct: pct, charging: charging, in: slot)
+    let real = batteryLevel()
+    let lpm = ProcessInfo.processInfo.isLowPowerModeEnabled
+    let charging = real?.charging ?? false
+    guard let pct = real?.pct else { return }   // no power source: nothing to draw
+
+    // first draw: adopt the real state as-is — no fade-in at launch
+    if !batteryStateInit {
+        batteryStateInit = true
+        batteryShown = (charging: charging, lpm: lpm)
+        boltAlpha = charging ? 1 : 0
+        fillFrom = batteryFillColor(lpm); fillTo = fillFrom; fillBlend = 1
+    } else {
+        // plug/unplug: crossfade the bolt
+        if charging != batteryShown.charging {
+            batteryShown.charging = charging
+            boltSpring.start()
+        }
+        // low power mode: crossfade the fill color (re-target mid-fade from
+        // the currently drawn blend, so fast toggles never jump)
+        if lpm != batteryShown.lpm {
+            fillFrom = lerp(fillFrom, fillTo, fillBlend)
+            fillTo = batteryFillColor(lpm)
+            fillBlend = 0
+            batteryShown.lpm = lpm
+            fillSpring.start()
+        }
+    }
+    boltSpring.start()
+
+    Battery.draw(pct: pct, boltAlpha: boltAlpha,
+                 fillFrom: fillFrom, fillTo: fillTo, fillBlend: fillBlend, in: slot)
 }
 
 // the heroicon calendar's day-number well: between the header band
@@ -1538,6 +1612,17 @@ func runDaemon() -> Never {
     let dnc = DistributedNotificationCenter.default()
     dnc.addObserver(forName: NSNotification.Name("com.apple.screenIsLocked"), object: nil, queue: .main) { _ in setSessionLocked(true) }
     dnc.addObserver(forName: NSNotification.Name("com.apple.screenIsUnlocked"), object: nil, queue: .main) { _ in setSessionLocked(false) }
+
+    // battery: plug/unplug + low power mode via the process power state,
+    // granular charge-level changes via IOKit's own power-source source
+    NotificationCenter.default.addObserver(
+        forName: .NSProcessInfoPowerStateDidChange, object: nil, queue: .main
+    ) { _ in invalidateBatteryState() }
+    if let iops = IOPSNotificationCreateRunLoopSource({ _ in
+        invalidateBatteryState()
+    }, nil)?.takeRetainedValue() {
+        CFRunLoopAddSource(CFRunLoopGetMain(), iops, .defaultMode)
+    }
 
     // display reconfiguration: resolution switch, monitor plug/unplug
     NotificationCenter.default.addObserver(
