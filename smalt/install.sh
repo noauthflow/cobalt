@@ -9,7 +9,7 @@ NAME="smalt"
 LABEL="dev.cobalt.smalt"
 BIN_LOCAL="$HOME/.local/bin/$NAME"
 ASSET_DIR="$HOME/.local/share/$NAME"
-SVG_ASSETS=(battery calendar audio bluetooth mic Night-Day power)
+SVG_ASSETS=(battery calendar audio bluetooth mic Night-Day power moon)
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 GUI="gui/$(id -u)"
 

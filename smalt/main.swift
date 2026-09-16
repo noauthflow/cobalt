@@ -99,10 +99,15 @@ enum Theme {
     static let sliderTrack: CGFloat = 24   // = sliderHandle: knob and track are the same width
     static let sliderHandle: CGFloat = 24
     static let sliderFill = NSColor(srgbRed: 0x75/255.0, green: 0x56/255.0, blue: 0x4F/255.0, alpha: 1)  // #75564F value run
+    static let sliderHoverFill = NSColor(srgbRed: 0x5E/255.0, green: 0x46/255.0, blue: 0x3F/255.0, alpha: 1)  // #5E463F value run under the cursor — one step TOWARD THE KNOB, darker, never near the empty run
     static let knob      = NSColor(srgbRed: 0x3A/255.0, green: 0x2D/255.0, blue: 0x27/255.0, alpha: 1)  // #3A2D27 knob bg
     static var sliderValue: CGFloat = 0.5    // the hardware's current level (sampled)
     static var sliderDisplay: CGFloat = 0.5  // what the handle draws — springs toward sliderValue
     static var sliderFace: CGFloat = 0       // knob face crossfade: 0 = Night-Day, 1 = %
+    static var sliderHover: CGFloat = 0      // 0→1 while the cursor is on the slider SLOT — drives the fill tint only
+    static var knobHover: CGFloat = 0        // 0→1 while the cursor is on the KNOB itself — drives the knob swell
+    static var knobPop: CGFloat = 0          // damped wobble (1 → 0, overshooting) fired on the first KNOB hover each summon
+    static var powerHover: CGFloat = 0       // 0→1 while the cursor is on the power button — drives its swell, disc tint, and the power⇄moon face crossfade
 
     // the pill is exactly its grid — derived from the slot stack, never hand-counted
     static var contentHeight: CGFloat {
@@ -251,9 +256,23 @@ final class StripView: NSView {
         return p
     }
 
-    // hover: which slot the cursor is over (-1 = none). tracked, not polled
+    // hover: which slot the cursor is over (-1 = none). tracked, not polled.
+    // drives the slot-level washes; the slider's knob-level states are
+    // position-driven — see syncKnobHover.
+    var bouncedThisSummon = false   // file-visible: the daemon poll clears it when the glass parks
     private var hoverSlot: Int = -1 {
-        didSet { needsDisplay = true }
+        didSet {
+            guard hoverSlot != oldValue else { return }
+            needsDisplay = true
+            if hoverSlot == Theme.slots.firstIndex(where: { $0.kind == .slider })
+                || oldValue == Theme.slots.firstIndex(where: { $0.kind == .slider }) {
+                hoverSpring.start()
+            }
+            if hoverSlot == Theme.slots.firstIndex(where: { $0.kind == .power })
+                || oldValue == Theme.slots.firstIndex(where: { $0.kind == .power }) {
+                powerSpring.start()
+            }
+        }
     }
 
     override func updateTrackingAreas() {
@@ -305,6 +324,7 @@ final class StripView: NSView {
 
     override func cursorUpdate(with event: NSEvent) {
         // apps beneath push their cursors on redraw; re-win by position
+        syncKnobHover()
         if overInteractive() {
             NSCursor.pointingHand.set()
         } else {
@@ -317,6 +337,7 @@ final class StripView: NSView {
     // the 30Hz poll and the mouse monitor, so a stationary cursor over the
     // slider gets the hand within one tick of the glass parking.
     func reassertCursor() {
+        syncKnobHover()                            // 30Hz position-driven knob hover (stationary cursor, moving knob)
         window?.invalidateCursorRects(for: self)   // window server re-reads resetCursorRects
         if overInteractive() {
             NSCursor.pointingHand.set()
@@ -362,6 +383,99 @@ final class StripView: NSView {
         target: { [weak self] in self?.faceTarget ?? 0 },
         rate: 0.25, epsilon: 0.002)
 
+    // the slot-level hover blend: 1 while the cursor sits anywhere on the
+    // slider slot of a PARKED glass — tints the value run, nothing else.
+    // the target re-checks glassDocked every tick, so a glass that slides
+    // away or parks fades the tint on its own — no reliance on mouseExited.
+    private lazy var hoverSpring = ChaseTimer(
+        get: { Theme.sliderHover },
+        set: { v in Theme.sliderHover = v; tab.needsDisplay = true },
+        target: { [weak self] in
+            guard let self, glassDocked,
+                  hoverSlot == Theme.slots.firstIndex(where: { $0.kind == .slider }) else { return 0 }
+            return 1
+        },
+        rate: 0.22, epsilon: 0.004)
+
+    // the KNOB's own hover, position-driven: cursor vs the knob's live rect
+    // (recomputed every check, so it tracks the handle as it travels). this —
+    // and only this — drives the knob swell + first-hover wobble.
+    private var knobWasHovered = false
+    private lazy var knobSpring = ChaseTimer(
+        get: { Theme.knobHover },
+        set: { v in Theme.knobHover = v; tab.needsDisplay = true },
+        target: { [weak self] in (self?.knobHovered ?? false) ? 1 : 0 },
+        rate: 0.25, epsilon: 0.004)
+
+    private func knobRect() -> NSRect {
+        let i = Theme.slots.firstIndex { $0.kind == .slider } ?? 0
+        let r = Theme.slot(i, in: bounds)
+        let yBottom = r.maxY - Theme.sliderHandle / 2
+        let yTop = r.minY + Theme.sliderHandle / 2
+        let hc = yBottom + (yTop - yBottom) * max(0, min(1, Theme.sliderDisplay))
+        return NSRect(x: r.midX - Theme.sliderHandle / 2, y: hc - Theme.sliderHandle / 2,
+                      width: Theme.sliderHandle, height: Theme.sliderHandle)
+    }
+
+    private var knobHovered: Bool {
+        guard glassDocked, let p = cursorPoint else { return false }
+        return knobRect().insetBy(dx: -3, dy: -3).contains(p)
+    }
+
+    // called wherever the cursor↔knob relationship may have changed: the 30Hz
+    // poll (via reassertCursor — covers a stationary cursor while the knob
+    // moves under it), cursorUpdate, and drags. on the FIRST knob hover of a
+    // summon it also fires the wobble.
+    func syncKnobHover() {
+        let h = knobHovered
+        if h, !knobWasHovered, glassDocked, !bouncedThisSummon {
+            bouncedThisSummon = true
+            fireKnobPop()
+        }
+        knobWasHovered = h
+        knobSpring.start()
+    }
+
+    // the power button's hover blend: 1 while the cursor sits on its slot of
+    // a PARKED glass. one value drives all three responses — the disc swell,
+    // the knob→sliderFill tint, and the power⇄moon face crossfade — so they
+    // move as one gesture. target re-checks glassDocked every tick: park the
+    // glass and the button settles back on its own.
+    private lazy var powerSpring = ChaseTimer(
+        get: { Theme.powerHover },
+        set: { v in Theme.powerHover = v; tab.needsDisplay = true },
+        target: { [weak self] in
+            guard let self, glassDocked,
+                  hoverSlot == Theme.slots.firstIndex(where: { $0.kind == .power }) else { return 0 }
+            return 1
+        },
+        rate: 0.22, epsilon: 0.004)
+
+    // the knob's first-hover bounce: an underdamped spring released from
+    // displacement 1 — the knob swells ~12% and wobbles back to rest
+    // (ω ≈ 20.5 rad/s, ζ ≈ 0.34 → two visible overshoots, ~0.5s). its own
+    // 120fps integrator, started on demand, self-stopping at rest.
+    private var popTimer: Timer?
+    private var popV: CGFloat = 0
+    private func fireKnobPop() {
+        Theme.knobPop = 1
+        popV = 0
+        guard popTimer == nil else { return }
+        let t = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            let K: CGFloat = 420, C: CGFloat = 14, dt: CGFloat = 1.0 / 120.0
+            popV += (-K * Theme.knobPop - C * popV) * dt
+            Theme.knobPop += popV * dt
+            if abs(Theme.knobPop) < 0.002, abs(popV) < 0.02 {
+                Theme.knobPop = 0
+                popTimer?.invalidate(); popTimer = nil
+            }
+            tab.needsDisplay = true
+        }
+        RunLoop.main.add(t, forMode: .common)
+        popTimer = t
+    }
+
     // crossfade the knob face (Night-Day ⇄ %) — the face spring runs only while the
     // blend has distance to cover
     private func setFaceTarget(_ target: CGFloat) {
@@ -401,6 +515,7 @@ final class StripView: NSView {
 
     override func mouseDragged(with event: NSEvent) {
         updateSliderValue(at: convert(event.locationInWindow, from: nil))
+        syncKnobHover()   // the cursor IS the knob mid-drag — keep the swell honest
     }
 
     override func mouseUp(with event: NSEvent) {
@@ -436,8 +551,9 @@ final class StripView: NSView {
             // hover wash: a soft ink tint filling the whole slot, so the
             // slot itself is the hit target — same fixed grid, nothing moves.
             // the slider opts out: its dark knob is feedback enough, and the
-            // wash over the thick track just made mud
-            if i == hoverSlot && Theme.slots[i].kind != .slider {
+            // wash over the thick track just made mud. power opts out too —
+            // it carries its own hover state (the disc itself lightens).
+            if i == hoverSlot && Theme.slots[i].kind != .slider && Theme.slots[i].kind != .power {
                 Theme.ink.withAlphaComponent(0.12).setFill()
                 NSBezierPath(roundedRect: r.insetBy(dx: 1, dy: 1),
                              xRadius: 5, yRadius: 5).fill()
@@ -474,7 +590,7 @@ final class StripView: NSView {
 // and 24-unit layout apply to every SVG widget.
 enum SVGIcon {
     enum Name: String {
-        case battery, calendar, audio, bluetooth, mic, power
+        case battery, calendar, audio, bluetooth, mic, power, moon
         case nightDay = "Night-Day"
     }
 
@@ -968,14 +1084,43 @@ func drawBluetooth(in slot: NSRect) {
     SVGIcon.draw(.bluetooth, color: Theme.ink, in: slot)
 }
 
-// heroicon power — one 24 grid, ink-fitted like the rest, but pulled in a
-// touch smaller than the neighboring glyphs and inked in the slider's fill
-// color (it's the slider's sibling — the dark knob's family, not the labels')
+// heroicon power — the destructive action gets a BODY, not another outline
+// label: a dark disc from the slider's knob family with the glyph knocked
+// out in white. under the cursor it answers exactly like the knob above it:
+// the disc swells ~8% and its color crossfades knob → sliderFill, while the
+// face plays the knob's own implode/explode crossfade — the power glyph
+// collapses into the disc's center and the MOON grows out of it, previewing
+// what the click does (sleep). everything rides the one powerHover blend.
 func drawPower(in slot: NSRect) {
-    let f = SVGIcon.frame(.power, in: slot)
-    let s: CGFloat = 0.85
-    let r = f.insetBy(dx: f.width * (1 - s) / 2, dy: f.height * (1 - s) / 2)
-    SVGIcon.draw(.power, color: Theme.sliderFill, inRect: r)
+    let h = max(0, min(1, Theme.powerHover))
+
+    // disc: swells under the cursor; color crossfades knob → sliderFill
+    let d = (Theme.cell - 4) * (1 + 0.08 * h)
+    let disc = NSRect(x: slot.midX - d / 2, y: slot.midY - d / 2,
+                      width: d, height: d)
+    lerp(Theme.knob, Theme.sliderFill, h).setFill()
+    NSBezierPath(ovalIn: disc).fill()
+
+    // the face: implode/explode — outgoing glyph collapses into the center
+    // while the incoming one grows out of it; scale carries the motion,
+    // alpha only cleans up the sub-pixel ends
+    let base = d * 0.68
+    let edgeAlpha: (CGFloat) -> CGFloat = { min(1, $0 * 4) }
+    if h < 1 {
+        let f = 1 - h
+        let g = base * f
+        SVGIcon.draw(.power, color: .white,
+                     inRect: NSRect(x: disc.midX - g / 2, y: disc.midY - g / 2,
+                                    width: g, height: g),
+                     fraction: edgeAlpha(f))
+    }
+    if h > 0 {
+        let g = base * h
+        SVGIcon.draw(.moon, color: .white,
+                     inRect: NSRect(x: disc.midX - g / 2, y: disc.midY - g / 2,
+                                    width: g, height: g),
+                     fraction: edgeAlpha(h))
+    }
 }
 
 // the power button: system sleep — the same path `pmset sleepnow` walks,
@@ -1003,8 +1148,12 @@ func drawClock(_ component: Calendar.Component, in slot: NSRect) {
 // the live keyboard backlight (CoreBrightness); drag writes straight to it.
 func drawSlider(in slot: NSRect) {
     let v = max(0, min(1, Theme.sliderDisplay))
+    let slotHover = max(0, min(1, Theme.sliderHover))   // whole slot: the fill tint
+    let knobHover = max(0, min(1, Theme.knobHover))     // knob only: the swell
     let cx = slot.midX
-    let knobSize = Theme.sliderHandle
+    // the knob breathes: a touch bigger while the KNOB itself is hovered,
+    // plus the first-hover wobble swinging both ways around that
+    let knobSize = max(18, Theme.sliderHandle * (1 + 0.08 * knobHover + 0.12 * Theme.knobPop))
 
     // handle center travel: v=0 parks at the bottom, v=1 at the top —
     // up means more, matching updateSliderValue's drag mapping
@@ -1013,7 +1162,8 @@ func drawSlider(in slot: NSRect) {
     let hc = yBottom + (yTop - yBottom) * v
 
     // track: one thick rounded bar the full slot height. the quiet run is
-    // the value color held to 30%; below the knob it runs solid #75564F
+    // the value color held to 30%, FIXED — the value run must stay clearly
+    // darker than the empty run in every state
     let trackRect = NSRect(x: cx - Theme.sliderTrack / 2, y: slot.minY,
                            width: Theme.sliderTrack, height: slot.height)
     let stadium = NSBezierPath(roundedRect: trackRect, xRadius: Theme.sliderTrack / 2,
@@ -1028,7 +1178,10 @@ func drawSlider(in slot: NSRect) {
     if let ctx = NSGraphicsContext.current?.cgContext {
         ctx.saveGState()
         stadium.addClip()
-        Theme.sliderFill.setFill()
+        // under the cursor the value run DEEPENS toward the knob (#5E463F) —
+        // darker, the opposite direction from the empty run, so hover can
+        // never flatten the two together
+        lerp(Theme.sliderFill, Theme.sliderHoverFill, slotHover).setFill()
         NSBezierPath(rect: NSRect(x: trackRect.minX, y: hc - 1,
                                   width: trackRect.width,
                                   height: trackRect.maxY - hc + 1)).fill()
@@ -1711,6 +1864,7 @@ func runDaemon() -> Never {
         // so sliding back over the glass re-keys; releaseAttention defers the
         // key-drop to parking (pendingRelease), never mid-drag.
         let dragging = tab.dragSlot != nil
+        if !stripVisible { tab.bouncedThisSummon = false }   // fresh summon, fresh first-hover bounce
         if !dragging {
             setCmdOverride(cmdHeld())
             if cmdOverride { releaseAttention(); return }
