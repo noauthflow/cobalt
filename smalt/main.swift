@@ -19,9 +19,9 @@ import IOKit.ps
 //   the spring retargets mid-flight, so fast in-out just reverses it
 //   smoothly — no completion-handler races, no flicker.
 //
-//   the pill shows six widgets on one grid, each in its own fixed slot:
+//   the pill shows seven widgets on one grid, each in its own fixed slot:
 //   battery · calendar · hour · minute · audio · bluetooth · microphone
-//   (the span-5 brightness slider rides below the stack)
+//   (the span-5 brightness slider rides below the stack, power below that)
 //   mission control    off the stage — it's not part of the expose grid
 //
 // zero permissions: the reveal is a global mouse monitor, not an event
@@ -55,7 +55,7 @@ enum Theme {
     // continuous 5-cell region — cells inside a span have no gap between
     // them; the gap only separates widgets.
     enum Kind {
-        case battery, calendar, hour, minute, slider, audio, bluetooth, microphone
+        case battery, calendar, hour, minute, slider, audio, bluetooth, microphone, power
     }
     struct SlotDef {
         let kind: Kind
@@ -71,6 +71,7 @@ enum Theme {
         .init(.audio),
         .init(.microphone),
         .init(.slider, span: 5),
+        .init(.power),
     ]
     static var slotCount: Int { slots.count }
 
@@ -115,10 +116,12 @@ enum Theme {
     static var pillHeight: CGFloat { 2 * pad + contentHeight }
 
     // the slot rect for widget i: its span of cells (no internal gaps),
-    // offset by every widget above it. flipped coords — y grows downward.
+    // offset by every widget above it — each predecessor's FULL footprint:
+    // its cells PLUS the gaps inside its span, then one between-widget gap.
+    // flipped coords — y grows downward.
     static func slot(_ index: Int, in bounds: NSRect) -> NSRect {
         var y = pad
-        for j in 0..<index { y += CGFloat(slots[j].span) * cell + gap }
+        for j in 0..<index { y += CGFloat(slots[j].span) * cell + CGFloat(slots[j].span - 1) * gap + gap }
         let h = CGFloat(slots[index].span) * cell + CGFloat(slots[index].span - 1) * gap
         return NSRect(x: pad, y: y, width: cell, height: h)
     }
@@ -291,17 +294,18 @@ final class StripView: NSView {
         return convert(p, from: nil)
     }
 
-    // the pointing-hand decision, position-driven: over the slider slot of a
-    // PARKED glass. no tracking-area dependency — hoverSlot only updates on
-    // mouse events, and the first hover can happen with zero of those.
-    private func overSlider() -> Bool {
+    // the pointing-hand decision, position-driven: over an interactive slot
+    // (slider, power) of a PARKED glass. no tracking-area dependency —
+    // hoverSlot only updates on mouse events, and the first hover can happen
+    // with zero of those.
+    private func overInteractive() -> Bool {
         guard glassDocked, let p = cursorPoint else { return false }
-        return slotIndex(at: p).map { Theme.slots[$0].kind == .slider } ?? false
+        return slotIndex(at: p).map { Theme.slots[$0].kind == .slider || Theme.slots[$0].kind == .power } ?? false
     }
 
     override func cursorUpdate(with event: NSEvent) {
         // apps beneath push their cursors on redraw; re-win by position
-        if overSlider() {
+        if overInteractive() {
             NSCursor.pointingHand.set()
         } else {
             NSCursor.arrow.set()
@@ -314,7 +318,7 @@ final class StripView: NSView {
     // slider gets the hand within one tick of the glass parking.
     func reassertCursor() {
         window?.invalidateCursorRects(for: self)   // window server re-reads resetCursorRects
-        if overSlider() {
+        if overInteractive() {
             NSCursor.pointingHand.set()
         } else {
             NSCursor.arrow.set()
@@ -382,10 +386,17 @@ final class StripView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
-        guard let i = slotIndex(at: p), Theme.slots[i].kind == .slider else { return }
-        dragSlot = i
-        setFaceTarget(1)
-        updateSliderValue(at: p)
+        guard let i = slotIndex(at: p), glassDocked else { return }
+        switch Theme.slots[i].kind {
+        case .slider:
+            dragSlot = i
+            setFaceTarget(1)
+            updateSliderValue(at: p)
+        case .power:
+            sleepSystem()
+        default:
+            break
+        }
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -419,6 +430,7 @@ final class StripView: NSView {
             case .slider: drawSlider(in: r)
             case .hour: drawClock(.hour, in: r)
             case .minute: drawClock(.minute, in: r)
+            case .power: drawPower(in: r)
             }
 
             // hover wash: a soft ink tint filling the whole slot, so the
@@ -462,7 +474,7 @@ final class StripView: NSView {
 // and 24-unit layout apply to every SVG widget.
 enum SVGIcon {
     enum Name: String {
-        case battery, calendar, audio, bluetooth, mic
+        case battery, calendar, audio, bluetooth, mic, power
         case nightDay = "Night-Day"
     }
 
@@ -518,6 +530,7 @@ enum SVGIcon {
         .audio:     CGRect(x: 1.5,  y: 2.5,  width: 21,   height: 19),
         .bluetooth: CGRect(x: 6.25, y: 1.75, width: 11.5, height: 20.5),
         .mic:       CGRect(x: 5.25, y: 0.75, width: 13.5, height: 22.5),
+        .power:     CGRect(x: 3,    y: 3,    width: 18,   height: 18),
     ]
     static let optical: CGFloat = 21   // ink target (longest side), 24-grid units
 
@@ -955,6 +968,25 @@ func drawBluetooth(in slot: NSRect) {
     SVGIcon.draw(.bluetooth, color: Theme.ink, in: slot)
 }
 
+// heroicon power — one 24 grid, ink-fitted like the rest, but pulled in a
+// touch smaller than the neighboring glyphs and inked in the slider's fill
+// color (it's the slider's sibling — the dark knob's family, not the labels')
+func drawPower(in slot: NSRect) {
+    let f = SVGIcon.frame(.power, in: slot)
+    let s: CGFloat = 0.85
+    let r = f.insetBy(dx: f.width * (1 - s) / 2, dy: f.height * (1 - s) / 2)
+    SVGIcon.draw(.power, color: Theme.sliderFill, inRect: r)
+}
+
+// the power button: system sleep — the same path `pmset sleepnow` walks,
+// user-level (no permissions), the machine's own sleep rules apply
+func sleepSystem() {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/usr/bin/pmset")
+    p.arguments = ["sleepnow"]
+    try? p.run()
+}
+
 func drawMicrophone(in slot: NSRect) {
     SVGIcon.draw(.mic, color: Theme.ink, in: slot)
 }
@@ -1302,13 +1334,21 @@ func takeAttention() {
 }
 
 func releaseAttention() {
-    // HOLD key while the glass is anywhere on stage — docked or mid-spring.
-    // dropping key orderOuts the window, and doing that mid-animation is
-    // what made the pill flicker itself to death near the band edges: the
-    // exit spring gets murdered, the glass blinks out instead of animating
-    // outwards, the poll re-summons, repeat. the release lands the moment
-    // the glass is parked (spring settle / snap / immediate when parked).
-    if tab.frame.origin.x < glassX(docked: false) - 1 { pendingRelease = true; return }
+    // HOLD key while visibility is wanted, including the first poll after a
+    // summon. At that point the tab is still at its hidden x, so position
+    // alone cannot distinguish "about to open" from "finished closing".
+    // The old position-only check therefore called flushPendingRelease(),
+    // ordered the window out underneath the entrance spring, and left
+    // stripVisible=true with an off-stage window. Subsequent polls then
+    // alternated makeKey/orderOut and produced the visible oscillation.
+    //
+    // Once visibility is false, keep the panel key until the exit spring is
+    // actually parked; dropping key earlier also orders the window out and
+    // cuts the animation off. The settle callback performs the one release.
+    if stripVisible || tab.frame.origin.x < glassX(docked: false) - 1 {
+        pendingRelease = true
+        return
+    }
     flushPendingRelease()
 }
 
