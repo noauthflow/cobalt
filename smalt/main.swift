@@ -161,8 +161,8 @@ enum Theme {
     static var nightKnobHover: CGFloat = 0   // the night knob's own swell — same component, warm ink
     static var nightKnobPop: CGFloat = 0     // the night knob's first-hover wobble
     static var powerHover: CGFloat = 0       // 0→1 while the cursor is on the power button — drives its swell, disc tint, and the power⇄moon face crossfade
-    static var timeHover: CGFloat = 0        // 0→1 while the cursor is on hour OR minute — the pair's ONE collective blend
-    static var batteryHover: CGFloat = 0     // 0→1 while the cursor is on the battery slot
+    static var timeHover: CGFloat = 0        // 0→1 while the cursor is on hour OR minute — the pair's ONE collective blend: the digits deepen together
+    static var batteryHover: CGFloat = 0     // 0→1 while the cursor is on the battery slot — the glyph's ink deepens
 
     // the pill is exactly its grid — derived from the slot stack, never hand-counted
     static var contentHeight: CGFloat {
@@ -536,7 +536,7 @@ final class StripView: NSView {
             let minuteIdx = Theme.slots.firstIndex(where: { $0.kind == .minute })
             return hoverSlot == hourIdx || hoverSlot == minuteIdx ? 1 : 0
         },
-        rate: 0.22, epsilon: 0.004)
+        rate: 0.32, epsilon: 0.004)
 
     // the battery slot's hover blend — the same wash, one slot wide.
     private lazy var batteryHoverSpring = ChaseTimer(
@@ -547,7 +547,7 @@ final class StripView: NSView {
                   hoverSlot == Theme.slots.firstIndex(where: { $0.kind == .battery }) else { return 0 }
             return 1
         },
-        rate: 0.22, epsilon: 0.004)
+        rate: 0.32, epsilon: 0.004)
 
     // the band's two springs: alpha answers "is a trio slot hovered on a
     // PARKED glass", position glides toward the hovered slot's index and
@@ -869,24 +869,6 @@ final class StripView: NSView {
                 }
             }
         }
-
-        // the hover washes: quiet capsules in the trio track's own language
-        // (sliderFill at low alpha). the time pair draws ONE collective wash
-        // spanning hour + minute — hovering either slot lights both; the
-        // battery gets its own single-slot wash. both ride springs.
-        func hoverWash(_ kinds: [Theme.Kind], _ alpha: CGFloat) {
-            guard alpha > 0.001 else { return }
-            let rects = Theme.slots.indices
-                .filter { kinds.contains(Theme.slots[$0].kind) }
-                .map { Theme.slot($0, in: bounds) }
-            guard let first = rects.first else { return }
-            let wash = rects.dropFirst().reduce(first) { $0.union($1) }
-            Theme.sliderFill.withAlphaComponent(0.15 * alpha).setFill()
-            NSBezierPath(roundedRect: wash, xRadius: wash.width / 2,
-                         yRadius: wash.width / 2).fill()
-        }
-        hoverWash([.hour, .minute], Theme.timeHover)
-        hoverWash([.battery], Theme.batteryHover)
 
         // the grid: each entry of Theme.slots draws in its own uniform
         // slot — the container is built from the same list, so widget and
@@ -1447,8 +1429,14 @@ enum Battery {
                      fillFrom: NSColor, fillTo: NSColor, fillBlend: CGFloat,
                      in slot: NSRect) {
         let f = CGFloat(max(0, min(100, pct))) / 100
-        // the body color crossfades between its two states (normal ⇄ LPM)
-        let fillColor = lerp(fillFrom, fillTo, fillBlend)
+        // hover deepens BOTH the charge fill and the shell ALL the way to the
+        // knob ink — one blend applied to each state BEFORE the crossfade, so
+        // the normal ⇄ LPM crossfade and the hover blend never fight
+        let h = max(0, min(1, Theme.batteryHover))
+        let fillFromH = lerp(fillFrom, Theme.knob, h)
+        let fillToH = lerp(fillTo, Theme.knob, h)
+        // the shell color crossfades between its two states (normal ⇄ LPM)
+        let fillColor = lerp(fillFromH, fillToH, fillBlend)
 
         // the glyph's fitted frame decides placement — fill and shell map
         // through the same transform, so they can never disagree
@@ -1466,11 +1454,11 @@ enum Battery {
             NSBezierPath(roundedRect: bodyRect,
                          xRadius: bodyRadius, yRadius: bodyRadius).addClip()
             if fillBlend < 1 {
-                fillFrom.withAlphaComponent(1 - fillBlend).setFill()
+                fillFromH.withAlphaComponent(1 - fillBlend).setFill()
                 NSRect(x: bodyRect.minX, y: bodyRect.minY,
                        width: bodyRect.width * f, height: bodyRect.height).fill()
             }
-            fillTo.withAlphaComponent(fillBlend).setFill()
+            fillToH.withAlphaComponent(fillBlend).setFill()
             NSRect(x: bodyRect.minX, y: bodyRect.minY,
                    width: bodyRect.width * f, height: bodyRect.height).fill()
             context.restoreGState()
@@ -1603,12 +1591,12 @@ func drawMicrophone(in slot: NSRect, ink: NSColor) {
 
 // time: hour over minute — one CELL slot each, tabular SF Pro centered
 // the clock: hour over minute — one CELL slot each, SF Mono digits centered,
-// in the spine's trio ink. the pair deepens together toward inkDeep on the
-// collective hover — one blend, both digits (timeHover).
+// in the spine's trio ink. the pair deepens together ALL the way to the
+// knob ink on the collective hover — one blend, both digits (timeHover).
 func drawClock(_ component: Calendar.Component, in slot: NSRect) {
     let value = String(format: "%02d", Calendar.current.component(component, from: Date()))
     drawText(value, font: NSFont.monospacedSystemFont(ofSize: Theme.typeSize, weight: .regular),
-             color: lerp(Theme.trioInk, Theme.inkDeep, max(0, min(1, Theme.timeHover))), in: slot)
+             color: lerp(Theme.trioInk, Theme.knob, max(0, min(1, Theme.timeHover))), in: slot)
 }
 
 // material design 3 slider, vertical, in smalt's skin — M3's own metrics
