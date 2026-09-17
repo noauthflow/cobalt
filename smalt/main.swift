@@ -84,7 +84,7 @@ enum Theme {
         .init(.audio),
         .init(.microphone),
         .init(.slider, span: 5),
-        .init(.night, span: 5),          // Night Shift strength — same slider language, warm ink
+        // .init(.night, span: 5),        // ← UNCOMMENT to bring the Night Shift slider back
         .init(.power),
     ]
     static var slotCount: Int { slots.count }
@@ -603,7 +603,9 @@ final class StripView: NSView {
         haptic: { [weak self] in self?.hapticTick(.alignment) })
 
     private func knobRect(_ kind: Theme.Kind) -> NSRect {
-        let i = Theme.slots.firstIndex { $0.kind == kind } ?? 0
+        // a hidden widget (its slot commented out) has no knob — .zero keeps
+        // its hover machinery permanently false instead of latching onto slot 0
+        guard let i = Theme.slots.firstIndex(where: { $0.kind == kind }) else { return .zero }
         let r = Theme.slot(i, in: bounds)
         let yBottom = r.maxY - Theme.sliderHandle / 2
         let yTop = r.minY + Theme.sliderHandle / 2
