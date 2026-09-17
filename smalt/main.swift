@@ -520,6 +520,7 @@ final class StripView: NSView {
         private let popWrite: (CGFloat) -> Void
         private let latch: () -> Bool          // summon's shared first-hover latch
         private let setLatch: () -> Void
+        private let haptic: () -> Void         // every arrival at the knob — the power button's own
         private(set) var wasHovered = false
         private lazy var spring = ChaseTimer(
             get: read,
@@ -532,20 +533,26 @@ final class StripView: NSView {
 
         init(hovered: @escaping () -> Bool, read: @escaping () -> CGFloat,
              write: @escaping (CGFloat) -> Void, popWrite: @escaping (CGFloat) -> Void,
-             latch: @escaping () -> Bool, setLatch: @escaping () -> Void) {
+             latch: @escaping () -> Bool, setLatch: @escaping () -> Void,
+             haptic: @escaping () -> Void) {
             self.hovered = hovered; self.read = read
             self.write = write; self.popWrite = popWrite
             self.latch = latch; self.setLatch = setLatch
+            self.haptic = haptic
         }
 
         // called wherever the cursor↔knob relationship may have changed. the
         // FIRST knob hover of a summon (a shared latch the daemon poll clears
-        // on park) also fires the wobble.
+        // on park) fires the wobble; EVERY entry into a knob fires the haptic
+        // tick — the power button's own behavior, one tick per arrival.
         func sync() {
             let h = hovered()
-            if h, !wasHovered, glassDocked, !latch() {
-                setLatch()
-                firePop()
+            if h, !wasHovered, glassDocked {
+                haptic()
+                if !latch() {
+                    setLatch()
+                    firePop()
+                }
             }
             wasHovered = h
             spring.start()
@@ -584,14 +591,16 @@ final class StripView: NSView {
         write: { v in Theme.knobHover = v; tab.needsDisplay = true },
         popWrite: { Theme.knobPop = $0 },
         latch: { [weak self] in self?.bouncedThisSummon ?? true },
-        setLatch: { [weak self] in self?.bouncedThisSummon = true })
+        setLatch: { [weak self] in self?.bouncedThisSummon = true },
+        haptic: { [weak self] in self?.hapticTick(.alignment) })
     private lazy var nightKnob = KnobHoverMachine(
         hovered: { [weak self] in self?.knobHovered(.night) ?? false },
         read: { Theme.nightKnobHover },
         write: { v in Theme.nightKnobHover = v; tab.needsDisplay = true },
         popWrite: { Theme.nightKnobPop = $0 },
         latch: { [weak self] in self?.bouncedThisSummon ?? true },
-        setLatch: { [weak self] in self?.bouncedThisSummon = true })
+        setLatch: { [weak self] in self?.bouncedThisSummon = true },
+        haptic: { [weak self] in self?.hapticTick(.alignment) })
 
     private func knobRect(_ kind: Theme.Kind) -> NSRect {
         let i = Theme.slots.firstIndex { $0.kind == kind } ?? 0
@@ -680,7 +689,10 @@ final class StripView: NSView {
         guard let i = dragSlot else { return }
         let r = Theme.slot(i, in: bounds)
         // flipped coords: slot top (minY) = 1.0, bottom = 0.0
-        let v = min(1, max(0, (r.maxY - p.y) / r.height))
+        var v = min(1, max(0, (r.maxY - p.y) / r.height))
+        // the 50% detent: within a knob's pull of the midpoint, the value
+        // snaps to exactly 0.5 — the tiny knob marks the spot
+        if abs(v - 0.5) < 0.035 { v = 0.5 }
         switch Theme.slots[i].kind {
         case .slider:
             Theme.sliderValue = v
