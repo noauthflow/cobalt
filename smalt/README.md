@@ -53,6 +53,7 @@ with hysteresis so jitter can't flicker it:
 | idle | hidden (off-screen right) |
 | cursor enters the right edge, level with the pill (±26px) | springs out |
 | cursor drops left of the pill (or past its band) | springs away |
+| cursor rests on the bluetooth rune (120ms dwell) | the glass itself extends leftward out of the pill's edge — fused, one silhouette, one shadow; closes 180ms after the cursor leaves rune + panel |
 | mission control | off the stage |
 | display change | snaps to the new geometry (no slide) |
 

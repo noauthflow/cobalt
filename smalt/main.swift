@@ -289,6 +289,20 @@ let fillSpring = ChaseTimer(get: { fillBlend },
     set: { fillBlend = $0; tab.needsDisplay = true },
     target: { 1 }, rate: 0.2, epsilon: 0.005)
 
+// fake shadow: four soft strokes around a shape — drawn as CONTENT, so they
+// ride every animation for free (the window server's real shadow re-blurs
+// the whole window on every content change; at 120fps that was the unusable
+// lag). the fill covers the inner half of each stroke. ONE recipe for every
+// smalt surface — the pill and its extensions cast the same shadow, which is
+// what makes separate windows read as one object.
+func strokeFakeShadow(_ path: NSBezierPath) {
+    for (w, a) in [(14.0, 0.02), (10.0, 0.035), (6.0, 0.05), (2.0, 0.06)] {
+        path.lineWidth = CGFloat(w)
+        NSColor.black.withAlphaComponent(CGFloat(a)).setStroke()
+        path.stroke()
+    }
+}
+
 final class StripView: NSView {
     override var isFlipped: Bool { true }   // y counts down from the pill top
 
@@ -377,13 +391,6 @@ final class StripView: NSView {
         trioBandPosSpring.start()
     }
 
-    // the flyout's opening condition: cursor parked on the BLUETOOTH third
-    // of the trio, on a parked glass. band target 0 = top third = bluetooth.
-    var bluetoothHovered: Bool {
-        guard glassDocked, let trio = Theme.slots.firstIndex(where: { $0.kind == .trio }) else { return false }
-        return hoverSlot == trio && Theme.trioBandTarget == 0
-    }
-
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         trackingAreas.forEach(removeTrackingArea)
@@ -448,44 +455,11 @@ final class StripView: NSView {
     func reassertCursor() {
         syncKnobHover()                            // 30Hz position-driven knob hover (stationary cursor, moving knob)
         syncTrioBandTarget()                       // 30Hz position-driven band glide (crossing thirds inside the trio)
-        syncBluetoothFlyout()                      // hover the bluetooth third → the settings flyout
         window?.invalidateCursorRects(for: self)   // window server re-reads resetCursorRects
         if overInteractive() {
             NSCursor.pointingHand.set()
         } else {
             NSCursor.arrow.set()
-        }
-    }
-
-    // the bluetooth flyout's driver, called on every poll tick. OPEN while
-    // the cursor is parked on the bluetooth third; once open, a linger window
-    // gives the cursor time to travel onto the panel, and sitting on the
-    // panel keeps refreshing it. the probe refreshes on a 3s cadence while up.
-    func syncBluetoothFlyout() {
-        let onThird = bluetoothHovered
-        if onThird {
-            BluetoothPanel.lingerUntil = Date().addingTimeInterval(0.8)   // travel budget
-        } else if BluetoothPanel.isVisible, let p = cursorPoint, let win = window,
-                  let pr = BluetoothPanel.panelScreenRect() {
-            // over the panel itself → keep it fed; it's a separate window, so
-            // the strip's own tracking areas went quiet under the cursor
-            let loc = NSPoint(x: win.frame.origin.x + p.x, y: win.frame.origin.y + p.y)
-            if pr.insetBy(dx: -8, dy: -8).contains(loc) {
-                BluetoothPanel.lingerUntil = Date().addingTimeInterval(0.35)
-            }
-        }
-        let want = stripVisible &&
-            (onThird || (BluetoothPanel.isVisible && Date() < BluetoothPanel.lingerUntil))
-        if want, BluetoothPanel.isVisible {
-            BluetoothPanel.refreshDevices()
-        }
-        BluetoothPanel.set(want)
-        // the fade-out just finished: park the window off stage (the glass's
-        // own rule — an ordered-in window with invisible content rides the
-        // lock-screen zoom)
-        if !want, !BluetoothPanel.isVisible, BluetoothPanel.openAlpha < 0.005,
-           let w = BluetoothPanel.shared.window, w.isVisible {
-            w.orderOut(nil)
         }
     }
 
@@ -862,16 +836,8 @@ final class StripView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         let path = tabPath(in: bounds)
 
-        // fake shadow: four soft strokes under the glass — drawn as CONTENT,
-        // so they ride every animation for free (the window server's real
-        // shadow re-blurs the whole window on every content change; at
-        // 120fps that was the unusable lag). the glass fill then covers the
-        // inner half of each stroke.
-        for (w, a) in [(14.0, 0.02), (10.0, 0.035), (6.0, 0.05), (2.0, 0.06)] {
-            path.lineWidth = CGFloat(w)
-            NSColor.black.withAlphaComponent(CGFloat(a)).setStroke()
-            path.stroke()
-        }
+        // the shared fake shadow (see strokeFakeShadow), then the glass fill
+        strokeFakeShadow(path)
         Theme.glass.setFill()
         path.fill()
 
@@ -1888,12 +1854,25 @@ final class SpringDriver: NSObject {
     var target: CGFloat = 0
     var last: CFTimeInterval = 0
 
+    // what the spring moves, and where it reads its current position —
+    // injected, so one driver class serves every animated surface (the
+    // glass tab, the extension's subview). the value still lives at the
+    // call site; the driver only integrates.
+    private let apply: (CGFloat) -> Void
+    private let read: () -> CGFloat
+
+    init(apply: @escaping (CGFloat) -> Void, read: @escaping () -> CGFloat) {
+        self.apply = apply
+        self.read = read
+        super.init()
+    }
+
     var onSettle: (() -> Void)?
 
     func chase(_ targetX: CGFloat, initialVelocity: CGFloat = 0) {
         target = targetX
         guard !running else { return }             // already chasing — just retargeted
-        x = tab.frame.origin.x
+        x = read()
         v = initialVelocity
         last = 0
         if #available(macOS 14.0, *), let screen = mainScreen() {
@@ -1933,9 +1912,9 @@ final class SpringDriver: NSObject {
         let accel = -SPRING_K * (x - target) - SPRING_C * v
         v += accel * dt
         x += v * dt
-        setGlassX(x.rounded())                     // whole pixels: no subpixel shimmer on the glass
+        apply(x.rounded())                         // whole pixels: no subpixel shimmer on the glass
         if abs(x - target) < 0.25, abs(v) < 2 {
-            setGlassX(target)
+            apply(target)
             stop()
             onSettle?()
             onSettle = nil
@@ -1952,7 +1931,7 @@ final class SpringDriver: NSObject {
     }
 }
 
-let spring = SpringDriver()
+let spring = SpringDriver(apply: { setGlassX($0) }, read: { tab.frame.origin.x })
 
 func applyVisibility(_ desired: Bool, animate: Bool = true) {
     // click-through follows visibility: while the glass is hidden smalt is
@@ -1984,6 +1963,7 @@ func applyVisibility(_ desired: Bool, animate: Bool = true) {
     // it owns nothing. out it goes; summon re-fronts before the glass moves.
     spring.stop()
     spring.onSettle = nil
+    if changed, !desired { closeExtension(instant: !animate) }   // the panel never outlives the pill
     if desired { strip.orderFrontRegardless() }   // back on stage before the glass moves
     if !animate {
         setGlassX(glassX(docked: desired))
@@ -2034,11 +2014,14 @@ func pillBandCG() -> (top: CGFloat, bottom: CGFloat) {
 // switch, quit, space change — the summon zone only ever decides the
 // hidden → visible transition, never "you were hovering, bye")
 func hoverVisibility(xr: CGFloat, y: CGFloat, top: CGFloat, bottom: CGFloat) -> Bool? {
-    // the bluetooth flyout: while it (or its linger) wants the glass up, the
-    // summon rule HOLDS — the panel sits LEFT of the pill, in what is
-    // otherwise dismiss territory. nil = keep whatever state we're in.
-    if BluetoothPanel.holdsCursor(xr: xr, y: y) { return nil }
     if xr <= REVEAL_WIDTH, y >= top - SUMMON_BAND, y <= bottom + SUMMON_BAND { return true }
+    // the extension's domain: while it's open (or about to be), the panel and
+    // the corridor back to the pill are smalt's — crossing the gap between
+    // them must read as "still here", never as "left the pill"
+    if extShown || extShowTimer != nil {
+        let g = extBandCG()
+        if y >= g.top - HIDE_BAND, y <= g.bottom + HIDE_BAND, xr <= g.left + HIDE_MARGIN { return true }
+    }
     if xr > PILL_WIDTH + HIDE_MARGIN || y > bottom + HIDE_BAND || y < top - HIDE_BAND { return false }
     return nil
 }
@@ -2210,12 +2193,10 @@ func setSessionLocked(_ locked: Bool) {
         spring.stop()
         tab.dragSlot = nil                  // a lock mid-drag kills the drag —
                                             // otherwise dragSlot pins the glass open forever
+        closeExtension(instant: true)       // gone from the lock screen entirely
         applyVisibility(false, animate: false)   // park instantly — no spring on the way out
         releaseAttention()                        // drop any key/focus claim
         strip.orderOut(nil)                       // gone from the lock screen entirely
-        BluetoothPanel.openWant = false           // the flyout too — same lock-screen
-        BluetoothPanel.openAlpha = 0              //   zoom rule: no invisible windows
-        BluetoothPanel.shared.window?.orderOut(nil)
     } else {
         strip.orderFrontRegardless()              // back on every space
         scheduleUpdate()                          // re-derive hover state from the live cursor
@@ -2229,307 +2210,6 @@ func loginWindowOnScreen() -> Bool {
 }
 
 // MARK: - the pill (window)
-
-// MARK: - bluetooth device probe
-//
-// the settings pane's device list, via the same zero-permission source the
-// system reports applet uses: `system_profiler SPBluetoothDataType -json`.
-// probed on a background queue when the flyout opens (and every few seconds
-// while it's open — connect/disconnect and battery drain update live),
-// parsed into the devices the flyout draws.
-struct BTDevice {
-    let name: String
-    let connected: Bool
-    let batteryPct: Int?          // combined battery when the device reports one
-}
-
-enum BTProbe {
-    // the settings pane's list, from `system_profiler SPBluetoothDataType -json`
-    // (the system's own reporting applet — no permissions, no pairing stack).
-    // schema, MEASURED: SPBluetoothDataType is an array of hosts; each host
-    // carries `device_connected` / `device_not_connected` arrays of one-entry
-    // dicts keyed BY DEVICE NAME (props inside). some entries are bare "."
-    // address stubs — skip those. dual-interface devices (keyboards, mice)
-    // can appear twice — dedupe by name, connected wins.
-    static func fetch() -> [BTDevice] {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/sbin/system_profiler")
-        p.arguments = ["SPBluetoothDataType", "-json"]
-        let pipe = Pipe()
-        p.standardOutput = pipe
-        p.standardError = Pipe()
-        do {
-            try p.run()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            p.waitUntilExit()
-            guard let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-                  let hosts = root["SPBluetoothDataType"] as? [[String: Any]] else { return [] }
-            var connected: [(String, Int?)] = []
-            var known: [(String, Int?)] = []
-            var seen = Set<String>()
-            for host in hosts {
-                for (section, sink) in [("device_connected", 0), ("device_not_connected", 1)] {
-                    guard let items = host[section] as? [[String: Any]] else { continue }
-                    for item in items {
-                        guard let name = item.keys.first(where: { !$0.hasPrefix(".") }),
-                              let props = item[name] as? [String: Any] else { continue }
-                        var batt: Int?
-                        if let s = props["device_batteryLevelMain"] as? String,
-                           let v = Int(s.replacingOccurrences(of: "%", with: "")), (0...100).contains(v) {
-                            batt = v
-                        }
-                        if seen.contains(name) {
-                            // dual-interface duplicate: upgrade an existing
-                            // known entry to connected if this pass is one
-                            if sink == 0, let i = known.firstIndex(where: { $0.0 == name }) {
-                                connected.append((name, batt ?? known[i].1))
-                                known.remove(at: i)
-                            }
-                            continue
-                        }
-                        seen.insert(name)
-                        if sink == 0 { connected.append((name, batt)) } else { known.append((name, batt)) }
-                    }
-                }
-            }
-            connected.sort { $0.0.localizedCaseInsensitiveCompare($1.0) == .orderedAscending }
-            known.sort { $0.0.localizedCaseInsensitiveCompare($1.0) == .orderedAscending }
-            return connected.map { BTDevice(name: $0.0, connected: true, batteryPct: $0.1) }
-                + known.map { BTDevice(name: $0.0, connected: false, batteryPct: $0.1) }
-        } catch {
-            return []
-        }
-    }
-}
-
-// MARK: - the bluetooth flyout
-//
-// hovering the trio's bluetooth third extends a space to the LEFT of the
-// pill: one glass panel in the tab's own shape language, listing every
-// bluetooth device this machine knows — the connected ones under a My
-// Devices header, the paired-but-away ones below — styled like the macOS
-// Settings bluetooth pane. rows are plain text: name, and the state
-// right-aligned in the pane's muted ink (Connected / battery / Not
-// Connected). the panel is its own nonactivating window at the strip's
-// level, inside the same on-screen slack the glass uses; it springs open
-// through its own alpha spring, driven by the same 30Hz poll.
-let BT_ROW_H: CGFloat = 30
-let BT_SECTION_H: CGFloat = 30
-let BT_PAD: CGFloat = 12
-
-final class BluetoothPanel: NSView {
-    static let shared = BluetoothPanel(frame: .zero)
-
-    // the panel is visible = spring parked open; the alpha is what draws
-    static var isVisible: Bool { openAlpha > 0.001 }
-    static var openAlpha: CGFloat = 0
-
-    // linger: after the cursor leaves the bluetooth third, the flyout stays
-    // up this long — long enough to travel onto the panel itself
-    static var lingerUntil = Date.distantPast
-
-    // device cache: probed when the flyout opens, re-probed on a slow tick
-    // while it stays open (connect/disconnect + battery updates live)
-    static var devices: [BTDevice] = []
-    static var probeBusy = false
-    static var refreshDeadline = Date.distantPast   // first open probes at once
-
-    static var openWant = false
-    private static var openSpring: ChaseTimer?
-
-    private static func ensureSpring() -> ChaseTimer {
-        if let s = openSpring { return s }
-        let s = ChaseTimer(
-            get: { openAlpha },
-            set: { v in
-                openAlpha = v
-                shared.needsDisplay = true
-                shared.window?.setFrame(FlyoutGeometry.frame(for: v), display: false)
-            },
-            target: { openWant ? 1 : 0 },
-            rate: 0.28, epsilon: 0.004)
-        openSpring = s
-        return s
-    }
-
-    static func set(_ want: Bool) {
-        openWant = want
-        if want {
-            refreshDevices()
-            // (re)create the window on demand — it parks ordered-out at alpha 0
-            if shared.window == nil || shared.window?.isVisible != true {
-                let f = FlyoutGeometry.frame(for: max(openAlpha, 0.05))
-                shared.setFrameSize(f.size)
-                let w = OverlayPanel(contentRect: f, styleMask: [.borderless, .nonactivatingPanel],
-                                     backing: .buffered, defer: false)
-                w.backgroundColor = .clear
-                w.isOpaque = false
-                w.hasShadow = false
-                w.level = NSWindow.Level(rawValue: 21)
-                w.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
-                w.contentView = shared
-                w.orderFrontRegardless()
-            }
-        }
-        ensureSpring().start()
-    }
-
-    static func refreshDevices() {
-        guard !probeBusy, Date() >= refreshDeadline else { return }
-        probeBusy = true
-        DispatchQueue.global(qos: .userInitiated).async {
-            let d = BTProbe.fetch()
-            DispatchQueue.main.async {
-                devices = d
-                if isVisible {
-                    // the row count changed the panel's height — re-fit, repaint
-                    shared.window?.setFrame(FlyoutGeometry.frame(for: openAlpha), display: false)
-                    shared.needsDisplay = true
-                }
-                probeBusy = false
-                refreshDeadline = Date().addingTimeInterval(3)
-            }
-        }
-    }
-
-    // the panel keeps its own cursor-hold state, readable without geometry
-    static var holdsCursorActive: Bool {
-        isVisible || Date() < lingerUntil
-    }
-
-    // the cursor-hold (pure read): is the cursor over the panel's band, or
-    // inside the linger window? the summon rule treats this as "keep state".
-    static func holdsCursor(xr: CGFloat, y: CGFloat) -> Bool {
-        guard holdsCursorActive, let screen = mainScreen(), let r = panelScreenRect() else { return false }
-        let loc = NSPoint(x: screen.frame.maxX - xr, y: globalCocoaTopY - y)
-        return r.insetBy(dx: -8, dy: -8).contains(loc) || Date() < lingerUntil
-    }
-
-    static func panelScreenRect() -> NSRect? {
-        guard isVisible, let win = shared.window else { return nil }
-        return win.frame
-    }
-
-    // — drawing —
-
-    // the flyout draws in STANDARD (unflipped) view space — the strip's
-    // drawText unflips for CoreText because the tab is a flipped view; this
-    // one isn't, so text draws straight in y-up coordinates here.
-    @discardableResult
-    private func drawLine(_ s: String, font: NSFont, color: NSColor,
-                          x: CGFloat, yMid: CGFloat, align: NSTextAlignment = .left,
-                          kern: CGFloat = 0) -> CGFloat {
-        let line = CTLineCreateWithAttributedString(NSAttributedString(string: s, attributes: [
-            .font: font, .foregroundColor: color, .kern: kern,
-        ]))
-        let b = CTLineGetBoundsWithOptions(line, .useOpticalBounds)
-        let ctx = NSGraphicsContext.current!.cgContext
-        ctx.saveGState()
-        ctx.textPosition = CGPoint(x: align == .right ? x - b.width : x,
-                                   y: yMid - b.midY)
-        CTLineDraw(line, ctx)
-        ctx.restoreGState()
-        return b.width
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        let a = max(0, min(1, BluetoothPanel.openAlpha))
-        guard a > 0.001 else { return }
-
-        let full = bounds
-        let path = FlyoutGeometry.glassPath(in: full)
-
-        // the strip's own shadow recipe, four soft strokes under the glass
-        for (w, sa) in [(14.0, 0.02), (10.0, 0.035), (6.0, 0.05), (2.0, 0.06)] {
-            path.lineWidth = CGFloat(w)
-            NSColor.black.withAlphaComponent(CGFloat(sa) * a).setStroke()
-            path.stroke()
-        }
-        Theme.glass.withAlphaComponent(a).setFill()
-        path.fill()
-
-        let content = FlyoutGeometry.contentRect(full)
-
-        // header: MY DEVICES — the settings pane's section voice, small caps
-        let header = NSRect(x: content.minX, y: content.maxY - BT_SECTION_H,
-                            width: content.width, height: BT_SECTION_H)
-        drawLine("MY DEVICES", font: .systemFont(ofSize: 10, weight: .semibold),
-                 color: Theme.ink.withAlphaComponent(a * 0.85),
-                 x: header.minX, yMid: header.midY, kern: 0.6)
-
-        // rows: connected first, then the paired-but-away — the pane's order
-        let devices = BluetoothPanel.devices
-        var y = header.minY
-        for d in devices {
-            y -= BT_ROW_H
-            guard y > content.minY - 1 else { break }
-            let row = NSRect(x: content.minX, y: y, width: content.width, height: BT_ROW_H)
-            // the settings pane's dimming: connected names in the deep ink,
-            // paired-but-away a step lighter
-            let nameColor = d.connected ? Theme.inkDeep : Theme.trioInk
-            drawLine(d.name, font: .systemFont(ofSize: 12.5, weight: .regular),
-                     color: nameColor.withAlphaComponent(a),
-                     x: row.minX, yMid: row.midY)
-
-            // the state, right-aligned in the pane's muted ink
-            let state: String
-            let stateColor: NSColor
-            if d.connected {
-                if let b = d.batteryPct { state = "\(b)%"; stateColor = Theme.ink }
-                else { state = "Connected"; stateColor = Theme.ink }
-            } else {
-                state = "Not Connected"
-                stateColor = Theme.ink
-            }
-            let st = NSAttributedString(string: state, attributes: [
-                .font: NSFont.systemFont(ofSize: 11.5, weight: .medium),
-                .foregroundColor: stateColor.withAlphaComponent(a * 0.9),
-            ])
-            let line = CTLineCreateWithAttributedString(st)
-            let w = CTLineGetBoundsWithOptions(line, .useOpticalBounds).width
-            let ctx = NSGraphicsContext.current!.cgContext
-            ctx.saveGState()
-            ctx.textPosition = CGPoint(x: row.maxX - w, y: row.midY)
-            CTLineDraw(line, ctx)
-            ctx.restoreGState()
-        }
-    }
-}
-
-// the flyout's geometry, in one place: shape, content inset, and the frame
-// for a given openness — the panel grows out of the pill's left edge toward
-// its full width (the settings flyout's own grow-out motion)
-enum FlyoutGeometry {
-    static let width: CGFloat = 224
-
-    static func contentRect(_ glass: NSRect) -> NSRect {
-        glass.insetBy(dx: BT_PAD, dy: BT_PAD)
-    }
-
-    static func glassPath(in bounds: NSRect) -> NSBezierPath {
-        // the tab shape mirrored: rounded on the RIGHT (the seam side),
-        // square on the left — a space extending the pill's glass to the left
-        let r: CGFloat = 17
-        return NSBezierPath(roundedRect: bounds, xRadius: r, yRadius: r)
-    }
-
-    static func frame(for openness: CGFloat) -> NSRect {
-        guard let screen = mainScreen() else { return .zero }
-        let f = screen.frame
-        let h = FlyoutGeometry.height
-        let w = max(8, width * max(0, min(1, openness)))
-        // LEFT of the pill, vertically centered on it — a space extended from
-        // the pill's side, flush with its left edge
-        return NSRect(x: f.maxX - TAB_MARGIN - PILL_WIDTH - w,
-                      y: f.minY + (f.height - h) / 2,
-                      width: w, height: h)
-    }
-
-    static var height: CGFloat {
-        let rows = max(1, BluetoothPanel.devices.count)
-        return BT_SECTION_H + CGFloat(rows) * BT_ROW_H + 2 * BT_PAD
-    }
-}
 
 // MARK: - the pill (window + glass subview)
 //
@@ -2586,6 +2266,197 @@ let strip: NSWindow = {
     win.contentView = container
     return win
 }()
+
+// MARK: - the bluetooth extension
+//
+// hover the bluetooth rune and the strip's glass extends leftward out of the
+// pill's own edge — not a floating panel with a gap, but the menu bar itself
+// growing an arm. the arm's right edge is SQUARE and flush against the pill's
+// straight left edge (the pill's rounded corners live only at its extremes,
+// far from the arm's band), so the union is one continuous silhouette: one
+// glass, one shadow recipe (strokeFakeShadow), one menu bar. the arm sits one
+// LEVEL BELOW the pill, so the pill's own shadow spill lands on the arm at
+// the seam — the ambient occlusion that fuses two windows into one object.
+//
+// the animation is the reveal's own spring on a display link of its own,
+// integrating the ARM'S WIDTH in pixels (0 → EXT_WIDTH), retargetable
+// mid-flight. the alpha fade is DERIVED from the width (the first 24pt of
+// travel), so grow and fade cannot drift apart — one integrator, two outputs.
+// the window never moves (same reason the pill's window never moves — the
+// window server doesn't move windows at 120fps); the subview grows inside it,
+// right edge pinned.
+
+let EXT_WIDTH: CGFloat = 216
+let EXT_HEIGHT: CGFloat = 170
+let EXT_RADIUS: CGFloat = 16
+let EXT_SLACK: CGFloat = 12     // window slack past full width — spring overshoot (~5% ≈ 11pt) lands here
+let EXT_SHOW_DWELL: TimeInterval = 0.12   // hover intent: brush-past never opens it
+let EXT_HIDE_DWELL: TimeInterval = 0.18   // leave intent: darting to audio/mic never closes it
+
+final class ExtensionView: NSView {
+    override var isFlipped: Bool { true }
+
+    // rounded on the LEFT, square on the RIGHT — the right edge fuses flush
+    // against the pill's left edge. same cubic corner recipe as the tab.
+    override func draw(_ dirtyRect: NSRect) {
+        let w = bounds.width, h = bounds.height
+        guard w > 0.5, h > 0.5 else { return }   // the tip: nothing to draw yet
+        let R = min(EXT_RADIUS, w / 2)           // the growing tip stays round at any width
+        let k: CGFloat = 0.5523
+        let p = NSBezierPath()
+        p.move(to: NSPoint(x: w, y: 0))
+        p.line(to: NSPoint(x: R, y: 0))
+        p.curve(to: NSPoint(x: 0, y: R),
+                controlPoint1: NSPoint(x: R - k * R, y: 0),
+                controlPoint2: NSPoint(x: 0, y: R - k * R))
+        p.line(to: NSPoint(x: 0, y: h - R))
+        p.curve(to: NSPoint(x: R, y: h),
+                controlPoint1: NSPoint(x: 0, y: h - R + k * R),
+                controlPoint2: NSPoint(x: R - k * R, y: h))
+        p.line(to: NSPoint(x: w, y: h))
+        p.line(to: NSPoint(x: w, y: 0))
+        p.close()
+        strokeFakeShadow(p)
+        Theme.glass.setFill()
+        p.fill()
+    }
+}
+
+// the bluetooth third's vertical band, in CG top-left y space — the extension
+// anchors to the RUNE itself, the way a native menu anchors to its status item
+func bluetoothBandCG() -> (top: CGFloat, bottom: CGFloat) {
+    let (pillTop, _) = pillBandCG()
+    let trio = Theme.slots.firstIndex(where: { $0.kind == .trio })
+        .map { Theme.slot($0, in: NSRect(x: 0, y: 0, width: Theme.pillWidth, height: Theme.pillHeight)) }
+    let y = trio?.minY ?? Theme.pad
+    let h = (trio?.height ?? Theme.cell) / 3
+    return (pillTop + y, pillTop + y + h)
+}
+
+// the extension's rect, in the cursor's own space: xr (leftward from the
+// right screen edge) + CG top-left y. it hangs FLUSH off the pill's left
+// edge (right = the pill's own edge — no gap), centered vertically on the rune.
+func extBandCG() -> (left: CGFloat, right: CGFloat, top: CGFloat, bottom: CGFloat) {
+    let (bt, bb) = bluetoothBandCG()
+    let centerY = (bt + bb) / 2
+    let right = PILL_WIDTH
+    return (right + EXT_WIDTH, right, centerY - EXT_HEIGHT / 2, centerY + EXT_HEIGHT / 2)
+}
+
+// the extension window: a FIXED frame spanning full width + overshoot slack.
+// the glass subview grows inside it, right edge pinned to the window's right
+// edge — which IS the pill's left edge, so the seam is pixel-exact at any width.
+func extWindowFrame() -> NSRect {
+    guard let screen = mainScreen() else { return .zero }
+    let f = screen.frame
+    let g = extBandCG()
+    let right = f.maxX - PILL_WIDTH                     // the pill's left edge
+    let left = right - EXT_WIDTH - EXT_SLACK
+    let top = globalCocoaTopY - g.top                   // cocoa y of the top edge
+    return NSRect(x: left, y: top - EXT_HEIGHT,
+                  width: EXT_WIDTH + EXT_SLACK, height: EXT_HEIGHT)
+}
+
+let ext = ExtensionView(frame: NSRect(x: EXT_SLACK, y: 0, width: 0, height: EXT_HEIGHT))
+
+let extWindow: OverlayPanel = {
+    let frame = extWindowFrame()
+    let win = OverlayPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+    win.backgroundColor = .clear
+    win.isOpaque = false
+    win.hasShadow = false          // same reason as the pill: shadows are CONTENT here
+    win.ignoresMouseEvents = true  // hidden: the space left of the pill belongs to the apps
+    win.level = NSWindow.Level(rawValue: 20)   // one under the pill — the tuck hides under the glass
+    win.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
+    let container = NSView(frame: NSRect(origin: .zero, size: frame.size))
+    container.addSubview(ext)
+    win.contentView = container
+    return win
+}()
+
+// the arm's current width in points — what the spring integrates
+var extProgress: CGFloat = 0
+var extShown = false
+var extShowTimer: Timer?
+var extHideTimer: Timer?
+
+// one integrator, two outputs: the grow and the fade derive from the same
+// width — the fade spends the first 24pt of travel, so they cannot drift apart
+func applyExtWidth(_ w: CGFloat) {
+    extProgress = w
+    let width = max(0, min(w, EXT_WIDTH + EXT_SLACK)).rounded()
+    ext.setFrameSize(NSSize(width: width, height: EXT_HEIGHT))
+    ext.setFrameOrigin(NSPoint(x: EXT_WIDTH + EXT_SLACK - width, y: 0))   // right edge pinned
+    extWindow.alphaValue = max(0, min(1, w / 24))
+}
+
+let extSpring = SpringDriver(apply: { applyExtWidth($0) }, read: { extProgress })
+
+func openExtension() {
+    extHideTimer?.invalidate(); extHideTimer = nil
+    extShowTimer?.invalidate(); extShowTimer = nil
+    guard !extShown else { return }
+    extShown = true
+    extSpring.stop()
+    extSpring.onSettle = nil
+    extWindow.setFrame(extWindowFrame(), display: false)   // re-derive geometry (display changes)
+    extWindow.ignoresMouseEvents = false
+    extWindow.orderFrontRegardless()   // on stage before the glass moves
+    extSpring.chase(EXT_WIDTH)
+}
+
+func closeExtension(instant: Bool = false) {
+    extShowTimer?.invalidate(); extShowTimer = nil
+    extHideTimer?.invalidate(); extHideTimer = nil
+    guard extShown else { return }
+    extShown = false
+    extSpring.stop()
+    extSpring.onSettle = nil
+    if instant {
+        applyExtWidth(0)
+        extWindow.orderOut(nil)
+        return
+    }
+    extSpring.chase(0)
+    extSpring.onSettle = { extWindow.orderOut(nil) }   // off stage only after the arm is gone
+}
+
+// the whole extension decision, position-driven off the 30Hz poll — the same
+// grammar as the reveal. hover intent is dwelled: 120ms on the rune opens,
+// 180ms off BOTH rune and panel closes, so brushing past the rune on the way
+// to audio or mic never flashes it, and darting back onto the panel cancels
+// the close mid-dwell with no flicker.
+func updateExtension(xr: CGFloat, y: CGFloat) {
+    guard stripVisible, !sessionLocked, !mcActive, !cmdOverride, glassDocked else {
+        closeExtension(instant: !stripVisible || sessionLocked)
+        return
+    }
+    let (bt, bb) = bluetoothBandCG()
+    let g = extBandCG()
+    let onRune = xr <= PILL_WIDTH && y >= bt - 3 && y <= bb + 3
+    let onPanel = extShown
+        && xr <= g.left + HIDE_MARGIN && xr >= g.right - HIDE_MARGIN
+        && y >= g.top - 8 && y <= g.bottom + 8
+    if onRune || onPanel {
+        extHideTimer?.invalidate(); extHideTimer = nil
+        if !extShown, extShowTimer == nil {
+            extShowTimer = Timer.scheduledTimer(withTimeInterval: EXT_SHOW_DWELL, repeats: false) { _ in
+                extShowTimer = nil
+                openExtension()
+            }
+        }
+    } else {
+        extShowTimer?.invalidate(); extShowTimer = nil   // left the rune before the dwell — no flash
+        if extShown, extHideTimer == nil {
+            extHideTimer = Timer.scheduledTimer(withTimeInterval: EXT_HIDE_DWELL, repeats: false) { _ in
+                extHideTimer = nil
+                closeExtension()
+            }
+        }
+    }
+}
+
+applyExtWidth(0)   // parked: zero-width, faded, ordered out
 
 // MARK: - daemon
 
@@ -2743,6 +2614,7 @@ func runDaemon() -> Never {
         forName: NSApplication.didChangeScreenParametersNotification,
         object: nil, queue: .main
     ) { _ in
+        closeExtension(instant: true)                   // geometry changed — don't ride it out
         updateStrip()
         applyVisibility(stripVisible, animate: false)   // snap to the new geometry, don't slide
     }
@@ -2809,10 +2681,8 @@ func runDaemon() -> Never {
         } else {
             releaseAttention()
         }
-        // the bluetooth flyout rides the poll ITSELF — the cursor can sit on
-        // the panel (left of the pill), where the strip's own hover machinery
-        // never fires and reassertCursor is never called
-        tab.syncBluetoothFlyout()
+        // the extension — position-driven off the same tick (see updateExtension)
+        updateExtension(xr: c.xr, y: c.y)
     }
 
     // low power mode toggles repaint the battery instantly
