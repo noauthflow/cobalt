@@ -2335,12 +2335,11 @@ let strip: NSWindow = {
 // band, so no anchor can ever make it extrude past the bar's top or bottom.
 //
 // the animation is the reveal's own spring on display links of their own:
-// one integrates the ARM'S SCALE in pixels (0 → EXT_WIDTH), retargetable
-// mid-flight — the full-size glass draws SCALED about the seam's band-center,
-// so the extrusion materializes at the rune and unfolds outward instead of
-// wiping; one glides the vertical anchor. the alpha fade is DERIVED from the
-// width (the first 24pt of travel), so scale and fade cannot drift apart —
-// one integrator, two outputs.
+// one integrates the ARM'S WIDTH in pixels (0 → EXT_WIDTH), retargetable
+// mid-flight — the glass slides out of the pill's edge, its sliding tip
+// staying round at any width; one glides the vertical anchor. the alpha fade
+// is DERIVED from the width (the first 24pt of travel), so grow and fade
+// cannot drift apart — one integrator, two outputs.
 
 let EXT_WIDTH: CGFloat = 216
 let EXT_HEIGHT: CGFloat = 170
@@ -2378,28 +2377,19 @@ func extTopOffset(for anchor: ExtAnchor) -> CGFloat {
     return min(max(center - EXT_HEIGHT / 2, PILL_RADIUS), PILL_HEIGHT - PILL_RADIUS - EXT_HEIGHT)
 }
 
-// the arm's scale: the extrusion SCALES out of the bar about the seam's
-// band-center — the full-size glass drawn at the spring's progress, so it
-// materializes at the rune and unfolds outward. the spring's overshoot pops
-// the tip past full width freely, but a bottom-anchored arm's height pins at
-// exactly 1: its glass may never poke past the bar's bottom edge — the
-// overshoot reads as a subtle horizontal stretch instead.
-func extScale() -> (sx: CGFloat, sy: CGFloat) {
-    let s = max(0, extProgress / EXT_WIDTH)
-    let sy = extAnchor == .mic || extAnchor == .power ? min(s, 1) : s
-    return (s, sy)
-}
-
 // the bottom-anchored melt. while a mic/power arm holds the bar's bottom
 // edge, the pill's bottom-left corner melts SQUARE as the glass arrives and
-// re-rounds as it withdraws — the corner radius always equals the SCALED
-// glass's bottom gap, so the corner arc's top meets the arm's bottom edge
-// EXACTLY and the silhouette is sealed at every point of every transition
-// (grow, morph, retract — no notch, no snap).
+// re-rounds as it withdraws — the corner radius always equals the arm's drawn
+// bottom gap, so the corner arc's top meets the arm's bottom edge EXACTLY and
+// the silhouette is sealed at every point of every transition (grow, morph,
+// retract — no notch, no snap).
+func extBottomLift() -> CGFloat {
+    guard extProgress > 0.5, extAnchor == .mic || extAnchor == .power else { return 0 }
+    return PILL_RADIUS * (1 - extFade)
+}
 func extBottomLeftRadius() -> CGFloat {
     guard extProgress > 0.5 else { return PILL_RADIUS }
-    let scaledBottom = extY + EXT_HEIGHT / 2 + (EXT_HEIGHT / 2) * extScale().sy
-    return max(0, min(PILL_RADIUS, PILL_HEIGHT - scaledBottom))
+    return min(PILL_RADIUS, PILL_HEIGHT - (extY + EXT_HEIGHT - extBottomLift()))
 }
 
 // the anchor rune's band, in CG top-left y space — the arm anchors to the
@@ -2468,27 +2458,18 @@ final class ArmView: NSView {
     override var isFlipped: Bool { true }
 
     override func draw(_ dirtyRect: NSRect) {
-        let fade = extFade
-        guard extProgress > 0.5, fade > 0.001 else { return }
-        let (sxScale, syScale) = extScale()
-        let R = EXT_RADIUS
+        let w = extProgress, fade = extFade
+        guard w > 0.5, fade > 0.001 else { return }
+        let R = min(EXT_RADIUS, w / 2)       // the sliding tip stays round at any width
         let k: CGFloat = 0.5523
-        let sx = EXT_WIDTH + 8               // the seam (the tab's left edge), local
+        let sx = w + 8                       // the seam (the tab's left edge), local
         let top: CGFloat = 8
-        let bot: CGFloat = 8 + EXT_HEIGHT
+        let bot: CGFloat = 8 + EXT_HEIGHT - extBottomLift()   // rides the bottom-anchored melt
         // shadow: an OPEN path — top edge, rounded tip, bottom edge — run all
         // the way INTO the seam so the shadow reaches the junction corners,
         // then clipped to the arm's own width: the seam-side cut lands exactly
         // on the tab's left edge, where the tab's own stroke carries the
         // shadow through. the pill's glass never sees a drop of this.
-        let ctx = NSGraphicsContext.current!.cgContext
-        ctx.saveGState()
-        // the scale anchor: the seam, at the band's vertical center — the
-        // glass's right edge stays flush with the pill at every scale
-        let ax = sx, ay = (top + bot) / 2
-        ctx.translateBy(x: ax, y: ay)
-        ctx.scaleBy(x: sxScale, y: syScale)
-        ctx.translateBy(x: -ax, y: -ay)
         let sh = NSBezierPath()
         sh.move(to: NSPoint(x: sx, y: top))
         sh.line(to: NSPoint(x: 8 + R, y: top))
@@ -2500,9 +2481,15 @@ final class ArmView: NSView {
                  controlPoint1: NSPoint(x: 8, y: bot - R + k * R),
                  controlPoint2: NSPoint(x: 8 + R - k * R, y: bot))
         sh.line(to: NSPoint(x: sx, y: bot))
-        // no clip needed under the scale: the anchor IS the seam, so scaled
-        // content — shadow included — can never cross onto the pill's glass
-        strokeFakeShadow(sh, alpha: fade)
+        // clipped to the arm's own width: the cut lands exactly on the tab's
+        // left edge, where the tab's own stroke carries the shadow through —
+        // the pill's glass never sees a drop of this
+        if let ctx = NSGraphicsContext.current?.cgContext {
+            ctx.saveGState()
+            ctx.clip(to: CGRect(x: 0, y: 0, width: sx, height: bounds.height))
+            strokeFakeShadow(sh, alpha: fade)
+            ctx.restoreGState()
+        }
         // glass: rounded left, square right — reaching 8pt over the pill's
         // edge so the pill's stroke spill at the seam is buried, never seen
         let g = NSBezierPath()
@@ -2519,7 +2506,6 @@ final class ArmView: NSView {
         g.close()
         Theme.glass.withAlphaComponent(fade).setFill()
         g.fill()
-        ctx.restoreGState()
     }
 }
 
@@ -2535,11 +2521,10 @@ func relayoutExt(width w: CGFloat? = nil, top ty: CGFloat? = nil) {
     // — even if an interrupted handoff never got to do it
     if extProgress == 0, !extShown, extSlack != 0 { setStripExtensionSlack(0) }
     let t = tab.frame
-    armView.setFrameSize(NSSize(width: EXT_WIDTH + 24, height: EXT_HEIGHT + 16))
-    armView.setFrameOrigin(NSPoint(x: t.minX - EXT_WIDTH - 8,
+    armView.setFrameSize(NSSize(width: extProgress + 24, height: EXT_HEIGHT + 16))
+    armView.setFrameOrigin(NSPoint(x: t.minX - extProgress - 8,
                                    y: t.minY + (t.height - extY - EXT_HEIGHT) - 8))
     armView.isHidden = extProgress < 0.5
-    armView.needsDisplay = true   // the content scales inside the fixed frame
 }
 
 let armView = ArmView(frame: NSRect(x: 0, y: 0, width: 24, height: EXT_HEIGHT + 16))
@@ -2689,7 +2674,7 @@ func snapshotStrip() {
     tab.draw(tab.bounds)
     if arm {
         cg.saveGState()
-        cg.translateBy(x: -(EXT_WIDTH + 8), y: extY - 8)
+        cg.translateBy(x: -extProgress - 8, y: extY - 8)
         armView.draw(armView.bounds)
         cg.restoreGState()
     }
