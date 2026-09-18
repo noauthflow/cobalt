@@ -190,6 +190,10 @@ enum Theme {
 let PILL_WIDTH = Theme.pillWidth
 let PILL_HEIGHT = Theme.pillHeight
 let PILL_INSET: CGFloat = 0      // fused to the right screen edge — no gap
+let SHADOW_SLACK: CGFloat = 10   // window slack above + below the glass — the fake
+                                 // shadow spills 7pt past every edge, and a window
+                                 // that ends at the glass clips its own shadow (the
+                                 // pill's bottom shadow used to vanish exactly so)
 let PILL_RADIUS: CGFloat = 17
 // window ≠ glass: the window is wider than the tab by this much, with the
 // slack hanging off-screen right — the glass SUBVIEW springs out from
@@ -293,12 +297,13 @@ let fillSpring = ChaseTimer(get: { fillBlend },
 // ride every animation for free (the window server's real shadow re-blurs
 // the whole window on every content change; at 120fps that was the unusable
 // lag). the fill covers the inner half of each stroke. ONE recipe for every
-// smalt surface — the pill and its extensions cast the same shadow, which is
-// what makes separate windows read as one object.
-func strokeFakeShadow(_ path: NSBezierPath) {
+// smalt surface — the pill and its arm cast the same shadow, which is what
+// makes them read as one object. `alpha` fades the whole pass (the arm's
+// entrance/exit).
+func strokeFakeShadow(_ path: NSBezierPath, alpha: CGFloat = 1) {
     for (w, a) in [(14.0, 0.02), (10.0, 0.035), (6.0, 0.05), (2.0, 0.06)] {
         path.lineWidth = CGFloat(w)
-        NSColor.black.withAlphaComponent(CGFloat(a)).setStroke()
+        NSColor.black.withAlphaComponent(CGFloat(a) * alpha).setStroke()
         path.stroke()
     }
 }
@@ -306,10 +311,22 @@ func strokeFakeShadow(_ path: NSBezierPath) {
 final class StripView: NSView {
     override var isFlipped: Bool { true }   // y counts down from the pill top
 
+    // the fake shadow spills 7pt past the glass's edges — past this view's
+    // bounds. without this override the default bounds clip would cut every
+    // stroke's outer half off and the pill would cast no shadow at all.
+    override var wantsDefaultClipping: Bool { false }
+
+    // the extension arm paints to the LEFT of this view's bounds (negative x)
+    // — one glass, one view, no second window. without this override the
+    // default bounds clip would cut it off.
+
     // the tab: rounded on the left corners, dead straight into the right
-    // screen edge — no fillets, no flare
-    private func tabPath(in bounds: NSRect) -> NSBezierPath {
+    // screen edge — no fillets, no flare. the bottom-left corner's radius is
+    // parameterized: it melts to zero while a bottom-anchored arm holds the
+    // bar's bottom edge (see extBottomLeftRadius).
+    private func tabPath(in bounds: NSRect, bottomLeftRadius rb: CGFloat? = nil) -> NSBezierPath {
         let R = PILL_RADIUS
+        let rb = rb ?? R
         let k: CGFloat = 0.5523
         let W = bounds.width, H = bounds.height
         let p = NSBezierPath()
@@ -319,10 +336,10 @@ final class StripView: NSView {
                 controlPoint2: NSPoint(x: R - k * R, y: 0))
         p.line(to: NSPoint(x: W, y: 0))
         p.line(to: NSPoint(x: W, y: H))
-        p.line(to: NSPoint(x: R, y: H))
-        p.curve(to: NSPoint(x: 0, y: H - R),
-                controlPoint1: NSPoint(x: R - k * R, y: H),
-                controlPoint2: NSPoint(x: 0, y: H - R + k * R))
+        p.line(to: NSPoint(x: rb, y: H))
+        p.curve(to: NSPoint(x: 0, y: H - rb),
+                controlPoint1: NSPoint(x: rb - k * rb, y: H),
+                controlPoint2: NSPoint(x: 0, y: H - rb + k * rb))
         p.line(to: NSPoint(x: 0, y: R))
         p.close()
         return p
@@ -834,7 +851,7 @@ final class StripView: NSView {
     // the glass: #FAF6F3 — the caelestia tab shape: rounded on the left,
     // fused into the right screen edge with concave fillets top and bottom
     override func draw(_ dirtyRect: NSRect) {
-        let path = tabPath(in: bounds)
+        let path = tabPath(in: bounds, bottomLeftRadius: extBottomLeftRadius())
 
         // the shared fake shadow (see strokeFakeShadow), then the glass fill
         strokeFakeShadow(path)
@@ -1823,6 +1840,15 @@ func mainScreen() -> NSScreen? {
     NSScreen.screens.first { displayID($0) == CGMainDisplayID() } ?? NSScreen.main
 }
 
+// the window's frame: the glass's frame plus vertical shadow slack (the
+// glass itself keeps pillFrame — the cursor bands are derived from it)
+func stripWindowFrame() -> NSRect {
+    var f = pillFrame()
+    f.origin.y -= SHADOW_SLACK
+    f.size.height += 2 * SHADOW_SLACK
+    return f
+}
+
 // where the WINDOW lives: docked, permanently, from launch. the cursor
 // always lands on smalt at the screen edge — chrome's `<>` border never
 // gets it. the window extends TAB_TRAVEL + TAB_MARGIN past the screen
@@ -1978,7 +2004,7 @@ func applyVisibility(_ desired: Bool, animate: Bool = true) {
         closeExtension()
         extSpring.onSettle = {
             guard !extShown else { return }       // re-opened mid-retract
-            extWindow.orderOut(nil)
+            setStripExtensionSlack(0)             // hand the window's width back
             guard !stripVisible else { return }   // re-summoned mid-retract
             spring.chase(glassX(docked: false), initialVelocity: 0)
             spring.onSettle = { flushPendingRelease() }
@@ -2234,17 +2260,25 @@ func loginWindowOnScreen() -> Bool {
 // two places — docked (summon: instant, so the cursor lands on it at once)
 // or off-screen (hidden, after the exit spring settles).
 
-let tab = StripView(frame: NSRect(origin: .zero, size: NSSize(width: PILL_WIDTH, height: PILL_HEIGHT)))
+let tab = StripView(frame: NSRect(origin: NSPoint(x: 0, y: SHADOW_SLACK), size: NSSize(width: PILL_WIDTH, height: PILL_HEIGHT)))
 
 // where the glass sits inside the window: docked (flush at the screen edge
-// with TAB_MARGIN of overshoot slack to its left) vs hidden (past the edge)
-func glassX(docked: Bool) -> CGFloat { docked ? TAB_MARGIN : TAB_MARGIN + TAB_TRAVEL }
+// with TAB_MARGIN of overshoot slack to its left, plus the extension's slack
+// while an arm is out) vs hidden (past the edge). extSlack slides the whole
+// coordinate system so the tab holds its screen position while the window is
+// widened for the arm (see setStripExtensionSlack).
+func glassX(docked: Bool) -> CGFloat { TAB_MARGIN + extSlack + (docked ? 0 : TAB_TRAVEL) }
 
 // move the glass: origin only. the tab's size never changes, and setting it
 // anyway invalidated tracking areas (a full rebuild) on every spring tick.
 func setGlassX(_ x: CGFloat) {
-    tab.setFrameOrigin(NSPoint(x: x, y: tab.frame.origin.y))
+    let old = tab.frame
+    tab.setFrameOrigin(NSPoint(x: x, y: old.origin.y))
+    // the shadow spills 7pt past the tab's bounds — the spill bands ride along,
+    // so old AND new positions get their bands marked, not just the frames
     tab.needsDisplay = true
+    tab.superview?.setNeedsDisplay(
+        old.insetBy(dx: -8, dy: -8).union(tab.frame.insetBy(dx: -8, dy: -8)))
 }
 
 // the glass is fully docked = the reveal spring has parked. until then the
@@ -2266,7 +2300,7 @@ final class OverlayPanel: NSPanel {
 }
 
 let strip: NSWindow = {
-    let frame = pillFrame()
+    let frame = stripWindowFrame()
     let win = OverlayPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
     win.backgroundColor = .clear
     win.isOpaque = false
@@ -2286,13 +2320,14 @@ let strip: NSWindow = {
 //
 // hover one of the arm anchors — the bluetooth, audio or mic rune, or the
 // power button — and the strip's glass extends leftward out of the pill's own
-// edge: not a floating panel with a gap, but the menu bar itself growing an
-// arm. the arm's right edge is SQUARE and flush against the pill's straight
-// left edge (the pill's rounded corners live only at its extremes, and the
-// arm is clamped clear of them), so the union is one continuous silhouette:
-// one glass, one shadow recipe (strokeFakeShadow), one menu bar. the arm sits
-// one LEVEL BELOW the pill, so the pill's own shadow spill lands on the arm
-// at the seam — the ambient occlusion that fuses two windows into one object.
+// edge. the arm is its own SMALL view (ArmView, above the tab in z), because
+// repainting the whole pill every animation frame read as ~20Hz — now only
+// the arm redraws, and the tab never repaints for the arm's sake. the fusion
+// is geometry: the arm's glass reaches 8pt over the pill's edge (burying the
+// pill's stroke spill under opaque glass) and its shadow path has no right
+// edge — no stroke ever lands on either glass, so the two surfaces read as
+// one silhouette. the strip window widens leftward by one invisible step to
+// make room.
 //
 // ONE arm serves all four anchors: switching anchors MORPHS — the open arm
 // glides vertically to the newly hovered rune instead of closing and
@@ -2300,12 +2335,12 @@ let strip: NSWindow = {
 // band, so no anchor can ever make it extrude past the bar's top or bottom.
 //
 // the animation is the reveal's own spring on display links of their own:
-// one integrates the ARM'S WIDTH in pixels (0 → EXT_WIDTH), retargetable
-// mid-flight; one glides the vertical anchor. the alpha fade is DERIVED from
-// the width (the first 24pt of travel), so grow and fade cannot drift apart —
-// one integrator, two outputs. the window never moves (same reason the pill's
-// window never moves — the window server doesn't move windows at 120fps); the
-// subview grows and glides inside it, right edge pinned.
+// one integrates the ARM'S SCALE in pixels (0 → EXT_WIDTH), retargetable
+// mid-flight — the full-size glass draws SCALED about the seam's band-center,
+// so the extrusion materializes at the rune and unfolds outward instead of
+// wiping; one glides the vertical anchor. the alpha fade is DERIVED from the
+// width (the first 24pt of travel), so scale and fade cannot drift apart —
+// one integrator, two outputs.
 
 let EXT_WIDTH: CGFloat = 216
 let EXT_HEIGHT: CGFloat = 170
@@ -2315,35 +2350,6 @@ let EXT_SHOW_DWELL: TimeInterval = 0.12   // hover intent: brush-past never open
 let EXT_HIDE_DWELL: TimeInterval = 0.18   // leave intent: darting between runes never closes it
 
 enum ExtAnchor { case bluetooth, audio, mic, power }
-
-final class ExtensionView: NSView {
-    override var isFlipped: Bool { true }
-
-    // rounded on the LEFT, square on the RIGHT — the right edge fuses flush
-    // against the pill's left edge. same cubic corner recipe as the tab.
-    override func draw(_ dirtyRect: NSRect) {
-        let w = bounds.width, h = bounds.height
-        guard w > 0.5, h > 0.5 else { return }   // the tip: nothing to draw yet
-        let R = min(EXT_RADIUS, w / 2)           // the growing tip stays round at any width
-        let k: CGFloat = 0.5523
-        let p = NSBezierPath()
-        p.move(to: NSPoint(x: w, y: 0))
-        p.line(to: NSPoint(x: R, y: 0))
-        p.curve(to: NSPoint(x: 0, y: R),
-                controlPoint1: NSPoint(x: R - k * R, y: 0),
-                controlPoint2: NSPoint(x: 0, y: R - k * R))
-        p.line(to: NSPoint(x: 0, y: h - R))
-        p.curve(to: NSPoint(x: R, y: h),
-                controlPoint1: NSPoint(x: 0, y: h - R + k * R),
-                controlPoint2: NSPoint(x: R - k * R, y: h))
-        p.line(to: NSPoint(x: w, y: h))
-        p.line(to: NSPoint(x: w, y: 0))
-        p.close()
-        strokeFakeShadow(p)
-        Theme.glass.setFill()
-        p.fill()
-    }
-}
 
 // the anchor's rune/slot band, in pill-local flipped coords (y down from the
 // pill's top): the trio's thirds for bluetooth/audio/mic, the whole slot for
@@ -2361,14 +2367,39 @@ func anchorOffset(_ anchor: ExtAnchor) -> (y: CGFloat, h: CGFloat) {
     }
 }
 
-// the arm's top edge for an anchor: centered on the rune, CLAMPED to the
-// pill's straight band — the arm may never extrude past the bar's rounded
-// corners, top or bottom (audio and power both want to sit lower than the
-// band allows, so they ride up to the clamp; bluetooth fits as-is)
+// the arm's top edge for an anchor. mic and power are anchored to the bar's
+// BOTTOM edge — their glass runs clear down to it. bluetooth and audio center
+// on their rune, clamped to the pill's straight band so nothing ever extrudes
+// past the bar's rounded corners.
 func extTopOffset(for anchor: ExtAnchor) -> CGFloat {
+    if anchor == .mic || anchor == .power { return PILL_HEIGHT - EXT_HEIGHT }
     let a = anchorOffset(anchor)
     let center = a.y + a.h / 2
     return min(max(center - EXT_HEIGHT / 2, PILL_RADIUS), PILL_HEIGHT - PILL_RADIUS - EXT_HEIGHT)
+}
+
+// the arm's scale: the extrusion SCALES out of the bar about the seam's
+// band-center — the full-size glass drawn at the spring's progress, so it
+// materializes at the rune and unfolds outward. the spring's overshoot pops
+// the tip past full width freely, but a bottom-anchored arm's height pins at
+// exactly 1: its glass may never poke past the bar's bottom edge — the
+// overshoot reads as a subtle horizontal stretch instead.
+func extScale() -> (sx: CGFloat, sy: CGFloat) {
+    let s = max(0, extProgress / EXT_WIDTH)
+    let sy = extAnchor == .mic || extAnchor == .power ? min(s, 1) : s
+    return (s, sy)
+}
+
+// the bottom-anchored melt. while a mic/power arm holds the bar's bottom
+// edge, the pill's bottom-left corner melts SQUARE as the glass arrives and
+// re-rounds as it withdraws — the corner radius always equals the SCALED
+// glass's bottom gap, so the corner arc's top meets the arm's bottom edge
+// EXACTLY and the silhouette is sealed at every point of every transition
+// (grow, morph, retract — no notch, no snap).
+func extBottomLeftRadius() -> CGFloat {
+    guard extProgress > 0.5 else { return PILL_RADIUS }
+    let scaledBottom = extY + EXT_HEIGHT / 2 + (EXT_HEIGHT / 2) * extScale().sy
+    return max(0, min(PILL_RADIUS, PILL_HEIGHT - scaledBottom))
 }
 
 // the anchor rune's band, in CG top-left y space — the arm anchors to the
@@ -2388,65 +2419,135 @@ func extBandCG(_ anchor: ExtAnchor) -> (left: CGFloat, right: CGFloat, top: CGFl
     return (right + EXT_WIDTH, right, top, top + EXT_HEIGHT)
 }
 
-// the extension window: a FIXED frame spanning full width + overshoot slack
-// and the pill's whole height (the arm glides vertically inside it when the
-// anchor morphs). the glass subview grows inside it, right edge pinned to the
-// window's right edge — which IS the pill's left edge, so the seam is
-// pixel-exact at any width.
-func extWindowFrame() -> NSRect {
-    guard let screen = mainScreen() else { return .zero }
-    let f = screen.frame
-    let right = f.maxX - PILL_WIDTH                     // the pill's left edge
-    let left = right - EXT_WIDTH - EXT_SLACK
-    return NSRect(x: left, y: pillFrame().minY,
-                  width: EXT_WIDTH + EXT_SLACK, height: PILL_HEIGHT)
-}
-
-let ext = ExtensionView(frame: NSRect(x: EXT_SLACK, y: 0, width: 0, height: EXT_HEIGHT))
-
-let extWindow: OverlayPanel = {
-    let frame = extWindowFrame()
-    let win = OverlayPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
-    win.backgroundColor = .clear
-    win.isOpaque = false
-    win.hasShadow = false          // same reason as the pill: shadows are CONTENT here
-    win.ignoresMouseEvents = true  // hidden: the space left of the pill belongs to the apps
-    win.level = NSWindow.Level(rawValue: 20)   // one under the pill — its shadow spill fuses the seam
-    win.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
-    let container = NSView(frame: NSRect(origin: .zero, size: frame.size))
-    container.addSubview(ext)
-    win.contentView = container
-    return win
-}()
-
-// the arm's state: width in points (what extSpring integrates), vertical
-// position in window coords (what extYSpring glides), which anchor is open
+// the arm's state: width in points (what extSpring integrates), top edge in
+// tab-local flipped coords (what extYSpring glides), which anchor is open
 var extProgress: CGFloat = 0
-var extY: CGFloat = PILL_HEIGHT - extTopOffset(for: .bluetooth) - EXT_HEIGHT
+var extY: CGFloat = extTopOffset(for: .bluetooth)
+var extFade: CGFloat = 0        // the arm's drawn alpha — derived from width
 var extAnchor: ExtAnchor = .bluetooth
 var extWanted: ExtAnchor = .bluetooth    // the hovered anchor while the show dwell runs
 var extShown = false
 var extShowTimer: Timer?
 var extHideTimer: Timer?
 
-// the arm's cocoa y inside the window for an anchor (window spans the pill's
-// full height; flipped offset → bottom-up cocoa)
-func extWindowY(for anchor: ExtAnchor) -> CGFloat {
-    PILL_HEIGHT - extTopOffset(for: anchor) - EXT_HEIGHT
+// extra left slack currently added to the strip window for the arm. the
+// window is normally exactly the pill + its reveal slack; opening the arm
+// widens it ONE invisible step (the added region is transparent — the glass
+// hasn't grown yet), and it narrows back the moment the arm is glass again.
+// the tab holds its screen position throughout: only window-relative
+// coordinates shift, so the reveal spring's coordinate system simply slides
+// with extSlack (see glassX).
+var extSlack: CGFloat = 0
+
+func setStripExtensionSlack(_ slack: CGFloat) {
+    guard slack != extSlack else { return }
+    extSlack = slack
+    var f = stripWindowFrame()
+    f.origin.x -= slack
+    f.size.width += slack
+    strip.setFrame(f, display: false)
+    // the container MUST cover the arm — a subview cannot paint outside its
+    // superview, and the default autoresizing mask doesn't track setFrame
+    strip.contentView?.setFrameSize(f.size)
+    // this slides the tab's whole coordinate system — an in-flight reveal
+    // spring would keep chasing its stale target and fight the snap, flying
+    // the glass across the screen. stop it and re-anchor it docked.
+    spring.stop()
+    spring.onSettle = nil
+    setGlassX(glassX(docked: true))   // the tab holds its screen position in the new frame
+    strip.contentView?.needsDisplay = true   // the exposed region is undefined until drawn
+}
+
+// the arm's own surface — small, and the ONLY thing that redraws during the
+// arm's animation (a single view painting the whole pill every frame read as
+// ~20Hz; this redraws ~10% of the pixels). it sits ABOVE the tab in z, and
+// the fusion is pure geometry: its glass extends 8pt over the pill's edge,
+// burying the pill's own stroke spill at the seam under opaque glass, and its
+// shadow path has NO right edge — no stroke is ever drawn on either glass.
+final class ArmView: NSView {
+    override var isFlipped: Bool { true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let fade = extFade
+        guard extProgress > 0.5, fade > 0.001 else { return }
+        let (sxScale, syScale) = extScale()
+        let R = EXT_RADIUS
+        let k: CGFloat = 0.5523
+        let sx = EXT_WIDTH + 8               // the seam (the tab's left edge), local
+        let top: CGFloat = 8
+        let bot: CGFloat = 8 + EXT_HEIGHT
+        // shadow: an OPEN path — top edge, rounded tip, bottom edge — run all
+        // the way INTO the seam so the shadow reaches the junction corners,
+        // then clipped to the arm's own width: the seam-side cut lands exactly
+        // on the tab's left edge, where the tab's own stroke carries the
+        // shadow through. the pill's glass never sees a drop of this.
+        let ctx = NSGraphicsContext.current!.cgContext
+        ctx.saveGState()
+        // the scale anchor: the seam, at the band's vertical center — the
+        // glass's right edge stays flush with the pill at every scale
+        let ax = sx, ay = (top + bot) / 2
+        ctx.translateBy(x: ax, y: ay)
+        ctx.scaleBy(x: sxScale, y: syScale)
+        ctx.translateBy(x: -ax, y: -ay)
+        let sh = NSBezierPath()
+        sh.move(to: NSPoint(x: sx, y: top))
+        sh.line(to: NSPoint(x: 8 + R, y: top))
+        sh.curve(to: NSPoint(x: 8, y: top + R),
+                 controlPoint1: NSPoint(x: 8 + R - k * R, y: top),
+                 controlPoint2: NSPoint(x: 8, y: top + R - k * R))
+        sh.line(to: NSPoint(x: 8, y: bot - R))
+        sh.curve(to: NSPoint(x: 8 + R, y: bot),
+                 controlPoint1: NSPoint(x: 8, y: bot - R + k * R),
+                 controlPoint2: NSPoint(x: 8 + R - k * R, y: bot))
+        sh.line(to: NSPoint(x: sx, y: bot))
+        // no clip needed under the scale: the anchor IS the seam, so scaled
+        // content — shadow included — can never cross onto the pill's glass
+        strokeFakeShadow(sh, alpha: fade)
+        // glass: rounded left, square right — reaching 8pt over the pill's
+        // edge so the pill's stroke spill at the seam is buried, never seen
+        let g = NSBezierPath()
+        g.move(to: NSPoint(x: sx, y: top))
+        g.line(to: NSPoint(x: 8 + R, y: top))
+        g.curve(to: NSPoint(x: 8, y: top + R),
+                controlPoint1: NSPoint(x: 8 + R - k * R, y: top),
+                controlPoint2: NSPoint(x: 8, y: top + R - k * R))
+        g.line(to: NSPoint(x: 8, y: bot - R))
+        g.curve(to: NSPoint(x: 8 + R, y: bot),
+                controlPoint1: NSPoint(x: 8, y: bot - R + k * R),
+                controlPoint2: NSPoint(x: 8 + R - k * R, y: bot))
+        g.line(to: NSPoint(x: sx, y: bot))
+        g.close()
+        Theme.glass.withAlphaComponent(fade).setFill()
+        g.fill()
+        ctx.restoreGState()
+    }
 }
 
 // one integrator, two outputs: the grow and the fade derive from the same
-// width — the fade spends the first 24pt of travel, so they cannot drift apart
-func relayoutExt(width w: CGFloat? = nil) {
-    let width = max(0, min(w ?? extProgress, EXT_WIDTH + EXT_SLACK)).rounded()
-    extProgress = width
-    ext.setFrameSize(NSSize(width: width, height: EXT_HEIGHT))
-    ext.setFrameOrigin(NSPoint(x: EXT_WIDTH + EXT_SLACK - width, y: extY.rounded()))
-    extWindow.alphaValue = max(0, min(1, extProgress / 24))
+// width — the fade spends the first 24pt of travel, so they cannot drift
+// apart. per tick this is GEOMETRY ONLY (one small view's frame); the arm
+// view redraws itself, the tab never repaints for the arm's sake.
+func relayoutExt(width w: CGFloat? = nil, top ty: CGFloat? = nil) {
+    extProgress = max(0, min(w ?? extProgress, EXT_WIDTH + EXT_SLACK)).rounded()
+    if let ty { extY = ty }
+    extFade = max(0, min(1, extProgress / 24))
+    // the arm is glass and closed: the window hands its width back on its own
+    // — even if an interrupted handoff never got to do it
+    if extProgress == 0, !extShown, extSlack != 0 { setStripExtensionSlack(0) }
+    let t = tab.frame
+    armView.setFrameSize(NSSize(width: EXT_WIDTH + 24, height: EXT_HEIGHT + 16))
+    armView.setFrameOrigin(NSPoint(x: t.minX - EXT_WIDTH - 8,
+                                   y: t.minY + (t.height - extY - EXT_HEIGHT) - 8))
+    armView.isHidden = extProgress < 0.5
+    armView.needsDisplay = true   // the content scales inside the fixed frame
 }
 
+let armView = ArmView(frame: NSRect(x: 0, y: 0, width: 24, height: EXT_HEIGHT + 16))
+// above the tab in z — added after it — so its glass buries the seam spill
+strip.contentView?.addSubview(armView)
+
 let extSpring = SpringDriver(apply: { relayoutExt(width: $0) }, read: { extProgress })
-let extYSpring = SpringDriver(apply: { extY = $0; relayoutExt() }, read: { extY })
+let extYSpring = SpringDriver(apply: { relayoutExt(top: $0) }, read: { extY })
 
 func openExtension() {
     extHideTimer?.invalidate(); extHideTimer = nil
@@ -2456,17 +2557,14 @@ func openExtension() {
     extAnchor = extWanted
     extSpring.stop()
     extSpring.onSettle = nil
-    let y = extWindowY(for: extAnchor)
+    setStripExtensionSlack(EXT_WIDTH + EXT_SLACK)   // room first — invisible, all transparent
+    let top = extTopOffset(for: extAnchor)
     if extProgress < 0.5 {
-        extY = y                       // from closed: snap to the rune
         extYSpring.stop()
-        relayoutExt()
-    } else if abs(extY - y) > 0.5 {
-        extYSpring.chase(y)            // reopening mid-retract: glide back to the rune
+        relayoutExt(top: top)          // from closed: snap to the rune
+    } else if abs(extY - top) > 0.5 {
+        extYSpring.chase(top)          // reopening mid-retract: glide back to the rune
     }
-    extWindow.setFrame(extWindowFrame(), display: false)   // re-derive geometry (display changes)
-    extWindow.ignoresMouseEvents = false
-    extWindow.orderFrontRegardless()   // on stage before the glass moves
     extSpring.chase(EXT_WIDTH)
 }
 
@@ -2474,7 +2572,7 @@ func openExtension() {
 // not close and reopen
 func morphExtension(to anchor: ExtAnchor) {
     extAnchor = anchor
-    extYSpring.chase(extWindowY(for: anchor))
+    extYSpring.chase(extTopOffset(for: anchor))
 }
 
 func closeExtension(instant: Bool = false) {
@@ -2487,11 +2585,11 @@ func closeExtension(instant: Bool = false) {
     if instant {
         extYSpring.stop()
         relayoutExt(width: 0)
-        extWindow.orderOut(nil)
+        setStripExtensionSlack(0)      // hand the window's width back at once
         return
     }
     extSpring.chase(0)
-    extSpring.onSettle = { extWindow.orderOut(nil) }   // off stage only after the arm is gone
+    extSpring.onSettle = { setStripExtensionSlack(0) }   // width back only once the arm is glass
 }
 
 // the whole extension decision, position-driven off the 30Hz poll — the same
@@ -2501,7 +2599,10 @@ func closeExtension(instant: Bool = false) {
 // with no flicker. crossing from one rune to another never closes anything —
 // the open arm just morphs across.
 func updateExtension(xr: CGFloat, y: CGFloat) {
-    guard stripVisible, !sessionLocked, !mcActive, !cmdOverride, glassDocked else {
+    // the extension is inert until the reveal spring is PARKED — glassDocked
+    // alone turns true during the entrance overshoot wobble, and widening the
+    // window under a still-integrating spring is the flying-glass bug
+    guard stripVisible, !sessionLocked, !mcActive, !cmdOverride, glassDocked, !spring.running else {
         if extShown { closeExtension(instant: !stripVisible || sessionLocked) }
         return   // already retracting: let the animated close finish its handoff
     }
@@ -2543,28 +2644,55 @@ func updateExtension(xr: CGFloat, y: CGFloat) {
     }
 }
 
-relayoutExt(width: 0)   // parked: zero-width, faded, ordered out
-
+relayoutExt(width: 0)   // parked: zero-width, faded, no slack
 // MARK: - daemon
 
 // one-shot diagnostic (SMALT_SNAPSHOT=1): render the strip's widgets into
 // a png and exit — lets the agent see exactly what the glass draws without
 // screen-recording permission.
 func snapshotStrip() {
+    // SMALT_SNAPSHOT_ARM=1 renders with the extension arm out (bluetooth),
+    // bitmap extended left to include it — lets the agent see the fused
+    // silhouette without screen-recording permission
+    let armName = ProcessInfo.processInfo.environment["SMALT_SNAPSHOT_ARM"]
+    let arm = armName != nil
+    let a: ExtAnchor = armName == "audio" ? .audio : armName == "mic" ? .mic : armName == "power" ? .power : .bluetooth
+    if arm {
+        let f = ProcessInfo.processInfo.environment["SMALT_SNAPSHOT_SCALE"]
+            .flatMap { Double($0) } ?? 1
+        extProgress = EXT_WIDTH * CGFloat(min(1, max(0.02, f)))
+        extFade = 1
+        extAnchor = a
+        extWanted = a
+        extY = extTopOffset(for: a)
+        relayoutExt(top: extY)               // position the full-size frame
+        extProgress = EXT_WIDTH * CGFloat(min(1, max(0.02, f)))
+        extFade = 1
+        armView.needsDisplay = true
+    }
     let scale: CGFloat = 2
-    let W = tab.bounds.width, H = tab.bounds.height
+    let pad: CGFloat = 14               // capture the shadow spill around the glass
+    let W = pad * 2 + (arm ? EXT_WIDTH : 0) + tab.bounds.width
+    let H = tab.bounds.height + pad * 2
     let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(W * scale),
         pixelsHigh: Int(H * scale), bitsPerSample: 8, samplesPerPixel: 4,
         hasAlpha: true, isPlanar: false, colorSpaceName: .calibratedRGB,
         bytesPerRow: 0, bitsPerPixel: 0)!
     let cg = NSGraphicsContext(bitmapImageRep: rep)!.cgContext
     cg.saveGState()
-    // the glass's flipped space: y counts down, points not pixels
-    cg.translateBy(x: 0, y: H * scale)
+    // the glass's flipped space: y counts down, points not pixels; the tab's
+    // right edge sits `pad` inside the bitmap's right edge
+    cg.translateBy(x: (W - pad - tab.bounds.width) * scale, y: (H - pad) * scale)
     cg.scaleBy(x: scale, y: -scale)
     NSGraphicsContext.saveGraphicsState()
     NSGraphicsContext.current = NSGraphicsContext(cgContext: cg, flipped: true)
     tab.draw(tab.bounds)
+    if arm {
+        cg.saveGState()
+        cg.translateBy(x: -(EXT_WIDTH + 8), y: extY - 8)
+        armView.draw(armView.bounds)
+        cg.restoreGState()
+    }
     NSGraphicsContext.restoreGraphicsState()
     cg.restoreGState()
     try? rep.representation(using: .png, properties: [:])!
@@ -2635,7 +2763,7 @@ func runDaemon() -> Never {
     // while on stage (that's the cursor fix); only the glass ever moves.
     // parked at launch = ordered out: an ordered-in window with off-screen
     // content is what the lock-screen zoom reveals.
-    strip.setFrame(pillFrame(), display: true)
+    strip.setFrame(stripWindowFrame(), display: true)
     setGlassX(glassX(docked: false))   // glass parked off-screen at launch
     applyVisibility(false, animate: false)   // parked = click-through at the edge → window OUT
 
