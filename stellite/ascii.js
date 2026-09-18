@@ -23,7 +23,7 @@ const SAT = 1.25 // colour push away from grey; aeolian's 1.8 was tuned for whit
                  // clouds and turns normal photos neon
 const BRIGHTEN = 1.0 // aeolian multiplies 1.12 on top; not needed full-stop
 
-function startAsciiArt(canvas, parent, srcs, background = '#353535', adj = { brightness: 100, blur: 0 }) {
+function startAsciiArt(canvas, parent, srcs, background = '#353535', adj = { brightness: 100 }) {
   const ctx = canvas.getContext('2d')
   const src = srcs[Math.floor(Math.random() * srcs.length)]
   const img = new Image()
@@ -69,9 +69,9 @@ function startAsciiArt(canvas, parent, srcs, background = '#353535', adj = { bri
     off.height = rows
     const octx = off.getContext('2d', { willReadFrequently: true })
     if (!octx) return false
-    // user adjustments, applied at sample time. the offscreen grid is ~1px per
-    // character cell, so the screen-space blur is divided down to match.
-    octx.filter = `brightness(${adj.brightness}%) blur(${(adj.blur / CELL_W).toFixed(2)}px)`
+    // user brightness, applied at sample time. the offscreen grid is ~1px per
+    // character cell.
+    octx.filter = `brightness(${adj.brightness}%)`
     const imgRatio = img.naturalWidth / img.naturalHeight
     const gridRatio = cols / rows
     let sw, sh, sx, sy
@@ -100,8 +100,7 @@ function startAsciiArt(canvas, parent, srcs, background = '#353535', adj = { bri
     for (let p = 0; p < n; p++) noise[p] = Math.random()
 
     // Pass 1: luminance per cell + overall min/max, so we can contrast-stretch
-    // each image to use the full character range. Transparent cells (blur bleed
-    // at the crop edges) are excluded from the stretch and blanked in pass 2.
+    // each image to use the full character range.
     const lum = new Float32Array(n)
     const opaque = new Uint8Array(n)
     let lmin = 1

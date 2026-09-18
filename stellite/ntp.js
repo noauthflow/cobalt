@@ -8,7 +8,7 @@ const bg = $('bg'), cfg = $('cfg'), dropzone = $('dropzone');
 const store = chrome.storage.local;
 
 // live settings snapshot; every value mirrors chrome.storage
-const S = { iconColor: DEFAULT_ICON, photos: [], ascii: false, intro: true, interactive: true, brightness: 100, blur: 0, menu: true };
+const S = { iconColor: DEFAULT_ICON, photos: [], ascii: false, intro: true, interactive: true, brightness: 100, menu: true };
 let stopAscii = null;
 
 const favicon = (color) =>
@@ -71,7 +71,7 @@ const showPhoto = () => {
   const img = new Image();
   img.onload = () => {
     bg.style.backgroundImage = `url("${src}")`;
-    bg.style.filter = `brightness(${S.brightness}%) blur(${S.blur}px)`;
+    bg.style.filter = `brightness(${S.brightness}%)`;
     requestAnimationFrame(() => bg.classList.add('on'));
   };
   img.src = src;
@@ -159,7 +159,7 @@ $('bgfiles').addEventListener('change', (e) => {
   dropzone.addEventListener(ev, (e) => { e.preventDefault(); dropzone.classList.remove('dragover'); }));
 dropzone.addEventListener('drop', (e) => addFiles(e.dataTransfer.files));
 
-// ---- adjustments (brightness / blur) ----
+// ---- adjustments (brightness) ----
 const paintSlider = (el) => {
   const pct = ((el.value - el.min) / (el.max - el.min)) * 100;
   el.style.setProperty('--p', pct + '%');
@@ -171,25 +171,12 @@ $('brightness').addEventListener('input', (e) => {
   paintSlider(e.target);
   // photo mode can adjust live; ascii re-samples on release (below)
   if (!S.ascii && bg.classList.contains('on')) {
-    bg.style.filter = `brightness(${S.brightness}%) blur(${S.blur}px)`;
+    bg.style.filter = `brightness(${S.brightness}%)`;
   }
 });
 $('brightness').addEventListener('change', (e) => {
   persist({ brightness: S.brightness });
   if (S.ascii) showMode(); // ascii re-samples with new brightness
-});
-
-$('blur').addEventListener('input', (e) => {
-  S.blur = +e.target.value;
-  $('blurval').textContent = S.blur + 'px';
-  paintSlider(e.target);
-  if (!S.ascii && bg.classList.contains('on')) {
-    bg.style.filter = `brightness(${S.brightness}%) blur(${S.blur}px)`;
-  }
-});
-$('blur').addEventListener('change', (e) => {
-  persist({ blur: S.blur });
-  if (S.ascii) showMode();
 });
 
 // ---- ascii switch ----
@@ -250,11 +237,8 @@ store.get(S, (vals) => {
   $('interactivetoggle').checked = S.interactive;
   $('menutoggle').checked = S.menu;
   $('brightness').value = S.brightness;
-  $('blur').value = S.blur;
   paintSlider($('brightness'));
-  paintSlider($('blur'));
   $('brightval').textContent = S.brightness + '%';
-  $('blurval').textContent = S.blur + 'px';
   setBgInfo();
   renderThumbs();
   if (S.menu) {

@@ -19,8 +19,8 @@ hand-rolled material design 3 tokens/components — no libraries, no build)
   per-photo remove. stored as data urls (unlimitedStorage). each new
   tab shows a random photo fading in over the grey (200ms delay,
   500ms fade — tunable in the #bg transition).
-- **adjust**: brightness (25-150%) + blur (0-20px) sliders. photo mode
-  applies live via css filter; ascii re-samples on slider release.
+- **adjust**: brightness (25-150%) slider. photo mode applies live via css
+  filter; ascii re-samples on slider release.
 - **ascii art mode**: m3 switch. port of aeolian's DotImage.tsx
   (`ascii.js`): same 7x12 grid, ramp, hover-scramble + healing, full-page
   canvas (no left taper). "decode intro" switch picks the load animation:
@@ -28,7 +28,7 @@ hand-rolled material design 3 tokens/components — no libraries, no build)
   fade-in of the finished image. "mouse interactive" switch toggles the
   hover-scramble on/off — applied live (no restart; scrambled cells just
   heal, no new ones). only deltas vs aeolian: word is COBALT,
-  panel bg #353535, adjustments applied via ctx.filter at sample time.
+  panel bg #353535, brightness applied via ctx.filter at sample time.
 - mv3 csp: no inline scripts — logic lives in `ntp.js`/`ascii.js`.
 
 **youtube shorts blocker** (`block.js` + `hide.css`, runs at document_start)
