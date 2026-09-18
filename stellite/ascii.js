@@ -8,7 +8,8 @@
 // own palette. Covers the full page, fills its positioned parent, redraws on
 // resize. adj.intro selects the load animation: true = "decode" intro
 // (flickering COBALT resolving top to bottom), false = plain fade-in of the
-// finished image.
+// finished image. adj.interactive === false turns the hover-scramble off
+// (checked live, so the panel switch toggles it without a restart).
 const CELL_W = 7 // px per character column
 const CELL_H = 12 // px per character row (also the font size)
 const RAMP = " .,:;-~=+i!lI/\\|()1[]{}rcvzxnufjtLCJUYXZ0OQmwqpdbkhao*#MW&8%B@$" // sparse -> dense
@@ -240,6 +241,7 @@ function startAsciiArt(canvas, parent, srcs, background = '#353535', adj = { bri
   }
   const loop = () => {
     const now = performance.now()
+    if (adj.interactive === false) inside = false // toggled off mid-hover: stop holding
     if (inside) scrambleAround(now) // hold cells under a stationary cursor
     if (drawScrambleFrame(now)) {
       hoverRaf = requestAnimationFrame(loop)
@@ -253,6 +255,8 @@ function startAsciiArt(canvas, parent, srcs, background = '#353535', adj = { bri
     // the final image and set ready before the intro ever plays (fast data-URL
     // decode). raf non-zero means the intro is still mid-flight — no hover.
     if (!ready || raf) return
+    // interactivity toggled off: ignore the cursor entirely (checked live)
+    if (adj.interactive === false) { inside = false; return }
     const rect = canvas.getBoundingClientRect()
     mx = e.clientX - rect.left
     my = e.clientY - rect.top

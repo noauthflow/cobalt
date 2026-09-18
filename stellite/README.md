@@ -25,7 +25,9 @@ hand-rolled material design 3 tokens/components — no libraries, no build)
   (`ascii.js`): same 7x12 grid, ramp, hover-scramble + healing, full-page
   canvas (no left taper). "decode intro" switch picks the load animation:
   intro = flickering COBALT resolving top to bottom (1600ms), off = plain
-  fade-in of the finished image. only deltas vs aeolian: word is COBALT,
+  fade-in of the finished image. "mouse interactive" switch toggles the
+  hover-scramble on/off — applied live (no restart; scrambled cells just
+  heal, no new ones). only deltas vs aeolian: word is COBALT,
   panel bg #353535, adjustments applied via ctx.filter at sample time.
 - mv3 csp: no inline scripts — logic lives in `ntp.js`/`ascii.js`.
 

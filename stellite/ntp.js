@@ -8,7 +8,7 @@ const bg = $('bg'), cfg = $('cfg'), dropzone = $('dropzone');
 const store = chrome.storage.local;
 
 // live settings snapshot; every value mirrors chrome.storage
-const S = { iconColor: DEFAULT_ICON, photos: [], ascii: false, intro: true, brightness: 100, blur: 0, menu: true };
+const S = { iconColor: DEFAULT_ICON, photos: [], ascii: false, intro: true, interactive: true, brightness: 100, blur: 0, menu: true };
 let stopAscii = null;
 
 const favicon = (color) =>
@@ -219,6 +219,13 @@ $('introtoggle').addEventListener('change', (e) => {
   if (S.ascii) showMode(); // restart ascii with the new load animation
 });
 
+// interactive switch (ascii hover-scramble on/off; live — S is the adj object
+// ascii.js reads, so no restart: scrambled cells just heal, no new scrambles)
+$('interactivetoggle').addEventListener('change', (e) => {
+  S.interactive = e.target.checked;
+  persist({ interactive: S.interactive });
+});
+
 $('menutoggle').addEventListener('change', (e) => {
   S.menu = e.target.checked;
   persist({ menu: S.menu });
@@ -240,6 +247,7 @@ store.get(S, (vals) => {
   $('iconhex').value = S.iconColor;
   $('asciitoggle').checked = S.ascii;
   $('introtoggle').checked = S.intro;
+  $('interactivetoggle').checked = S.interactive;
   $('menutoggle').checked = S.menu;
   $('brightness').value = S.brightness;
   $('blur').value = S.blur;
