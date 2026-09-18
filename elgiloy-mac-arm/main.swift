@@ -41,6 +41,13 @@ final class App: NSObject {
     private var listPending = false   // a refresh arrived while one was in flight → run another when it lands
     private var lastFlagsValid = false // last reply's AX scan grounded every row (see refreshList)
     private var pendingNewTab = false  // 'a' fired; next refresh should land sel on the appended tab
+    // w fired: closes still settling. a reply that still contains any of
+    // these tabs is a PRE-CLOSE snapshot (an in-flight list query queued
+    // before the close apple event, or chrome mid-model-update) — rendering
+    // it resurrects the row the close just dropped: flash, then gone on the
+    // next reply. keyed "title\u{1f}url".
+    private var pendingCloses: [String] = []
+    private var staleReplies = 0       // consecutive pre-close replies swallowed (give up after 4)
     private var movedYet = false
     private var watchdog: Timer?
 
@@ -170,8 +177,12 @@ final class App: NSObject {
     private func closeRow(_ i: Int) {
         guard open, let bid = bundleId, tabs.indices.contains(i) else { return }
         let tab = tabs[i]
+        pendingCloses.append(tab.title + "\u{1f}" + tab.url)
+        staleReplies = 0
         q.async { Browser.closeTab(bundleId: bid, n: tab.n) }
         let wasSelected = i == sel
+        movedYet = true   // the close owns the selection: refreshes must anchor
+                          // on the row we landed, not chrome's re-anchored active
         tabs.remove(at: i)
         // chrome renumbers its tab indices after a close — keep local n in
         // sync so a fast next-press still switches to the right tab
@@ -252,6 +263,32 @@ final class App: NSObject {
                     }
                 }
                 if var tabs {   // mutable: the ungrounded-row path mutates flags below
+                    // CLOSE SETTLING — a reply that still contains a tab we
+                    // just closed is a pre-close snapshot. swallow it whole:
+                    // no render, no cache, no sel math — the local post-close
+                    // render already on screen is the truth until chrome
+                    // confirms. a re-poll is scheduled for the settle beat.
+                    // ~1s of consecutive stale replies means the close itself
+                    // failed (apple event error) — stop suppressing and let
+                    // the reply resurrect the row, matching chrome.
+                    if !self.pendingCloses.isEmpty {
+                        let keys = Set(self.pendingCloses)
+                        if tabs.contains(where: { keys.contains("\($0.title)\u{1f}\($0.url)") }) {
+                            self.staleReplies += 1
+                            if self.staleReplies < 4 {
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                                    guard !self.listBusy else { return }
+                                    self.refreshList()
+                                }
+                                return   // defer above still drains listPending
+                            }
+                            self.pendingCloses.removeAll()
+                            self.staleReplies = 0
+                        } else {
+                            self.pendingCloses.removeAll()
+                            self.staleReplies = 0
+                        }
+                    }
                     // UNGROUNDED ROWS — browser.list matches AX strip entries
                     // to tabs by title PREFIX, so a grounded row's flags are
                     // fresh truth no matter how the strip is ordered; only

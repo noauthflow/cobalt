@@ -17,6 +17,15 @@ the cache is re-primed after every session, and it persists to disk
 (~/Library/Caches/elgiloy-tabs.json) so the first open after a relaunch
 is never blank either.
 
+close settling: a `w` close drops the row locally and fires the apple event,
+then confirms against chrome. any reply that still contains the closed tab
+is a pre-close snapshot (an in-flight list query queued before the close, or
+chrome mid-model-update) and is swallowed whole — no render, no cache —
+until a reply confirms the close. without this the row flashes back into the
+list for one poll cycle before the next reply removes it again. ~1s of
+consecutive stale replies means the close itself failed; suppression lifts
+and the reply resurrects the row, matching chrome.
+
 ## design: chrome switches, we draw
 
 the daemon never switches a tab and never swallows a tab keypress. chrome
