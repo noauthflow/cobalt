@@ -1963,11 +1963,26 @@ func applyVisibility(_ desired: Bool, animate: Bool = true) {
     // it owns nothing. out it goes; summon re-fronts before the glass moves.
     spring.stop()
     spring.onSettle = nil
-    if changed, !desired { closeExtension(instant: !animate) }   // the panel never outlives the pill
+    if desired { extSpring.onSettle = nil }   // a re-summon cancels any arm-first handoff
     if desired { strip.orderFrontRegardless() }   // back on stage before the glass moves
     if !animate {
+        if !desired { closeExtension(instant: true) }   // the arm never outlives the bar
         setGlassX(glassX(docked: desired))
         if !desired { flushPendingRelease() }   // parked instantly — release now
+        return
+    }
+    if !desired, extShown || extSpring.running {
+        // the arm retracts INTO the bar first; the bar leaves only once the
+        // arm is glass again — an open arm must never be caught mid-air while
+        // the bar slides away beneath it (that was the double-collapse)
+        closeExtension()
+        extSpring.onSettle = {
+            guard !extShown else { return }       // re-opened mid-retract
+            extWindow.orderOut(nil)
+            guard !stripVisible else { return }   // re-summoned mid-retract
+            spring.chase(glassX(docked: false), initialVelocity: 0)
+            spring.onSettle = { flushPendingRelease() }
+        }
         return
     }
     spring.chase(glassX(docked: desired),
@@ -2015,11 +2030,11 @@ func pillBandCG() -> (top: CGFloat, bottom: CGFloat) {
 // hidden → visible transition, never "you were hovering, bye")
 func hoverVisibility(xr: CGFloat, y: CGFloat, top: CGFloat, bottom: CGFloat) -> Bool? {
     if xr <= REVEAL_WIDTH, y >= top - SUMMON_BAND, y <= bottom + SUMMON_BAND { return true }
-    // the extension's domain: while it's open (or about to be), the panel and
-    // the corridor back to the pill are smalt's — crossing the gap between
-    // them must read as "still here", never as "left the pill"
+    // the extension's domain: while it's open (or about to be), the arm and
+    // the pill column within its band are smalt's — the cursor crossing between
+    // rune and arm must read as "still here", never as "left the pill"
     if extShown || extShowTimer != nil {
-        let g = extBandCG()
+        let g = extBandCG(extAnchor)
         if y >= g.top - HIDE_BAND, y <= g.bottom + HIDE_BAND, xr <= g.left + HIDE_MARGIN { return true }
     }
     if xr > PILL_WIDTH + HIDE_MARGIN || y > bottom + HIDE_BAND || y < top - HIDE_BAND { return false }
@@ -2267,31 +2282,39 @@ let strip: NSWindow = {
     return win
 }()
 
-// MARK: - the bluetooth extension
+// MARK: - the extensions (bluetooth · audio · mic · power)
 //
-// hover the bluetooth rune and the strip's glass extends leftward out of the
-// pill's own edge — not a floating panel with a gap, but the menu bar itself
-// growing an arm. the arm's right edge is SQUARE and flush against the pill's
-// straight left edge (the pill's rounded corners live only at its extremes,
-// far from the arm's band), so the union is one continuous silhouette: one
-// glass, one shadow recipe (strokeFakeShadow), one menu bar. the arm sits one
-// LEVEL BELOW the pill, so the pill's own shadow spill lands on the arm at
-// the seam — the ambient occlusion that fuses two windows into one object.
+// hover one of the arm anchors — the bluetooth, audio or mic rune, or the
+// power button — and the strip's glass extends leftward out of the pill's own
+// edge: not a floating panel with a gap, but the menu bar itself growing an
+// arm. the arm's right edge is SQUARE and flush against the pill's straight
+// left edge (the pill's rounded corners live only at its extremes, and the
+// arm is clamped clear of them), so the union is one continuous silhouette:
+// one glass, one shadow recipe (strokeFakeShadow), one menu bar. the arm sits
+// one LEVEL BELOW the pill, so the pill's own shadow spill lands on the arm
+// at the seam — the ambient occlusion that fuses two windows into one object.
 //
-// the animation is the reveal's own spring on a display link of its own,
-// integrating the ARM'S WIDTH in pixels (0 → EXT_WIDTH), retargetable
-// mid-flight. the alpha fade is DERIVED from the width (the first 24pt of
-// travel), so grow and fade cannot drift apart — one integrator, two outputs.
-// the window never moves (same reason the pill's window never moves — the
-// window server doesn't move windows at 120fps); the subview grows inside it,
-// right edge pinned.
+// ONE arm serves all four anchors: switching anchors MORPHS — the open arm
+// glides vertically to the newly hovered rune instead of closing and
+// reopening. the arm's vertical position is clamped to the pill's straight
+// band, so no anchor can ever make it extrude past the bar's top or bottom.
+//
+// the animation is the reveal's own spring on display links of their own:
+// one integrates the ARM'S WIDTH in pixels (0 → EXT_WIDTH), retargetable
+// mid-flight; one glides the vertical anchor. the alpha fade is DERIVED from
+// the width (the first 24pt of travel), so grow and fade cannot drift apart —
+// one integrator, two outputs. the window never moves (same reason the pill's
+// window never moves — the window server doesn't move windows at 120fps); the
+// subview grows and glides inside it, right edge pinned.
 
 let EXT_WIDTH: CGFloat = 216
 let EXT_HEIGHT: CGFloat = 170
 let EXT_RADIUS: CGFloat = 16
 let EXT_SLACK: CGFloat = 12     // window slack past full width — spring overshoot (~5% ≈ 11pt) lands here
 let EXT_SHOW_DWELL: TimeInterval = 0.12   // hover intent: brush-past never opens it
-let EXT_HIDE_DWELL: TimeInterval = 0.18   // leave intent: darting to audio/mic never closes it
+let EXT_HIDE_DWELL: TimeInterval = 0.18   // leave intent: darting between runes never closes it
+
+enum ExtAnchor { case bluetooth, audio, mic, power }
 
 final class ExtensionView: NSView {
     override var isFlipped: Bool { true }
@@ -2322,39 +2345,61 @@ final class ExtensionView: NSView {
     }
 }
 
-// the bluetooth third's vertical band, in CG top-left y space — the extension
-// anchors to the RUNE itself, the way a native menu anchors to its status item
-func bluetoothBandCG() -> (top: CGFloat, bottom: CGFloat) {
+// the anchor's rune/slot band, in pill-local flipped coords (y down from the
+// pill's top): the trio's thirds for bluetooth/audio/mic, the whole slot for
+// power
+func anchorOffset(_ anchor: ExtAnchor) -> (y: CGFloat, h: CGFloat) {
+    let kind: Theme.Kind = anchor == .power ? .power : .trio
+    guard let i = Theme.slots.firstIndex(where: { $0.kind == kind }) else { return (Theme.pad, Theme.cell) }
+    let r = Theme.slot(i, in: NSRect(x: 0, y: 0, width: Theme.pillWidth, height: Theme.pillHeight))
+    if anchor == .power { return (r.minY, r.height) }
+    let third = r.height / 3
+    switch anchor {
+    case .bluetooth: return (r.minY, third)
+    case .audio:     return (r.minY + third, third)
+    default:         return (r.minY + 2 * third, third)   // mic
+    }
+}
+
+// the arm's top edge for an anchor: centered on the rune, CLAMPED to the
+// pill's straight band — the arm may never extrude past the bar's rounded
+// corners, top or bottom (audio and power both want to sit lower than the
+// band allows, so they ride up to the clamp; bluetooth fits as-is)
+func extTopOffset(for anchor: ExtAnchor) -> CGFloat {
+    let a = anchorOffset(anchor)
+    let center = a.y + a.h / 2
+    return min(max(center - EXT_HEIGHT / 2, PILL_RADIUS), PILL_HEIGHT - PILL_RADIUS - EXT_HEIGHT)
+}
+
+// the anchor rune's band, in CG top-left y space — the arm anchors to the
+// RUNE itself, the way a native menu anchors to its status item
+func anchorBandCG(_ anchor: ExtAnchor) -> (top: CGFloat, bottom: CGFloat) {
     let (pillTop, _) = pillBandCG()
-    let trio = Theme.slots.firstIndex(where: { $0.kind == .trio })
-        .map { Theme.slot($0, in: NSRect(x: 0, y: 0, width: Theme.pillWidth, height: Theme.pillHeight)) }
-    let y = trio?.minY ?? Theme.pad
-    let h = (trio?.height ?? Theme.cell) / 3
-    return (pillTop + y, pillTop + y + h)
+    let a = anchorOffset(anchor)
+    return (pillTop + a.y, pillTop + a.y + a.h)
 }
 
-// the extension's rect, in the cursor's own space: xr (leftward from the
-// right screen edge) + CG top-left y. it hangs FLUSH off the pill's left
-// edge (right = the pill's own edge — no gap), centered vertically on the rune.
-func extBandCG() -> (left: CGFloat, right: CGFloat, top: CGFloat, bottom: CGFloat) {
-    let (bt, bb) = bluetoothBandCG()
-    let centerY = (bt + bb) / 2
+// the arm's rect for an anchor, in the cursor's own space: xr (leftward from
+// the right screen edge) + CG top-left y. it hangs FLUSH off the pill's left
+// edge (right = the pill's own edge — no gap).
+func extBandCG(_ anchor: ExtAnchor) -> (left: CGFloat, right: CGFloat, top: CGFloat, bottom: CGFloat) {
+    let top = pillBandCG().top + extTopOffset(for: anchor)
     let right = PILL_WIDTH
-    return (right + EXT_WIDTH, right, centerY - EXT_HEIGHT / 2, centerY + EXT_HEIGHT / 2)
+    return (right + EXT_WIDTH, right, top, top + EXT_HEIGHT)
 }
 
-// the extension window: a FIXED frame spanning full width + overshoot slack.
-// the glass subview grows inside it, right edge pinned to the window's right
-// edge — which IS the pill's left edge, so the seam is pixel-exact at any width.
+// the extension window: a FIXED frame spanning full width + overshoot slack
+// and the pill's whole height (the arm glides vertically inside it when the
+// anchor morphs). the glass subview grows inside it, right edge pinned to the
+// window's right edge — which IS the pill's left edge, so the seam is
+// pixel-exact at any width.
 func extWindowFrame() -> NSRect {
     guard let screen = mainScreen() else { return .zero }
     let f = screen.frame
-    let g = extBandCG()
     let right = f.maxX - PILL_WIDTH                     // the pill's left edge
     let left = right - EXT_WIDTH - EXT_SLACK
-    let top = globalCocoaTopY - g.top                   // cocoa y of the top edge
-    return NSRect(x: left, y: top - EXT_HEIGHT,
-                  width: EXT_WIDTH + EXT_SLACK, height: EXT_HEIGHT)
+    return NSRect(x: left, y: pillFrame().minY,
+                  width: EXT_WIDTH + EXT_SLACK, height: PILL_HEIGHT)
 }
 
 let ext = ExtensionView(frame: NSRect(x: EXT_SLACK, y: 0, width: 0, height: EXT_HEIGHT))
@@ -2366,7 +2411,7 @@ let extWindow: OverlayPanel = {
     win.isOpaque = false
     win.hasShadow = false          // same reason as the pill: shadows are CONTENT here
     win.ignoresMouseEvents = true  // hidden: the space left of the pill belongs to the apps
-    win.level = NSWindow.Level(rawValue: 20)   // one under the pill — the tuck hides under the glass
+    win.level = NSWindow.Level(rawValue: 20)   // one under the pill — its shadow spill fuses the seam
     win.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
     let container = NSView(frame: NSRect(origin: .zero, size: frame.size))
     container.addSubview(ext)
@@ -2374,35 +2419,62 @@ let extWindow: OverlayPanel = {
     return win
 }()
 
-// the arm's current width in points — what the spring integrates
+// the arm's state: width in points (what extSpring integrates), vertical
+// position in window coords (what extYSpring glides), which anchor is open
 var extProgress: CGFloat = 0
+var extY: CGFloat = PILL_HEIGHT - extTopOffset(for: .bluetooth) - EXT_HEIGHT
+var extAnchor: ExtAnchor = .bluetooth
+var extWanted: ExtAnchor = .bluetooth    // the hovered anchor while the show dwell runs
 var extShown = false
 var extShowTimer: Timer?
 var extHideTimer: Timer?
 
-// one integrator, two outputs: the grow and the fade derive from the same
-// width — the fade spends the first 24pt of travel, so they cannot drift apart
-func applyExtWidth(_ w: CGFloat) {
-    extProgress = w
-    let width = max(0, min(w, EXT_WIDTH + EXT_SLACK)).rounded()
-    ext.setFrameSize(NSSize(width: width, height: EXT_HEIGHT))
-    ext.setFrameOrigin(NSPoint(x: EXT_WIDTH + EXT_SLACK - width, y: 0))   // right edge pinned
-    extWindow.alphaValue = max(0, min(1, w / 24))
+// the arm's cocoa y inside the window for an anchor (window spans the pill's
+// full height; flipped offset → bottom-up cocoa)
+func extWindowY(for anchor: ExtAnchor) -> CGFloat {
+    PILL_HEIGHT - extTopOffset(for: anchor) - EXT_HEIGHT
 }
 
-let extSpring = SpringDriver(apply: { applyExtWidth($0) }, read: { extProgress })
+// one integrator, two outputs: the grow and the fade derive from the same
+// width — the fade spends the first 24pt of travel, so they cannot drift apart
+func relayoutExt(width w: CGFloat? = nil) {
+    let width = max(0, min(w ?? extProgress, EXT_WIDTH + EXT_SLACK)).rounded()
+    extProgress = width
+    ext.setFrameSize(NSSize(width: width, height: EXT_HEIGHT))
+    ext.setFrameOrigin(NSPoint(x: EXT_WIDTH + EXT_SLACK - width, y: extY.rounded()))
+    extWindow.alphaValue = max(0, min(1, extProgress / 24))
+}
+
+let extSpring = SpringDriver(apply: { relayoutExt(width: $0) }, read: { extProgress })
+let extYSpring = SpringDriver(apply: { extY = $0; relayoutExt() }, read: { extY })
 
 func openExtension() {
     extHideTimer?.invalidate(); extHideTimer = nil
     extShowTimer?.invalidate(); extShowTimer = nil
     guard !extShown else { return }
     extShown = true
+    extAnchor = extWanted
     extSpring.stop()
     extSpring.onSettle = nil
+    let y = extWindowY(for: extAnchor)
+    if extProgress < 0.5 {
+        extY = y                       // from closed: snap to the rune
+        extYSpring.stop()
+        relayoutExt()
+    } else if abs(extY - y) > 0.5 {
+        extYSpring.chase(y)            // reopening mid-retract: glide back to the rune
+    }
     extWindow.setFrame(extWindowFrame(), display: false)   // re-derive geometry (display changes)
     extWindow.ignoresMouseEvents = false
     extWindow.orderFrontRegardless()   // on stage before the glass moves
     extSpring.chase(EXT_WIDTH)
+}
+
+// the open arm glides to another rune — the menu bar's arm migrates, it does
+// not close and reopen
+func morphExtension(to anchor: ExtAnchor) {
+    extAnchor = anchor
+    extYSpring.chase(extWindowY(for: anchor))
 }
 
 func closeExtension(instant: Bool = false) {
@@ -2413,7 +2485,8 @@ func closeExtension(instant: Bool = false) {
     extSpring.stop()
     extSpring.onSettle = nil
     if instant {
-        applyExtWidth(0)
+        extYSpring.stop()
+        relayoutExt(width: 0)
         extWindow.orderOut(nil)
         return
     }
@@ -2422,27 +2495,41 @@ func closeExtension(instant: Bool = false) {
 }
 
 // the whole extension decision, position-driven off the 30Hz poll — the same
-// grammar as the reveal. hover intent is dwelled: 120ms on the rune opens,
-// 180ms off BOTH rune and panel closes, so brushing past the rune on the way
-// to audio or mic never flashes it, and darting back onto the panel cancels
-// the close mid-dwell with no flicker.
+// grammar as the reveal. hover intent is dwelled: 120ms on a rune opens,
+// 180ms off both runes and panel closes, so brushing past a rune never
+// flashes it, and darting back onto the panel cancels the close mid-dwell
+// with no flicker. crossing from one rune to another never closes anything —
+// the open arm just morphs across.
 func updateExtension(xr: CGFloat, y: CGFloat) {
     guard stripVisible, !sessionLocked, !mcActive, !cmdOverride, glassDocked else {
-        closeExtension(instant: !stripVisible || sessionLocked)
-        return
+        if extShown { closeExtension(instant: !stripVisible || sessionLocked) }
+        return   // already retracting: let the animated close finish its handoff
     }
-    let (bt, bb) = bluetoothBandCG()
-    let g = extBandCG()
-    let onRune = xr <= PILL_WIDTH && y >= bt - 3 && y <= bb + 3
+    // which rune is under the cursor, top of the trio down (±3px of slack)
+    var hovered: ExtAnchor? = nil
+    for (anchor, band) in [(ExtAnchor.bluetooth, anchorBandCG(.bluetooth)),
+                           (ExtAnchor.audio, anchorBandCG(.audio)),
+                           (ExtAnchor.mic, anchorBandCG(.mic)),
+                           (ExtAnchor.power, anchorBandCG(.power))] {
+        if xr <= PILL_WIDTH, y >= band.top - 3, y <= band.bottom + 3 { hovered = anchor; break }
+    }
+    let g = extBandCG(extAnchor)
     let onPanel = extShown
         && xr <= g.left + HIDE_MARGIN && xr >= g.right - HIDE_MARGIN
         && y >= g.top - 8 && y <= g.bottom + 8
-    if onRune || onPanel {
+    if hovered != nil || onPanel {
         extHideTimer?.invalidate(); extHideTimer = nil
-        if !extShown, extShowTimer == nil {
-            extShowTimer = Timer.scheduledTimer(withTimeInterval: EXT_SHOW_DWELL, repeats: false) { _ in
-                extShowTimer = nil
-                openExtension()
+        if let h = hovered {
+            if !extShown {
+                extWanted = h
+                if extShowTimer == nil {
+                    extShowTimer = Timer.scheduledTimer(withTimeInterval: EXT_SHOW_DWELL, repeats: false) { _ in
+                        extShowTimer = nil
+                        openExtension()
+                    }
+                }
+            } else if h != extAnchor {
+                morphExtension(to: h)   // same arm, new rune
             }
         }
     } else {
@@ -2456,7 +2543,7 @@ func updateExtension(xr: CGFloat, y: CGFloat) {
     }
 }
 
-applyExtWidth(0)   // parked: zero-width, faded, ordered out
+relayoutExt(width: 0)   // parked: zero-width, faded, ordered out
 
 // MARK: - daemon
 
