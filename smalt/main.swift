@@ -5,6 +5,7 @@ import CoreText
 import CoreWLAN
 import IOKit
 import IOKit.ps
+import IOBluetooth
 
 // smalt — ground cobalt glass.
 //
@@ -34,6 +35,12 @@ import IOKit.ps
 // SVG icons and type are optically centered
 // inside one uniform CELL × CELL slot; the pill is exactly its grid, nothing
 // hand-placed anywhere.
+
+// LEGACY: the trio — the capsule with the wifi · bluetooth · audio · mic
+// runes — is retired. the code stays (drawing, icons, the anchor grammar
+// it fed), parked behind this flag: false = the slot vanishes from the
+// grid and the pill closes up after the slider. flip to true to resurrect.
+let LEGACY_TRIO = false
 
 enum Theme {
     // palette
@@ -91,9 +98,12 @@ enum Theme {
         .init(.slider, span: 5),   // same M3 styling as ever (cool taupe, Night-Day face) —
                                    // the value it reads/writes is Night Shift strength now
         // .init(.night, span: 5), // ← the warm moon-slider variant, parked
+    ] + (LEGACY_TRIO ? [
         .init(.trio, span: 4),   // bluetooth · wifi · audio · mic — one flush slot: no seams between the icons,
         .init(.power),           // each icon's padding lives inside its own quarter of the block
-    ]
+    ] : [
+        .init(.power),
+    ])
     static var slotCount: Int { slots.count }
 
     // SVG icons are ink-normalized: each glyph's ink is scaled to one
@@ -189,7 +199,7 @@ enum Theme {
 
 let PILL_WIDTH = Theme.pillWidth
 let PILL_HEIGHT = Theme.pillHeight
-let PILL_INSET: CGFloat = 0      // fused to the right screen edge — no gap
+let PILL_INSET: CGFloat = 10     // float: the pill hovers this far off the right screen edge
 let SHADOW_SLACK: CGFloat = 10   // window slack above + below the glass — the fake
                                  // shadow spills 7pt past every edge, and a window
                                  // that ends at the glass clips its own shadow (the
@@ -320,13 +330,11 @@ final class StripView: NSView {
     // — one glass, one view, no second window. without this override the
     // default bounds clip would cut it off.
 
-    // the tab: rounded on the left corners, dead straight into the right
-    // screen edge — no fillets, no flare. the bottom-left corner's radius is
-    // parameterized: it melts to zero while a bottom-anchored arm holds the
-    // bar's bottom edge (see extBottomLeftRadius).
+    // the tab: a full capsule — rounded on ALL corners, floating free of the
+    // screen edge (PILL_INSET gap). the bottom-left radius parameter is the
+    // legacy arm's melt grammar; the arm is retired, every corner is R.
     private func tabPath(in bounds: NSRect, bottomLeftRadius rb: CGFloat? = nil) -> NSBezierPath {
         let R = PILL_RADIUS
-        let rb = rb ?? R
         let k: CGFloat = 0.5523
         let W = bounds.width, H = bounds.height
         let p = NSBezierPath()
@@ -334,12 +342,18 @@ final class StripView: NSView {
         p.curve(to: NSPoint(x: R, y: 0),
                 controlPoint1: NSPoint(x: 0, y: R - k * R),
                 controlPoint2: NSPoint(x: R - k * R, y: 0))
-        p.line(to: NSPoint(x: W, y: 0))
-        p.line(to: NSPoint(x: W, y: H))
-        p.line(to: NSPoint(x: rb, y: H))
-        p.curve(to: NSPoint(x: 0, y: H - rb),
-                controlPoint1: NSPoint(x: rb - k * rb, y: H),
-                controlPoint2: NSPoint(x: 0, y: H - rb + k * rb))
+        p.line(to: NSPoint(x: W - R, y: 0))
+        p.curve(to: NSPoint(x: W, y: R),
+                controlPoint1: NSPoint(x: W - R + k * R, y: 0),
+                controlPoint2: NSPoint(x: W, y: R - k * R))
+        p.line(to: NSPoint(x: W, y: H - R))
+        p.curve(to: NSPoint(x: W - R, y: H),
+                controlPoint1: NSPoint(x: W, y: H - R + k * R),
+                controlPoint2: NSPoint(x: W - R + k * R, y: H))
+        p.line(to: NSPoint(x: R, y: H))
+        p.curve(to: NSPoint(x: 0, y: H - R),
+                controlPoint1: NSPoint(x: R - k * R, y: H),
+                controlPoint2: NSPoint(x: 0, y: H - R + k * R))
         p.line(to: NSPoint(x: 0, y: R))
         p.close()
         return p
@@ -1294,6 +1308,17 @@ enum ChargeBolt {
     }
 }
 
+// truncate to fit — the panel rows' one-line names can't overflow their
+// column, so they shed their tail under an ellipsis like a native menu does
+func ellipsize(_ s: String, font: NSFont, width: CGFloat) -> String {
+    guard s.size(withAttributes: [.font: font]).width > width else { return s }
+    var t = s
+    while t.count > 1, (t + "…").size(withAttributes: [.font: font]).width > width {
+        t.removeLast()
+    }
+    return t + "…"
+}
+
 // text centered on its ink — CoreText glyph bounds, not the line box
 func drawText(_ s: String, font: NSFont, color: NSColor, in r: NSRect, kern: CGFloat = 0) {
     let line = CTLineCreateWithAttributedString(NSAttributedString(
@@ -1977,7 +2002,7 @@ func pillFrame() -> NSRect {
     guard let screen = mainScreen() else { return .zero }
     let f = screen.frame
     let w = PILL_WIDTH + 2 * TAB_MARGIN + TAB_TRAVEL
-    return NSRect(x: f.maxX - TAB_MARGIN - PILL_WIDTH, y: f.minY + (f.height - PILL_HEIGHT) / 2,
+    return NSRect(x: f.maxX - PILL_INSET - TAB_MARGIN - PILL_WIDTH, y: f.minY + (f.height - PILL_HEIGHT) / 2,
                   width: w, height: PILL_HEIGHT)
 }
 
@@ -2183,7 +2208,7 @@ func hoverVisibility(xr: CGFloat, y: CGFloat, top: CGFloat, bottom: CGFloat) -> 
         let g = extBandCG(extAnchor)
         if y >= g.top - HIDE_BAND, y <= g.bottom + HIDE_BAND, xr <= g.left + HIDE_MARGIN { return true }
     }
-    if xr > PILL_WIDTH + HIDE_MARGIN || y > bottom + HIDE_BAND || y < top - HIDE_BAND { return false }
+    if xr > PILL_INSET + PILL_WIDTH + HIDE_MARGIN || y > bottom + HIDE_BAND || y < top - HIDE_BAND { return false }
     return nil
 }
 
@@ -2585,6 +2610,12 @@ func refreshBatteryTooltip() {
 // staying round at any width; one glides the vertical anchor. the alpha fade
 // is DERIVED from the width (the first 24pt of travel), so grow and fade
 // cannot drift apart — one integrator, two outputs.
+//
+// LEGACY: the whole extension arm — the bluetooth device tray, the anchors,
+// the reveal — is RETIRED. the code stays (it works; it's the platform that
+// fought back), parked behind this flag. false = the arm never opens, the
+// runes are just icons, the pill runs clean. flip to true to resurrect it.
+let LEGACY_EXTENSION = false
 
 let EXT_WIDTH: CGFloat = 216
 let EXT_HEIGHT: CGFloat = 170
@@ -2594,6 +2625,312 @@ let EXT_SHOW_DWELL: TimeInterval = 0.12   // hover intent: brush-past never open
 let EXT_HIDE_DWELL: TimeInterval = 0.18   // leave intent: darting between runes never closes it
 
 enum ExtAnchor { case bluetooth, wifi, audio, mic, power }
+
+// ── the bluetooth panel's data ──
+//
+// the arm over the bluetooth rune is the device tray: every paired device,
+// connected first, a dot answering connected. the source is IOBluetooth's
+// own paired-device table — the SAME handles the connect/disconnect calls
+// go through, so what the rows show and what a click does cannot disagree
+// (system_profiler, the old source, lagged and cached: it showed stale
+// connected lists while the links had already moved). sampled on a side
+// queue — `isConnected` is one cheap XPC round-trip — and cached: the panel
+// opens on the last answer and re-samples every 5s while it's open, 2s
+// while a toggle is pending. the rows answer a CLICK too (see
+// toggleBtDevice); the permission is pre-warmed at daemon launch.
+struct BtDevice { let name: String; let kind: String; let address: String; let connected: Bool }
+var btDevices: [BtDevice] = []
+var btLoading = false
+var btControllerOn = true
+// the paired-device handles from the last sample, keyed by the row's
+// normalized address → every transport handle of that device (dual-mode
+// devices pair once per transport — classic AND LE — and appear twice;
+// one row per device, all its handles ride together).
+var btLinks: [String: [IOBluetoothDevice]] = [:]
+
+// macOS bakes a " (con)" suffix into pairing-record names — strip it for
+// display and for grouping the transports of one physical device.
+func btBaseName(_ s: String) -> String {
+    s.hasSuffix(" (con)") ? String(s.dropLast(6)) : s
+}
+// in-flight toggles: address → (target state, expiry). a clicked row
+// renders a spinner instead of its dot until a sample confirms the state —
+// or the expiry gives up and the truth wins (with a "no answer" note).
+var btPending: [String: (target: Bool, until: Date)] = [:]
+// answered-no: address → (asked-for state, when, why). rows whose toggle
+// expired without a confirmed answer carry a brief note for a few seconds.
+var btFailed: [String: (target: Bool, at: Date, msg: String)] = [:]
+var btSpin: CGFloat = 0            // the pending spinner's angle, 0..1 turns
+var btSpinTimer: Timer?
+var btProbeTimer: Timer?
+var btFlash: (row: Int, at: Date)?  // the clicked row's press flash
+// the toast: one line under the rows, announcing every connect/disconnect
+// the tray can see — user toggles AND ambient events (a device that snaps
+// straight back after a disconnect reads honestly: "disconnected", then
+// "connected" a beat later). the panel glides taller to carry it.
+var btToast: (msg: String, at: Date)?
+var btToastTimer: Timer?
+let btQueue = DispatchQueue(label: "smalt.bluetooth", qos: .utility)
+var btRefreshTimer: Timer?
+
+// the panel's metrics — arm-local flipped coords, offset from the GLASS
+// top edge (local y = 8). draw and hit-test both read these, so they
+// cannot drift apart.
+enum BtPanel {
+    static let headPad: CGFloat = 16
+    static let headH: CGFloat = 12
+    static let divGap: CGFloat = 10
+    static let rowsGap: CGFloat = 8
+    static let rowH: CGFloat = 30
+    static let bottomPad: CGFloat = 12
+    static let toastH: CGFloat = 20   // the toast's band, grown below the rows
+    static let maxRows = 8
+    static let tipPad: CGFloat = 18     // content inset from the glass tip
+    static let rightPad: CGFloat = 14   // …and from the seam side
+    static var rowsTop: CGFloat { headPad + headH + divGap + rowsGap }
+    static func height(rows: Int) -> CGFloat {
+        rowsTop + CGFloat(min(max(rows, 1), maxRows)) * rowH + bottomPad
+    }
+}
+
+// the arm's height: fixed for the other anchors, derived from the
+// bluetooth panel's row count for bluetooth — clamped to the pill's
+// straight band so no row count can push glass past the rounded corners
+var extH: CGFloat = EXT_HEIGHT
+func extHeight(for anchor: ExtAnchor) -> CGFloat {
+    guard anchor == .bluetooth else { return EXT_HEIGHT }
+    let band = PILL_HEIGHT - 2 * PILL_RADIUS
+    let base = min(BtPanel.height(rows: btDevices.count), band)
+    return min(base + (btToast != nil ? BtPanel.toastH : 0), band)
+}
+
+// one sample: read IOBluetooth's paired-device table off-main — live truth,
+// the same handles the toggles drive. publish on main: pending/failed
+// reconciliation, transition toasts, and the height respring if the row
+// count (or a toast's band) moved the panel.
+func sampleBluetoothDevices() {
+    guard !btLoading else { return }
+    btLoading = true
+    btQueue.async {
+        let paired = IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice] ?? []
+        var on = true
+        if let hc = IOBluetoothHostController.default() {
+            on = hc.powerState == kBluetoothHCIPowerStateON
+        }
+        var out: [BtDevice] = []
+        var links: [String: [IOBluetoothDevice]] = [:]
+        // group by base name: dual-mode devices pair once per transport and
+        // would otherwise show as two rows; connected = any transport up
+        var groups: [String: (handles: [IOBluetoothDevice], connected: Bool)] = [:]
+        for dev in paired {
+            let base = btBaseName(dev.name ?? "")
+            guard !base.isEmpty, base != "." else { continue }   // anonymous LE entries
+            var g = groups[base] ?? ([], false)
+            g.handles.append(dev)
+            if dev.isConnected() { g.connected = true }
+            groups[base] = g
+        }
+        for (base, g) in groups {
+            // the row's handle: the connected transport when there is one —
+            // a disconnect must close the transport that is actually up
+            let primary = g.handles.first { $0.isConnected() } ?? g.handles[0]
+            links[btNormalizeAddress(primary.addressString ?? "")] = g.handles
+            out.append(BtDevice(name: base,
+                                kind: "",
+                                address: primary.addressString ?? "",
+                                connected: g.connected))
+        }
+        out.sort { a, b in
+            if a.connected != b.connected { return a.connected }
+            return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
+        }
+        DispatchQueue.main.async {
+            btLoading = false
+            let old = btDevices
+            btControllerOn = on
+            btDevices = out
+            btLinks = links
+            // a confirmed state retires its in-flight entry; a late answer
+            // clears the "no answer" note it earned
+            let now = Date()
+            btPending = btPending.filter { addr, p in
+                guard p.until > now,
+                      let d = out.first(where: { $0.address == addr }) else { return true }
+                return d.connected != p.target
+            }
+            btFailed = btFailed.filter { addr, f in
+                guard let d = out.first(where: { $0.address == addr }) else { return true }
+                return d.connected != f.target && now.timeIntervalSince(f.at) < 4
+            }
+            // transitions → toasts: every visible connect/disconnect answers
+            // the toast line, so nothing the tray does — or the world does
+            // to the tray — is silent
+            if extShown, extAnchor == .bluetooth, btControllerOn {
+                for d in out {
+                    if let o = old.first(where: { $0.address == d.address }),
+                       o.connected != d.connected {
+                        btShowToast("\(d.name) \(d.connected ? "connected" : "disconnected")")
+                    }
+                }
+            }
+            if extShown, extAnchor == .bluetooth {
+                let h = extHeight(for: .bluetooth)
+                if abs(h - extH) > 0.5 {
+                    extHSpring.chase(h)
+                    extYSpring.chase(extTopOffset(for: .bluetooth, height: h))
+                }
+                armView.needsDisplay = true
+            }
+        }
+    }
+}
+
+// sample on open, then every 5s while the bluetooth panel is open
+func startBluetoothRefresh() {
+    btRefreshTimer?.invalidate()
+    sampleBluetoothDevices()
+    let t = Timer(timeInterval: 5, repeats: true) { _ in
+        guard extShown, extAnchor == .bluetooth else {
+            btRefreshTimer?.invalidate(); btRefreshTimer = nil; return
+        }
+        sampleBluetoothDevices()
+    }
+    RunLoop.main.add(t, forMode: .common)
+    btRefreshTimer = t
+}
+
+// ── connect / disconnect ──
+//
+// the tray's rows answer a click: IOBluetooth's paired-device handles,
+// matched by address (system_profiler writes "AA:BB:…", IOBluetooth writes
+// "aa-bb-…" — both sides are reduced to their hex digits before comparing).
+// openConnection / closeConnection are the TCC-gated calls: the FIRST toggle
+// is when macOS asks for the Bluetooth permission. both are SYNCHRONOUS —
+// a HID device's page can hold the caller for many seconds — so they run on
+// their own queue, never the main thread (a main-thread page froze the whole
+// strip solid). the row goes pending immediately: a spinner on the dot, and
+// quick resamples publish the answer as soon as it exists.
+func btNormalizeAddress(_ s: String) -> String {
+    String(s.lowercased().filter { $0.isHexDigit }.suffix(12))
+}
+
+// the link queue — IOBluetooth's synchronous connect/disconnect, off-main
+let btLinkQueue = DispatchQueue(label: "smalt.bluetooth.link", qos: .userInitiated)
+
+func toggleBtDevice(_ d: BtDevice) {
+    let target = !d.connected
+    guard btPending[d.address]?.target != target else { return }   // already in flight
+    // the handles come from the tray's own last sample — the row you see is
+    // exactly the device the click drives, all its transports together
+    guard let handles = btLinks[btNormalizeAddress(d.address)], !handles.isEmpty else {
+        // no paired handle: the permission was never granted (pairedDevices
+        // comes back empty — TCC keeps the whole pairing table away) or the
+        // row went stale. say so NOW, not after a 30s spinner.
+        btPending[d.address] = nil
+        btFailed[d.address] = (target: target, at: Date(),
+            msg: btLinks.isEmpty ? "no bluetooth access" : "unpaired")
+        btSpinKick()
+        armView.needsDisplay = true
+        return
+    }
+    btPending[d.address] = (target, Date().addingTimeInterval(30))
+    btFailed[d.address] = nil
+    btSpinKick()
+    armView.needsDisplay = true
+    NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+    let wasConnected = d.connected
+    btLinkQueue.async {
+        if wasConnected {
+            // close every transport that is actually up
+            for h in handles where h.isConnected() { h.closeConnection() }
+        } else if let h = handles.first(where: { !$0.isConnected() }) {
+            h.openConnection()
+        } else {
+            handles[0].openConnection()
+        }
+    }
+    btProbeKick()
+}
+
+// the pending spinner: a 15fps timer that advances the arc while any toggle
+// is in flight — and settles expiry there too, so a toggle that never gets
+// an answer retires into the truth (plus a "no answer" note) even if the
+// sampler is busy on a blocking page.
+func btSpinKick() {
+    guard btSpinTimer == nil else { return }
+    let t = Timer(timeInterval: 1.0 / 15.0, repeats: true) { t in
+        let now = Date()
+        for (addr, p) in btPending where p.until <= now {
+            btPending[addr] = nil
+            if let d = btDevices.first(where: { $0.address == addr }), d.connected != p.target {
+                btFailed[addr] = (target: p.target, at: now, msg: "no answer")
+            }
+        }
+        btFailed = btFailed.filter { now.timeIntervalSince($0.value.at) < 4 }
+        guard !btPending.isEmpty else {
+            t.invalidate(); btSpinTimer = nil
+            armView.needsDisplay = true
+            return
+        }
+        btSpin = (btSpin + 0.11).truncatingRemainder(dividingBy: 1)
+        armView.needsDisplay = true
+    }
+    RunLoop.main.add(t, forMode: .common)
+    btSpinTimer = t
+}
+
+// the probe cadence: every 2s while a toggle is in flight — a confirm
+// publishes the answer the moment it exists (the tray's 5s cadence is too
+// slow to feel). self-stops the moment nothing is pending or the panel closes.
+func btProbeKick() {
+    guard btProbeTimer == nil else { return }
+    let t = Timer(timeInterval: 2, repeats: true) { t in
+        if btPending.isEmpty || !extShown || extAnchor != .bluetooth {
+            t.invalidate(); btProbeTimer = nil; return
+        }
+        sampleBluetoothDevices()
+    }
+    RunLoop.main.add(t, forMode: .common)
+    btProbeTimer = t
+}
+
+// the toast: show it, ride its alpha at 15fps, retire it after 3s — and
+// hand the panel's height band back as it goes (the height spring glides,
+// so the glass grows for the toast and shrinks after it, never pops)
+func btShowToast(_ msg: String) {
+    btToast = (msg: msg, at: Date())
+    btToastKick()
+    if extShown, extAnchor == .bluetooth {
+        let h = extHeight(for: .bluetooth)
+        if abs(h - extH) > 0.5 {
+            extHSpring.chase(h)
+            extYSpring.chase(extTopOffset(for: .bluetooth, height: h))
+        }
+    }
+    armView.needsDisplay = true
+}
+
+func btToastKick() {
+    guard btToastTimer == nil else { return }
+    let t = Timer(timeInterval: 1.0 / 15.0, repeats: true) { t in
+        guard let toast = btToast else { t.invalidate(); btToastTimer = nil; return }
+        guard Date().timeIntervalSince(toast.at) >= 3.0 else {
+            armView.needsDisplay = true; return
+        }
+        btToast = nil
+        t.invalidate(); btToastTimer = nil
+        if extShown, extAnchor == .bluetooth {
+            let h = extHeight(for: .bluetooth)
+            if abs(h - extH) > 0.5 {
+                extHSpring.chase(h)
+                extYSpring.chase(extTopOffset(for: .bluetooth, height: h))
+            }
+        }
+        armView.needsDisplay = true
+    }
+    RunLoop.main.add(t, forMode: .common)
+    btToastTimer = t
+}
 
 // the anchor's rune/slot band, in pill-local flipped coords (y down from the
 // pill's top): the trio's quarters for bluetooth/wifi/audio/mic, the whole slot for
@@ -2617,27 +2954,33 @@ func anchorOffset(_ anchor: ExtAnchor) -> (y: CGFloat, h: CGFloat) {
 // the arm's top edge for an anchor. mic and power are anchored to the bar's
 // BOTTOM edge — their glass runs clear down to it. bluetooth and audio center
 // on their rune, clamped to the pill's straight band so nothing ever extrudes
-// past the bar's rounded corners.
-func extTopOffset(for anchor: ExtAnchor) -> CGFloat {
-    if anchor == .mic || anchor == .power { return PILL_HEIGHT - EXT_HEIGHT }
+// past the bar's top — and the bottom edge NEVER passes the bar's bottom:
+// overflow anchors the glass flush to the bar's bottom edge (the pill's
+// bottom-left corner melts square to seal the silhouette, see extBottomLift).
+// an explicit `height` reads the TARGET height — the y-spring's target must
+// be where the bottom lands when the height spring settles, not mid-flight.
+func extTopOffset(for anchor: ExtAnchor, height h: CGFloat? = nil) -> CGFloat {
+    let H = h ?? extH
+    if anchor == .mic || anchor == .power { return PILL_HEIGHT - H }
     let a = anchorOffset(anchor)
     let center = a.y + a.h / 2
-    return min(max(center - EXT_HEIGHT / 2, PILL_RADIUS), PILL_HEIGHT - PILL_RADIUS - EXT_HEIGHT)
+    return min(max(center - H / 2, PILL_RADIUS), PILL_HEIGHT - H)
 }
 
-// the bottom-anchored melt. while a mic/power arm holds the bar's bottom
-// edge, the pill's bottom-left corner melts SQUARE as the glass arrives and
-// re-rounds as it withdraws — the corner radius always equals the arm's drawn
-// bottom gap, so the corner arc's top meets the arm's bottom edge EXACTLY and
-// the silhouette is sealed at every point of every transition (grow, morph,
-// retract — no notch, no snap).
+// the bottom-anchored melt. while ANY arm holds the bar's bottom edge (mic
+// and power always; bluetooth/wifi/audio whenever the panel is tall enough
+// to be bottom-clamped), the pill's bottom-left corner melts SQUARE as the
+// glass arrives and re-rounds as it withdraws — the corner radius always
+// equals the arm's drawn bottom gap, so the corner arc's top meets the arm's
+// bottom edge EXACTLY and the silhouette is sealed at every point of every
+// transition (grow, morph, retract — no notch, no snap).
 func extBottomLift() -> CGFloat {
-    guard extProgress > 0.5, extAnchor == .mic || extAnchor == .power else { return 0 }
+    guard extProgress > 0.5, extY >= PILL_HEIGHT - extH - 0.5 else { return 0 }
     return PILL_RADIUS * (1 - extFade)
 }
 func extBottomLeftRadius() -> CGFloat {
     guard extProgress > 0.5 else { return PILL_RADIUS }
-    return min(PILL_RADIUS, PILL_HEIGHT - (extY + EXT_HEIGHT - extBottomLift()))
+    return min(PILL_RADIUS, PILL_HEIGHT - (extY + extH - extBottomLift()))
 }
 
 // the anchor rune's band, in CG top-left y space — the arm anchors to the
@@ -2654,7 +2997,7 @@ func anchorBandCG(_ anchor: ExtAnchor) -> (top: CGFloat, bottom: CGFloat) {
 func extBandCG(_ anchor: ExtAnchor) -> (left: CGFloat, right: CGFloat, top: CGFloat, bottom: CGFloat) {
     let top = pillBandCG().top + extTopOffset(for: anchor)
     let right = PILL_WIDTH
-    return (right + EXT_WIDTH, right, top, top + EXT_HEIGHT)
+    return (right + EXT_WIDTH, right, top, top + extH)
 }
 
 // the arm's state: width in points (what extSpring integrates), top edge in
@@ -2705,6 +3048,24 @@ func setStripExtensionSlack(_ slack: CGFloat) {
 final class ArmView: NSView {
     override var isFlipped: Bool { true }
 
+    // the tray's rows take the click: connect / disconnect (toggleBtDevice).
+    // the same band the hover test reads — the panel's row column, plus the
+    // row band's own slack left and right.
+    override func mouseDown(with event: NSEvent) {
+        guard extShown, extAnchor == .bluetooth else { return }
+        let p = convert(event.locationInWindow, from: nil)
+        let cx = 8 + BtPanel.tipPad
+        let cw = EXT_WIDTH - BtPanel.tipPad - BtPanel.rightPad
+        guard p.x >= cx - 7, p.x <= cx + cw + 7 else { return }
+        let rowsTop = 8 + BtPanel.rowsTop
+        let rows = Array(btDevices.prefix(BtPanel.maxRows))
+        guard !rows.isEmpty,
+              p.y >= rowsTop, p.y < rowsTop + CGFloat(rows.count) * BtPanel.rowH else { return }
+        let row = Int((p.y - rowsTop) / BtPanel.rowH)
+        btFlash = (row: row, at: Date())
+        toggleBtDevice(rows[row])
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         let w = extProgress, fade = extFade
         guard w > 0.5, fade > 0.001 else { return }
@@ -2712,7 +3073,7 @@ final class ArmView: NSView {
         let k: CGFloat = 0.5523
         let sx = w + 8                       // the seam (the tab's left edge), local
         let top: CGFloat = 8
-        let bot: CGFloat = 8 + EXT_HEIGHT - extBottomLift()   // rides the bottom-anchored melt
+        let bot: CGFloat = 8 + extH - extBottomLift()   // rides the bottom-anchored melt
         // shadow: an OPEN path — top edge, rounded tip, bottom edge — run all
         // the way INTO the seam so the shadow reaches the junction corners,
         // then clipped to the arm's own width: the seam-side cut lands exactly
@@ -2754,6 +3115,161 @@ final class ArmView: NSView {
         g.close()
         Theme.glass.withAlphaComponent(fade).setFill()
         g.fill()
+
+        // the bluetooth panel: header, divider, one row per paired device —
+        // the tray content rides in on the last stretch of the growth, ONE
+        // alpha for everything (no per-element fades to drift apart). the
+        // layout is pinned to the FULL width regardless of the current w,
+        // so nothing slides while it fades in.
+        if extAnchor == .bluetooth {
+            if let ctx = NSGraphicsContext.current?.cgContext {
+                ctx.saveGState()
+                g.addClip()   // the glass is the mask: a shrinking panel must never
+                              // paint rows past its own withdrawing bottom edge
+                drawBtPanel(fade: max(0, min(1, (w - 100) / 40)) * fade)
+                ctx.restoreGState()
+            }
+        }
+    }
+}
+
+// the bluetooth panel's content — drawn on the arm's glass when the anchor
+// is bluetooth: a small-caps header, a divider, then one row per paired
+// device (connected first), a dot answering connected, the row-hover band
+// gliding under the cursor, and a click toggling the connection (rows in
+// flight render their target dot at half ink until the sample confirms).
+func drawBtPanel(fade: CGFloat) {
+    guard fade > 0.001 else { return }
+    let cx = 8 + BtPanel.tipPad
+    let cw = EXT_WIDTH - BtPanel.tipPad - BtPanel.rightPad
+    let headFont = NSFont.systemFont(ofSize: 10, weight: .semibold)
+
+    // header: small caps label in the ink; the controller's state right
+    let headY = 8 + BtPanel.headPad
+    ("BLUETOOTH" as NSString).draw(
+        at: NSPoint(x: cx, y: headY),
+        withAttributes: [.font: headFont, .kern: 1.6,
+                         .foregroundColor: Theme.ink.withAlphaComponent(0.95 * fade)])
+    if !btControllerOn {
+        let sa: [NSAttributedString.Key: Any] = [
+            .font: headFont, .kern: 1.2,
+            .foregroundColor: Theme.ink.withAlphaComponent(0.85 * fade)]
+        let st = ("OFF" as NSString)
+        st.draw(at: NSPoint(x: cx + cw - st.size(withAttributes: sa).width, y: headY),
+                withAttributes: sa)
+    }
+
+    // divider: the header's rule, one quiet ink hairline
+    let divY = 8 + BtPanel.rowsTop - BtPanel.rowsGap
+    Theme.ink.withAlphaComponent(0.35 * fade).setFill()
+    NSRect(x: cx, y: divY, width: cw, height: 1).fill()
+
+    let rowsTop = 8 + BtPanel.rowsTop
+    let rows = Array(btDevices.prefix(BtPanel.maxRows))
+
+    // the row-hover band — the trio band's grammar, one panel over. the row
+    // just clicked presses harder for a beat: the flash is the click's receipt.
+    var flashBoost: CGFloat = 0
+    if let f = btFlash, Date().timeIntervalSince(f.at) < 0.35, f.row == extRowTarget {
+        flashBoost = 0.12 * max(0, 1 - Date().timeIntervalSince(f.at) / 0.35)
+    }
+    if extRowAlpha > 0.001 {
+        let yc = rowsTop + (extRowPos + 0.5) * BtPanel.rowH
+        let band = NSRect(x: cx - 7, y: yc - BtPanel.rowH / 2 + 2,
+                          width: cw + 14, height: BtPanel.rowH - 4)
+        Theme.knob.withAlphaComponent((0.09 + flashBoost) * extRowAlpha * fade).setFill()
+        NSBezierPath(roundedRect: band, xRadius: 9, yRadius: 9).fill()
+    }
+
+    // empty states: controller off / sampling / nothing paired
+    if rows.isEmpty {
+        let msg = !btControllerOn ? "bluetooth is off"
+            : btLoading ? "searching…" : "no devices found"
+        (msg as NSString).draw(
+            at: NSPoint(x: cx, y: rowsTop + (BtPanel.rowH - 15) / 2),
+            withAttributes: [.font: NSFont.systemFont(ofSize: 12, weight: .regular),
+                             .foregroundColor: Theme.ink.withAlphaComponent(0.8 * fade)])
+        return
+    }
+
+    // one row per device: the name left — heavier ink when connected —
+    // and a dot right: filled in the value-run taupe when connected, a
+    // quiet hollow ring when not. a row in flight (clicked, unconfirmed)
+    // spins a small arc on the dot; a row whose answer never came keeps
+    // its true dot and wears a "no answer" note for a few seconds.
+    for (i, d) in rows.enumerated() {
+        let rowY = rowsTop + CGFloat(i) * BtPanel.rowH
+        let pend = btPending[d.address]
+        let failMsg: String? = btFailed[d.address].flatMap {
+            Date().timeIntervalSince($0.at) < 3 ? $0.msg : nil
+        }
+        let shownConnected = pend?.target ?? d.connected
+        let dim: CGFloat = pend != nil ? 0.55 : failMsg != nil ? 0.5 : 1
+        let font = NSFont.systemFont(ofSize: 12.5, weight: shownConnected ? .medium : .regular)
+        let nameW = cw - (failMsg != nil ? 96 : 18)
+        let name = ellipsize(d.name, font: font, width: nameW)
+        (name as NSString).draw(
+            at: NSPoint(x: cx, y: rowY + (BtPanel.rowH - 15) / 2),
+            withAttributes: [.font: font,
+                             .foregroundColor: (shownConnected ? Theme.inkDeep : Theme.ink)
+                                 .withAlphaComponent((shownConnected ? 1.0 : 0.9) * fade * dim)])
+        let dot = NSRect(x: cx + cw - 10, y: rowY + BtPanel.rowH / 2 - 3, width: 6, height: 6)
+        if pend != nil {
+            // the spinner: a small round-cap arc riding the dot's place
+            let a = btSpin * 360
+            let arc = NSBezierPath()
+            arc.appendArc(withCenter: NSPoint(x: dot.midX, y: dot.midY), radius: 4.6,
+                          startAngle: a, endAngle: a + 130, clockwise: true)
+            Theme.ink.withAlphaComponent(0.85 * fade).setStroke()
+            arc.lineWidth = 1.6
+            arc.lineCapStyle = .round
+            arc.stroke()
+        } else {
+            if let failMsg {
+                let mf = NSFont.systemFont(ofSize: 10, weight: .medium)
+                let ma: [NSAttributedString.Key: Any] = [
+                    .font: mf, .kern: 0.4,
+                    .foregroundColor: Theme.ink.withAlphaComponent(0.55 * fade)]
+                let w = (failMsg as NSString).size(withAttributes: ma).width
+                (failMsg as NSString).draw(
+                    at: NSPoint(x: cx + cw - 24 - w, y: rowY + (BtPanel.rowH - 12) / 2),
+                    withAttributes: ma)
+            }
+            if shownConnected {
+                Theme.sliderFill.withAlphaComponent(fade * dim).setFill()
+                NSBezierPath(ovalIn: dot).fill()
+            } else {
+                let ring = NSBezierPath(ovalIn: dot)
+                Theme.ink.withAlphaComponent(0.45 * fade * dim).setStroke()
+                ring.lineWidth = 1.2
+                ring.stroke()
+            }
+        }
+    }
+
+    // the toast — one centered line in the band the panel grew for it: fade
+    // in over 150ms, hold, fade out over 400ms, then the glass glides back.
+    // every connect/disconnect the tray can see answers here, so a device
+    // that snaps straight back reads honestly: "disconnected" then
+    // "connected" a beat later.
+    if let t = btToast {
+        let e = Date().timeIntervalSince(t.at)
+        if e < 3.0 {
+            let a = max(0, min(1, min(e / 0.15, (3.0 - e) / 0.4))) * fade
+            if a > 0.001 {
+                let tf = NSFont.systemFont(ofSize: 10, weight: .semibold)
+                let msg = ellipsize(t.msg, font: tf, width: cw)
+                let ma: [NSAttributedString.Key: Any] = [
+                    .font: tf, .kern: 0.8,
+                    .foregroundColor: Theme.ink.withAlphaComponent(0.8 * a)]
+                let w = (msg as NSString).size(withAttributes: ma).width
+                let ty = 8 + extH - extBottomLift() - BtPanel.bottomPad - BtPanel.toastH
+                    + (BtPanel.toastH - 12) / 2
+                (msg as NSString).draw(
+                    at: NSPoint(x: cx + (cw - w) / 2, y: ty),
+                    withAttributes: ma)
+            }
+        }
     }
 }
 
@@ -2761,26 +3277,51 @@ final class ArmView: NSView {
 // width — the fade spends the first 24pt of travel, so they cannot drift
 // apart. per tick this is GEOMETRY ONLY (one small view's frame); the arm
 // view redraws itself, the tab never repaints for the arm's sake.
-func relayoutExt(width w: CGFloat? = nil, top ty: CGFloat? = nil) {
+func relayoutExt(width w: CGFloat? = nil, top ty: CGFloat? = nil, height h: CGFloat? = nil) {
     extProgress = max(0, min(w ?? extProgress, EXT_WIDTH + EXT_SLACK)).rounded()
+    if let h { extH = max(60, min(h, PILL_HEIGHT)) }
     if let ty { extY = ty }
     extFade = max(0, min(1, extProgress / 24))
     // the arm is glass and closed: the window hands its width back on its own
     // — even if an interrupted handoff never got to do it
     if extProgress == 0, !extShown, extSlack != 0 { setStripExtensionSlack(0) }
     let t = tab.frame
-    armView.setFrameSize(NSSize(width: extProgress + 24, height: EXT_HEIGHT + 16))
+    armView.setFrameSize(NSSize(width: extProgress + 24, height: extH + 16))
     armView.setFrameOrigin(NSPoint(x: t.minX - extProgress - 8,
-                                   y: t.minY + (t.height - extY - EXT_HEIGHT) - 8))
+                                   y: t.minY + (t.height - extY - extH) - 8))
     armView.isHidden = extProgress < 0.5
 }
 
-let armView = ArmView(frame: NSRect(x: 0, y: 0, width: 24, height: EXT_HEIGHT + 16))
+let armView = ArmView(frame: NSRect(x: 0, y: 0, width: 24, height: extH + 16))
 // above the tab in z — added after it — so its glass buries the seam spill
 strip.contentView?.addSubview(armView)
 
 let extSpring = SpringDriver(apply: { relayoutExt(width: $0) }, read: { extProgress })
 let extYSpring = SpringDriver(apply: { relayoutExt(top: $0) }, read: { extY })
+// the arm's height rides its own spring: the bluetooth panel's row count
+// changes behind our back (a device pairs, one drops), and a step there read
+// as a pop — now the glass grows and shrinks under the same physics as the
+// reveal. extTopOffset(for:height:) reads the TARGET height, so the y-spring
+// always aims where the bottom lands when the height settles.
+let extHSpring = SpringDriver(apply: { relayoutExt(height: $0) }, read: { extH })
+
+// the bluetooth panel's row-hover band — the trio band's grammar, one panel
+// over: alpha answers "a row is hovered on an open bluetooth panel", position
+// glides toward the hovered row's index and holds still while it fades out.
+// display-only band no more — the band is the hover answer; the click toggles
+var extRowAlpha: CGFloat = 0
+var extRowPos: CGFloat = 0
+var extRowTarget: Int = -1     // hovered panel row, -1 = none
+let extRowAlphaSpring = ChaseTimer(
+    get: { extRowAlpha },
+    set: { v in extRowAlpha = v; armView.needsDisplay = true },
+    target: { extShown && extAnchor == .bluetooth && extRowTarget >= 0 ? 1 : 0 },
+    rate: 0.5, epsilon: 0.004)
+let extRowPosSpring = ChaseTimer(
+    get: { extRowPos },
+    set: { v in extRowPos = v; armView.needsDisplay = true },
+    target: { extRowTarget >= 0 ? CGFloat(extRowTarget) : extRowPos },
+    rate: 0.5, epsilon: 0.002)
 
 func openExtension() {
     extHideTimer?.invalidate(); extHideTimer = nil
@@ -2788,6 +3329,10 @@ func openExtension() {
     guard !extShown else { return }
     extShown = true
     extAnchor = extWanted
+    extHSpring.stop()
+    relayoutExt(height: extHeight(for: extAnchor))   // from closed: snap to the panel's height
+    if extAnchor == .bluetooth { startBluetoothRefresh() }
+    else { btRefreshTimer?.invalidate(); btRefreshTimer = nil }
     extSpring.stop()
     extSpring.onSettle = nil
     setStripExtensionSlack(EXT_WIDTH + EXT_SLACK)   // room first — invisible, all transparent
@@ -2805,7 +3350,17 @@ func openExtension() {
 // not close and reopen
 func morphExtension(to anchor: ExtAnchor) {
     extAnchor = anchor
-    extYSpring.chase(extTopOffset(for: anchor))
+    let h = extHeight(for: anchor)                 // morphing anchors can change the height
+    if abs(h - extH) > 0.5 {
+        extHSpring.chase(h)
+        extYSpring.chase(extTopOffset(for: anchor, height: h))
+    } else {
+        extYSpring.chase(extTopOffset(for: anchor))
+    }
+    if anchor == .bluetooth { startBluetoothRefresh() }
+    else { btRefreshTimer?.invalidate(); btRefreshTimer = nil }
+    extRowTarget = -1                              // leaving the bluetooth panel fades the band out
+    extRowAlphaSpring.start()
 }
 
 func closeExtension(instant: Bool = false) {
@@ -2813,6 +3368,9 @@ func closeExtension(instant: Bool = false) {
     extHideTimer?.invalidate(); extHideTimer = nil
     guard extShown else { return }
     extShown = false
+    btRefreshTimer?.invalidate(); btRefreshTimer = nil
+    extRowTarget = -1                              // the band fades out with the panel
+    extRowAlphaSpring.start()
     extSpring.stop()
     extSpring.onSettle = nil
     if instant {
@@ -2832,6 +3390,11 @@ func closeExtension(instant: Bool = false) {
 // with no flicker. crossing from one rune to another never closes anything —
 // the open arm just morphs across.
 func updateExtension(xr: CGFloat, y: CGFloat) {
+    // legacy: the arm is retired — parked shut, forever inert
+    guard LEGACY_EXTENSION else {
+        if extShown { closeExtension(instant: true) }
+        return
+    }
     // the extension is inert until the reveal spring is PARKED — glassDocked
     // alone turns true during the entrance overshoot wobble, and widening the
     // window under a still-integrating spring is the flying-glass bug
@@ -2852,6 +3415,24 @@ func updateExtension(xr: CGFloat, y: CGFloat) {
     let onPanel = extShown
         && xr <= g.left + HIDE_MARGIN && xr >= g.right - HIDE_MARGIN
         && y >= g.top - 8 && y <= g.bottom + 8
+    // the bluetooth panel's row hover — the rows still answer the cursor
+    // (the gliding band); a click on the row toggles its connection.
+    // over the pill the cursor belongs to the runes.
+    var rowTarget = -1
+    if extShown, extAnchor == .bluetooth,
+       xr >= PILL_WIDTH + 10, xr <= g.left + HIDE_MARGIN {
+        let top = g.top + BtPanel.rowsTop
+        let n = min(btDevices.count, BtPanel.maxRows)
+        if n > 0, y >= top, y < top + CGFloat(n) * BtPanel.rowH {
+            rowTarget = min(n - 1, Int((y - top) / BtPanel.rowH))
+        }
+    }
+    if rowTarget != extRowTarget {
+        extRowTarget = rowTarget
+        if extRowAlpha < 0.001, rowTarget >= 0 { extRowPos = CGFloat(rowTarget) }   // first show: bloom in place
+        extRowAlphaSpring.start()
+        extRowPosSpring.start()
+    }
     if hovered != nil || onPanel {
         extHideTimer?.invalidate(); extHideTimer = nil
         if let h = hovered {
@@ -2899,6 +3480,22 @@ func snapshotStrip() {
         extFade = 1
         extAnchor = a
         extWanted = a
+        // snapshot fixture: the panel draws its device tray without a live
+        // system_profiler run — same rows the real panel would wear
+        if a == .bluetooth, btDevices.isEmpty {
+            btDevices = [
+                BtDevice(name: "AirPods Pro", kind: "Headset", address: "C1:2A:B3:0E:36:D1", connected: true),
+                BtDevice(name: "Jamie’s Magic Mouse", kind: "Mouse", address: "00:81:2A:93:A0:49", connected: true),
+                BtDevice(name: "Magic Keyboard with Touch ID", kind: "Keyboard", address: "AC:12:8F:22:71:B9", connected: true),
+                BtDevice(name: "MCHOSE L7 Ultra+", kind: "Mouse", address: "C2:65:12:3A:08:E4", connected: false),
+                BtDevice(name: "Rainy 75-1", kind: "Keyboard", address: "D1:00:77:DF:9E:FD", connected: false),
+                BtDevice(name: "Soundcore Life Q30", kind: "Headset", address: "4B:7D:C0:11:8A:02", connected: false),
+                BtDevice(name: "Sony WH-1000XM5", kind: "Headset", address: "08:DF:1F:44:A6:C7", connected: false),
+                BtDevice(name: "Wonder boon with a truly endless name to clip", kind: "Mouse", address: "5E:03:99:1B:D2:44", connected: false),
+            ]
+            btControllerOn = true
+        }
+        extH = extHeight(for: a)
         extY = extTopOffset(for: a)
         relayoutExt(top: extY)               // position the full-size frame
         extProgress = EXT_WIDTH * CGFloat(min(1, max(0.02, f)))
@@ -2949,6 +3546,15 @@ func runDaemon() -> Never {
     _ = ProcessInfo.processInfo.beginActivity(
         options: .userInitiated,
         reason: "smalt: menu strip timers")
+
+    // pre-warm the bluetooth TCC gate: the first pairedDevices() call is what
+    // makes macOS ask for the Bluetooth permission — do it at launch, once,
+    // not under the user's first click (a permission dialog is the last thing
+    // anyone expects to find under a spinner). legacy: skipped while the
+    // extension arm is retired.
+    if LEGACY_EXTENSION {
+        btLinkQueue.async { _ = IOBluetoothDevice.pairedDevices() }
+    }
 
     // hardware sync: the sunset→sunrise ramp and the Night Shift pane change
     // the strength behind our back. there is no push channel at our privilege
@@ -3015,7 +3621,7 @@ func runDaemon() -> Never {
         // one NSCursor.set, no tap, no permissions. (the old check, xr <= 0,
         // meant "cursor past the screen edge" — it almost never fired, which
         // is why the I-beam kept leaking through.)
-        if stripVisible, c.xr <= PILL_WIDTH, c.y >= top, c.y <= bottom {
+        if stripVisible, c.xr <= PILL_INSET + PILL_WIDTH, c.y >= top, c.y <= bottom {
             tab.reassertCursor()
         }
         switch hoverVisibility(xr: c.xr, y: c.y, top: top, bottom: bottom) {
@@ -3116,7 +3722,7 @@ func runDaemon() -> Never {
             }
         }
         // attention — cursor on the glass owns the moment
-        if stripVisible, c.xr <= PILL_WIDTH, c.y >= top, c.y <= bottom {
+        if stripVisible, c.xr <= PILL_INSET + PILL_WIDTH, c.y >= top, c.y <= bottom {
             takeAttention()
             tab.reassertCursor()           // belt + suspenders during the activation handoff
         } else {
@@ -3219,6 +3825,30 @@ func cmdNight(_ arg: String?) -> Never {
     exit(0)
 }
 
+// the tray's view of the world, from the terminal — the same IOBluetooth
+// read the panel draws, for verifying state (and the TCC grant) without
+// hovering the edge:
+//   smalt bt
+func cmdBt() -> Never {
+    guard let paired = IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice], !paired.isEmpty else {
+        print("no paired devices visible — is the Bluetooth permission granted?")
+        print("check: System Settings → Privacy & Security → Bluetooth")
+        exit(1)
+    }
+    var on = false
+    if let hc = IOBluetoothHostController.default() {
+        on = hc.powerState == kBluetoothHCIPowerStateON
+    }
+    print("controller: \(on ? "on" : "OFF")")
+    let rows = paired.map { ($0.isConnected(), $0.addressString ?? "??", $0.name ?? "??") }
+        .sorted { a, b in
+            if a.0 != b.0 { return a.0 }
+            return a.2.localizedCaseInsensitiveCompare(b.2) == .orderedAscending
+        }
+    for r in rows { print("\(r.0 ? "●" : "○") \(r.1)  \(r.2)") }
+    exit(0)
+}
+
 func cmdStatus() {
     let installed = FileManager.default.fileExists(atPath: plistPath)
     let loaded = agentLoaded()
@@ -3248,6 +3878,7 @@ case "on", "enable":     cmdOn()
 case "off", "disable":   cmdOff()
 case "status":           cmdStatus()
 case "night":            cmdNight(CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : nil)
+case "bt":               cmdBt()
 default:
     print("""
     usage: smalt [command]
@@ -3256,6 +3887,8 @@ default:
       on, enable      start the daemon
       off, disable    stop the daemon (starts again at next login)
       status          installed / loaded / running
+      night <0..1>    night shift strength
+      bt              paired devices, live connection state
 
     install & uninstall: ./install.sh in the repo folder
     """)
