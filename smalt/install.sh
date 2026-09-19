@@ -9,7 +9,7 @@ NAME="smalt"
 LABEL="dev.cobalt.smalt"
 BIN_LOCAL="$HOME/.local/bin/$NAME"
 ASSET_DIR="$HOME/.local/share/$NAME"
-SVG_ASSETS=(battery audio bluetooth mic Night-Day power moon night night-off)
+SVG_ASSETS=(battery audio bluetooth mic wifi Night-Day power moon night night-off)
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 GUI="gui/$(id -u)"
 
@@ -57,9 +57,32 @@ cat > "$PLIST" <<EOF
 EOF
 launchctl bootstrap "$GUI" "$PLIST"
 
+# battery click — Low Power Mode toggling needs root, exactly ONCE. this
+# installs the scoped sudoers rule (only the two pmset commands — nothing
+# else gets passwordless root) whenever it's missing, validated with visudo
+# before it lands. no root available? skipped with a hint, install proceeds.
+LPM_RULE="$USER ALL=(root) NOPASSWD: /usr/bin/pmset -a lowpowermode 0, /usr/bin/pmset -a lowpowermode 1"
+LPM_FILE=/etc/sudoers.d/smalt-lpm
+# the rule file is 440 root:wheel — unreadable to this user, which is
+# CORRECT. unreadable-but-present counts as installed; only a missing file
+# (or a readable file without the exact rule) triggers the setup.
+if [[ ! -f $LPM_FILE ]] || { [[ -r $LPM_FILE ]] && ! grep -qxF "$LPM_RULE" "$LPM_FILE"; }; then
+  echo "battery click: granting passwordless Low Power Mode toggle (sudo, one-time)"
+  if sudo sh -c "echo '$LPM_RULE' > /etc/sudoers.d/smalt-lpm.tmp \\
+      && chmod 440 /etc/sudoers.d/smalt-lpm.tmp \\
+      && visudo -cf /etc/sudoers.d/smalt-lpm.tmp >/dev/null \\
+      && mv /etc/sudoers.d/smalt-lpm.tmp '$LPM_FILE'"; then
+    echo "  done — battery clicks toggle instantly, no password"
+  else
+    echo "  skipped — enable later with: sudo ./enable-lpm.sh"
+  fi
+fi
+
 echo
 echo "installed: $BIN_LOCAL"
 echo "launchd:   $LABEL — starts at login, restarts on crash, logs: /tmp/$NAME.err"
 echo
 echo "permissions: none — the reveal is a global mouse monitor, not an event tap"
+echo 'battery click: toggles Low Power Mode — passwordless rule auto-installed on'
+echo '  first ./install.sh (sudo ./enable-lpm.sh remove undoes it; ./enable-lpm.sh re-adds it)'
 echo "try it: fullscreen an app — the strip hides; move the cursor to the top edge — it slides down"

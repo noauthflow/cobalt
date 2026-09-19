@@ -15,7 +15,7 @@ an event tap (`CGEventTapCreate` on the HID tap) intercepts `mouseMoved`, `leftM
 
 the boundary is computed from the screen's `visibleFrame` (which excludes the menu bar), and recomputed on display changes — resolution switches, monitor plug/unplug.
 
-**top-right exemption:** the wall keeps its hands off the rightmost 5px of the top edge (`CORNER_EXEMPT` in main.swift). inside that zone mouse events pass through unclamped, so the clock, control center and other menu bar items stay reachable. moving left out of the zone while above the line snaps the cursor back down to the wall — that's expected.
+**⇧ override:** hold ⇧ and the wall opens — the cursor can travel up into the menu bar. once you're up there, movement stays free even after you release ⇧ (no mid-menu snap back down); the wall re-arms the moment the cursor descends below the line again.
 
 ## commands
 
@@ -48,6 +48,6 @@ the binary is installed to `~/.local/bin/cobalt-60` — that exact path is what 
 ## notes
 
 - logs: `/tmp/cobalt-60.err`
-- the margin is 5px — constant `TOP_MARGIN` in main.swift if you want to change it; the top-right exemption width is `CORNER_EXEMPT` (5px); the corner arc is `CORNER_RADIUS` (14px)
+- the margin is 5px — constant `TOP_MARGIN` in main.swift if you want to change it; the corner arc is `CORNER_RADIUS` (14px)
 - switch storage: `defaults write dev.cobalt.cobalt-60 wallEnabled -bool false` and `cornersEnabled` do the same as the CLI toggles
 - shows up in system settings → general → login items → "allow in the background"

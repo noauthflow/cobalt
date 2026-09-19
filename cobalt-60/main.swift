@@ -5,18 +5,16 @@ import CoreGraphics
 // screen (the menu bar area). event-tap based, zero polling. runs as a
 // launchd agent; install/uninstall lives in install.sh.
 //
+// override: hold ⇧ and the wall opens — the cursor can travel up into the
+// menu bar. once up there, movement stays free (no mid-menu slam back down)
+// until the cursor descends below the wall line again.
+//
 //   cobalt-60          daemon mode (what launchd runs)
 //   cobalt-60 on       start the wall (bootstrap + kickstart the agent)
 //   cobalt-60 off      stop the wall (agent unloaded; restarts at next login)
 //   cobalt-60 status   installed / loaded / running
 
 let TOP_MARGIN: CGFloat = 5
-// the wall keeps its hands off the top corners so the native menu bar stays
-// usable (apple menu / app menus on the left, clock / control center / status
-// items on the right): within this many px of the main screen's left or right
-// edge, mouse events pass through unclamped and the cursor can enter the menu
-// bar like normal. outside those zones the 5px wall applies as before.
-let CORNER_EXEMPT: CGFloat = 5
 
 // feature switches — persisted via `defaults` (domain dev.cobalt.cobalt-60),
 // read by the daemon at startup. the CLI flips them and kickstarts the
@@ -40,13 +38,9 @@ let plistPath = FileManager.default.homeDirectoryForCurrentUser.path
 // and cannot capture local context)
 
 var minYFromTop: CGFloat = 0
-// events right of exemptFromX — or left of exemptToX — pass through
-// unclamped (recomputed with minY)
-var exemptFromX: CGFloat = .greatestFiniteMagnitude
-var exemptToX: CGFloat = .greatestFiniteMagnitude
-// left edge of the main screen — bounds the left exemption so displays
-// further left (negative x) don't get exempted wholesale
-var mainScreenMinX: CGFloat = 0
+// hysteresis for the ⇧ override: true while the cursor is above the wall
+// line (it got there under ⇧, and stays free until it comes back down)
+var aboveWall = false
 // the wall only arms itself while exactly one display is connected. the
 // y-only test lives in global display space, and a second monitor above or
 // beside the main one shares (or undercuts) that y range — the wall would
@@ -60,9 +54,6 @@ func recomputeMinY() {
     let screenHeight = mainScreen.frame.height
     // bottom edge of the menu bar, as distance from the top of the screen
     minYFromTop = screenHeight - mainScreen.visibleFrame.maxY + TOP_MARGIN
-    exemptFromX = mainScreen.frame.maxX - CORNER_EXEMPT
-    exemptToX = mainScreen.frame.minX + CORNER_EXEMPT
-    mainScreenMinX = mainScreen.frame.minX
 }
 
 let tapCallback: CGEventTapCallBack = { _, type, event, _ in
@@ -70,11 +61,18 @@ let tapCallback: CGEventTapCallBack = { _, type, event, _ in
     case .mouseMoved, .leftMouseDragged, .otherMouseDragged:
         if wallActive {
             let loc = event.location
-            // top-corner exemptions: menu bar stays reachable at both edges
-            // (apple/app menus on the left, clock/control center on the right)
-            let inLeftZone = loc.x >= mainScreenMinX && loc.x < exemptToX
-            if loc.y < minYFromTop && loc.x < exemptFromX && !inLeftZone {
-                event.location = CGPoint(x: loc.x, y: minYFromTop)
+            if loc.y >= minYFromTop {
+                // below the line — wall doesn't apply; arm it again
+                aboveWall = false
+            } else {
+                // ⇧ held = the wall is open. read from the HID source, not the
+                // event: rewritten/cloned events don't always carry fresh flags
+                let shift = CGEventSource.flagsState(.hidSystemState).contains(.maskShift)
+                if shift || aboveWall {
+                    aboveWall = true
+                } else {
+                    event.location = CGPoint(x: loc.x, y: minYFromTop)
+                }
             }
         }
     default:
@@ -449,7 +447,7 @@ func cmdStatus() {
         recomputeMinY()
         let wallEffective = wallOn && NSScreen.screens.count <= 1
         if wallEffective {
-            print("wall:     up — cursor held \(Int(TOP_MARGIN))px below the menu bar (top \(Int(CORNER_EXEMPT))px exempt at both screen edges)")
+            print("wall:     up — cursor held \(Int(TOP_MARGIN))px below the menu bar (hold ⇧ to pass through)")
         } else if wallOn {
             print("wall:     standing down — \(NSScreen.screens.count) displays connected (auto-off; arms itself when back to one)")
         } else {

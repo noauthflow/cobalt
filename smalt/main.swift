@@ -19,8 +19,8 @@ import IOKit.ps
 //   the spring retargets mid-flight, so fast in-out just reverses it
 //   smoothly — no completion-handler races, no flicker.
 //
-//   the pill shows eight widgets on one grid, each in its own fixed slot:
-//   hour · minute · battery · audio · bluetooth · microphone
+//   the pill shows nine widgets on one grid, each in its own fixed slot:
+//   hour · minute · battery · audio · bluetooth · microphone · wifi
 //   (the span-5 brightness + night-shift sliders ride below the stack,
 //   power below that)
 //   mission control    off the stage — it's not part of the expose grid
@@ -49,14 +49,13 @@ enum Theme {
     // rune, the square speaker, the tall mic — at identical visual mass.
     static let trioInkArea: CGFloat = 345
 
-    // per-glyph ink equalizers, MEASURED: each value is sqrt(target/own)
-    // where target (149 grid-units²) is the knob faces' mean inked-pixel
-    // area and `own` is the glyph's alpha-weighted ink at the raw grid
-    // (bluetooth 105.6, audio 184.7, mic 156.9). drawing each glyph at
-    // sliderHandle − 6 × its scale gives all three the same inked mass —
-    // matched to the knob family (moon 143, sun 172, power 132).
+    // the trio is ONE library now — all four glyphs are Material Symbols
+    // (rounded, filled), which are designed with equal optical weight across
+    // the set. measured ink: wifi 137.5, bluetooth 105.4, audio 132.1,
+    // mic 93.2 u² — the library's own balance, no per-glyph equalizer
+    // needed. one scale for all: 1.0 → 22.25pt grid box in each quarter.
     static let trioScale: [String: CGFloat] = [
-        "bluetooth": 1.19, "audio": 0.90, "mic": 0.97,
+        "bluetooth": 1.0, "audio": 1.0, "mic": 1.0, "wifi": 1.0,
     ]
 
     // grid — one uniform CELL slot per widget, stacked top to bottom
@@ -78,7 +77,7 @@ enum Theme {
     //   time → device power → connection
     //   (the quiet capsule) → control (the sliders) → sleep (power)
     enum Kind {
-        case battery, hour, minute, trio, slider, night, audio, bluetooth, microphone, power
+        case battery, hour, minute, trio, slider, night, audio, bluetooth, microphone, wifi, power
     }
     struct SlotDef {
         let kind: Kind
@@ -91,8 +90,8 @@ enum Theme {
         .init(.battery),       // status groups with status: charge above connection
         .init(.slider, span: 5),
         // .init(.night, span: 5),        // ← UNCOMMENT to bring the Night Shift slider back
-        .init(.trio, span: 3),   // bluetooth · audio · mic — one flush slot: no seams between the icons,
-        .init(.power),           // each icon's padding lives inside its own third of the block
+        .init(.trio, span: 4),   // bluetooth · wifi · audio · mic — one flush slot: no seams between the icons,
+        .init(.power),           // each icon's padding lives inside its own quarter of the block
     ]
     static var slotCount: Int { slots.count }
 
@@ -110,7 +109,7 @@ enum Theme {
 
     static func isIcon(_ kind: Kind) -> Bool {
         switch kind {
-        case .bluetooth, .audio, .microphone:
+        case .bluetooth, .audio, .microphone, .wifi:
             return true
         default:
             return false
@@ -163,6 +162,7 @@ enum Theme {
     static var powerHover: CGFloat = 0       // 0→1 while the cursor is on the power button — drives its swell, disc tint, and the power⇄moon face crossfade
     static var timeHover: CGFloat = 0        // 0→1 while the cursor is on hour OR minute — the pair's ONE collective blend: the digits deepen together
     static var batteryHover: CGFloat = 0     // 0→1 while the cursor is on the battery slot — the glyph's ink deepens
+    static var batteryPop: CGFloat = 0       // damped wobble (1 → 0, overshooting) fired on every battery click (LPM toggle)
 
     // the pill is exactly its grid — derived from the slot stack, never hand-counted
     static var contentHeight: CGFloat {
@@ -389,15 +389,15 @@ final class StripView: NSView {
         }
     }
 
-    // the hovered trio third (0–2), or -1 when the cursor isn't on the trio.
-    // called from the poll and on hover changes — the cursor can cross thirds
+    // the hovered trio quarter (0–3), or -1 when the cursor isn't on the trio.
+    // called from the poll and on hover changes — the cursor can cross quarters
     // without ever leaving the trio's tracking area.
     func syncTrioBandTarget() {
         var target = -1
         if hoverSlot >= 0, Theme.slots[hoverSlot].kind == .trio,
            let p = cursorPoint {
             let r = Theme.slot(hoverSlot, in: bounds)
-            target = min(2, max(0, Int((p.y - r.minY) / (r.height / 3))))
+            target = min(3, max(0, Int((p.y - r.minY) / (r.height / 4))))
         }
         guard target != Theme.trioBandTarget else { return }
         Theme.trioBandTarget = target
@@ -425,6 +425,14 @@ final class StripView: NSView {
         addTrackingArea(NSTrackingArea(rect: bounds,
                                        options: [.cursorUpdate, .activeAlways],
                                        owner: self, userInfo: nil))
+        // the LOCAL mouse-moved feed: while the cursor is on the glass the
+        // panel is KEY (hover attention) — and global event monitors are
+        // SILENT for an app's own events. without this area, the tooltip
+        // only tracks at the 30Hz poll while hovered: visibly slow. with
+        // it, mouseMoved arrives at event rate, key or not.
+        addTrackingArea(NSTrackingArea(rect: bounds,
+                                       options: [.mouseMoved, .activeAlways],
+                                       owner: self, userInfo: nil))
     }
 
     override func resetCursorRects() {
@@ -440,11 +448,14 @@ final class StripView: NSView {
     // event history. NSEvent.mouseLocation reads the window server's current
     // position, so it answers correctly even when the last mouse event is
     // stale (the glass just slid under a stationary cursor).
-    private var cursorPoint: NSPoint? {
+    var cursorPoint: NSPoint? {
         guard let win = window else { return nil }
         let p = win.convertFromScreen(NSRect(origin: NSEvent.mouseLocation, size: .zero)).origin
         return convert(p, from: nil)
     }
+
+    // the battery tooltip lives in its own window above the strip (see
+    // refreshBatteryTooltip) — the glass can't clip a window it doesn't own
 
     // the pointing-hand decision, position-driven: over an interactive slot
     // (slider, power) of a PARKED glass. no tracking-area dependency —
@@ -452,7 +463,10 @@ final class StripView: NSView {
     // with zero of those.
     private func overInteractive() -> Bool {
         guard glassDocked, let p = cursorPoint else { return false }
-        return slotIndex(at: p).map { Theme.slots[$0].kind == .slider || Theme.slots[$0].kind == .night || Theme.slots[$0].kind == .power } ?? false
+        return slotIndex(at: p).map {
+            Theme.slots[$0].kind == .slider || Theme.slots[$0].kind == .night
+                || Theme.slots[$0].kind == .power || Theme.slots[$0].kind == .battery
+        } ?? false
     }
 
     override func cursorUpdate(with event: NSEvent) {
@@ -471,7 +485,11 @@ final class StripView: NSView {
     // slider gets the hand within one tick of the glass parking.
     func reassertCursor() {
         syncKnobHover()                            // 30Hz position-driven knob hover (stationary cursor, moving knob)
-        syncTrioBandTarget()                       // 30Hz position-driven band glide (crossing thirds inside the trio)
+        syncTrioBandTarget()                       // 30Hz position-driven band glide (crossing quarters inside the trio)
+        // the tooltip rides the cursor in its OWN window above the strip —
+        // every move (monitor) and poll tick re-places it; the tab itself
+        // never repaints for the tooltip's sake
+        refreshBatteryTooltip()
         window?.invalidateCursorRects(for: self)   // window server re-reads resetCursorRects
         if overInteractive() {
             NSCursor.pointingHand.set()
@@ -482,6 +500,13 @@ final class StripView: NSView {
 
     override func mouseEntered(with event: NSEvent) {
         if let slot = event.trackingArea?.userInfo?["slot"] as? Int { hoverSlot = slot }
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        // the local feed (see updateTrackingAreas): while the panel is key
+        // the global monitor is silent for smalt's own events — this keeps
+        // the tooltip and the cursor at EVENT rate, not the poll's 30Hz
+        reassertCursor()
     }
 
     override func mouseExited(with event: NSEvent) {
@@ -572,13 +597,16 @@ final class StripView: NSView {
     // the battery slot's hover blend — the same wash, one slot wide.
     private lazy var batteryHoverSpring = ChaseTimer(
         get: { Theme.batteryHover },
-        set: { v in Theme.batteryHover = v; tab.needsDisplay = true },
+        set: { v in Theme.batteryHover = v; tab.needsDisplay = true; refreshBatteryTooltip() },
         target: { [weak self] in
             guard let self, glassDocked,
                   hoverSlot == Theme.slots.firstIndex(where: { $0.kind == .battery }) else { return 0 }
             return 1
         },
-        rate: 0.32, epsilon: 0.004)
+        // the tooltip's OWN blend — and it's the ONLY thing left on this
+        // blend (the icon is static on hover), so it's tuned for the
+        // tooltip: ~50ms in/out, a soft cut, not a slow theatrical fade
+        rate: 0.7, epsilon: 0.01)
 
     // the band's two springs: alpha answers "is a trio slot hovered on a
     // PARKED glass", position glides toward the hovered slot's index and
@@ -775,6 +803,33 @@ final class StripView: NSView {
         NSHapticFeedbackManager.defaultPerformer.perform(pattern, performanceTime: .now)
     }
 
+    // the battery's toggle pop: the knobs' own underdamped wobble (ω ≈ 20.5,
+    // ζ ≈ 0.34 → two visible overshoots, ~0.5s), fired on every battery
+    // click — the digits swell and settle while the fill crossfades to its
+    // new ink behind them (the LPM crossfade rides the same repaints)
+    private var batteryPopTimer: Timer?
+    private var batteryPopV: CGFloat = 0
+
+    private func fireBatteryPop() {
+        Theme.batteryPop = 1
+        batteryPopV = 0
+        guard batteryPopTimer == nil else { return }
+        let t = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            let K: CGFloat = 420, C: CGFloat = 14, dt: CGFloat = 1.0 / 120.0
+            self.batteryPopV += (-K * Theme.batteryPop - C * self.batteryPopV) * dt
+            Theme.batteryPop += self.batteryPopV * dt
+            if abs(Theme.batteryPop) < 0.002, abs(self.batteryPopV) < 0.02 {
+                Theme.batteryPop = 0
+                self.batteryPopTimer?.invalidate(); self.batteryPopTimer = nil
+            }
+            tab.needsDisplay = true
+            refreshBatteryTooltip()
+        }
+        RunLoop.main.add(t, forMode: .common)
+        batteryPopTimer = t
+    }
+
     // prime the ratchet at the grab position without firing — the first
     // levelChange waits for real motion, not just the press.
     private func armHapticStep(at p: NSPoint) {
@@ -831,6 +886,10 @@ final class StripView: NSView {
             updateSliderValue(at: p)
         case .power:
             sleepSystem()
+        case .battery:
+            fireBatteryPop()
+            hapticTick(.alignment)
+            setLowPowerMode(!ProcessInfo.processInfo.isLowPowerModeEnabled)
         default:
             break
         }
@@ -859,7 +918,7 @@ final class StripView: NSView {
         path.fill()
 
         // the collective pill: one quiet capsule behind the connectable
-        // trio — bluetooth · audio · microphone — in the sliders' EXACT
+        // four — bluetooth · wifi · audio · microphone — in the sliders' EXACT
         // track language: same width (sliderTrack), same rounding, and the
         // same quiet run (sliderFill at 30%) the sliders above wear. the
         // column reads as one continuous capsule language top to bottom.
@@ -873,11 +932,11 @@ final class StripView: NSView {
             NSBezierPath(roundedRect: track, xRadius: Theme.sliderTrack / 2,
                          yRadius: Theme.sliderTrack / 2).fill()
 
-            // the hover band: glides between the trio's thirds — the thirds
-            // tile the fused slot flush, so there are no dead strips between
-            // the icons while it moves.
+            // the hover band: glides between the trio's quarters — the
+            // quarters tile the fused slot flush, so there are no dead strips
+            // between the icons while it moves.
             if Theme.trioBandAlpha > 0.001 {
-                let subH = track.height / 3
+                let subH = track.height / 4
                 let yc = track.minY + (Theme.trioBandPos + 0.5) * subH
                 let band = NSRect(x: track.minX, y: yc - subH / 2,
                                   width: track.width, height: subH)
@@ -902,15 +961,17 @@ final class StripView: NSView {
 
             switch kind {
             case .trio:
-                // the three glyphs, one per flush third of the fused slot —
+                // the four glyphs, one per flush quarter of the fused slot —
                 // knob ink, the same family as the power disc below: dark
                 // enough to read inside the 30% quiet run
-                let subH = r.height / 3
+                let subH = r.height / 4
                 drawBluetooth(in: NSRect(x: r.minX, y: r.minY, width: r.width, height: subH),
                               ink: Theme.knob)
-                drawAudio(in: NSRect(x: r.minX, y: r.minY + subH, width: r.width, height: subH),
+                drawWifi(in: NSRect(x: r.minX, y: r.minY + subH, width: r.width, height: subH),
+                         ink: Theme.knob)
+                drawAudio(in: NSRect(x: r.minX, y: r.minY + 2 * subH, width: r.width, height: subH),
                           ink: Theme.knob)
-                drawMicrophone(in: NSRect(x: r.minX, y: r.minY + 2 * subH, width: r.width, height: subH),
+                drawMicrophone(in: NSRect(x: r.minX, y: r.minY + 3 * subH, width: r.width, height: subH),
                                ink: Theme.knob)
             case .battery: drawBattery(in: r)
             case .slider: drawSlider(in: r)
@@ -921,6 +982,10 @@ final class StripView: NSView {
             default: break
             }
         }
+
+        // the battery tooltip: a child window above the strip — refreshed
+        // here (last), so it layers over the widgets underneath it
+        refreshBatteryTooltip()
 
         // layout x-ray: slots in red, the pad boundary in blue. the ink of
         // every widget must sit inside its red box; the red boxes never move.
@@ -952,7 +1017,7 @@ final class StripView: NSView {
 // and 24-unit layout apply to every SVG widget.
 enum SVGIcon {
     enum Name: String {
-        case battery, audio, bluetooth, mic, power, moon
+        case battery, audio, bluetooth, mic, wifi, power, moon
         case nightDay = "Night-Day"
         case night = "night"            // the night-shift moon (Material bedtime_off, filled)
         case nightOff = "night-off"     // the slashed moon — shown when Night Shift is fully off
@@ -1007,9 +1072,10 @@ enum SVGIcon {
     // a few % of stroke weight between glyphs — the trade for even sizes.
     private static let ink: [Name: CGRect] = [
         .battery:   CGRect(x: 0.75, y: 6.75, width: 22.5, height: 12),
-        .audio:     CGRect(x: 1.5,  y: 3.0,  width: 18.8, height: 18.0),  // solid: body + two waves
-        .bluetooth: CGRect(x: 5.0, y: 2.0, width: 12.71, height: 20.0), // material filled rune
-        .mic:       CGRect(x: 4.5,  y: 0.75, width: 15.0, height: 22.5),  // solid: capsule + stand
+        .audio:     CGRect(x: 3.0,  y: 3.0,  width: 18.0, height: 18.0),  // material: headphones
+        .bluetooth: CGRect(x: 5.0,  y: 2.0,  width: 12.7, height: 20.0),  // material: rune
+        .mic:       CGRect(x: 5.0,  y: 3.0,  width: 14.0, height: 19.0),  // material: capsule + stand
+        .wifi:      CGRect(x: 0.0,  y: 3.0,  width: 24.0, height: 17.0),  // material: two wedges + dot
         .power:     CGRect(x: 3,    y: 3,    width: 18,   height: 18),
     ]
     static let optical: CGFloat = 21   // ink target (longest side), 24-grid units
@@ -1434,6 +1500,50 @@ func readBatteryLevel() -> (pct: Int, charging: Bool)? {
     return nil
 }
 
+// the battery's ESTIMATES + power source — from AppleSmartBattery, the raw
+// SMC data (IOPS's public dict carries no time-to-full). ioreg is a
+// subprocess, so this is cached 5s and must NEVER ride the tooltip's
+// repaint rate. minutes; 65535 is the SMC's "unknown" sentinel.
+struct BatteryDetail {
+    var ac: Bool          // ExternalConnected — AC vs battery power
+    var charging: Bool    // IsCharging — current actually flowing
+    var toFull: Int       // AvgTimeToFull, minutes
+    var toEmpty: Int      // TimeRemaining, minutes
+}
+
+var batteryDetailCache: (result: BatteryDetail?, stamp: CFTimeInterval)?
+
+func batteryDetail() -> BatteryDetail? {
+    let now = CACurrentMediaTime()
+    if let c = batteryDetailCache, now - c.stamp < 5 { return c.result }
+    let result = readBatteryDetail()
+    batteryDetailCache = (result, now)
+    return result
+}
+
+func readBatteryDetail() -> BatteryDetail? {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/usr/sbin/ioreg")
+    p.arguments = ["-r", "-c", "AppleSmartBattery", "-a"]   // archive as a plist
+    let out = Pipe(); p.standardOutput = out; p.standardError = Pipe()
+    guard (try? p.run()) != nil else { return nil }
+    let data = out.fileHandleForReading.readDataToEndOfFile()
+    p.waitUntilExit()
+    guard p.terminationStatus == 0,
+          let arr = try? PropertyListSerialization.propertyList(
+              from: data, options: [], format: nil) as? [[String: Any]],
+          let d = arr.first(where: { $0["BatteryData"] != nil }) ?? arr.first else { return nil }
+    let unknown = { (v: Any?) in
+        if let i = v as? Int { return i <= 0 || i >= 65535 }   // 0/65535 = no estimate
+        return true
+    }
+    return BatteryDetail(
+        ac: (d["ExternalConnected"] as? Bool) ?? false,
+        charging: (d["IsCharging"] as? Bool) ?? false,
+        toFull: unknown(d["AvgTimeToFull"]) ? 0 : (d["AvgTimeToFull"] as? Int ?? 0),
+        toEmpty: unknown(d["TimeRemaining"]) ? 0 : (d["TimeRemaining"] as? Int ?? 0))
+}
+
 // the battery — heroicons' outline battery (24 grid: body x 1.5..21,
 // y 7.5..18, r 2.25, nub beyond) with the charge fill drawn INSIDE the
 // stroke. the outline reads at every level; the fill runs from the left
@@ -1452,14 +1562,11 @@ enum Battery {
                      fillFrom: NSColor, fillTo: NSColor, fillBlend: CGFloat,
                      in slot: NSRect) {
         let f = CGFloat(max(0, min(100, pct))) / 100
-        // hover deepens BOTH the charge fill and the shell ALL the way to the
-        // knob ink — one blend applied to each state BEFORE the crossfade, so
-        // the normal ⇄ LPM crossfade and the hover blend never fight
-        let h = max(0, min(1, Theme.batteryHover))
-        let fillFromH = lerp(fillFrom, Theme.knob, h)
-        let fillToH = lerp(fillTo, Theme.knob, h)
-        // the shell color crossfades between its two states (normal ⇄ LPM)
-        let fillColor = lerp(fillFromH, fillToH, fillBlend)
+        // the icon itself is STATIC on hover — no fade, no wash. hover
+        // belongs to the tooltip (drawn at the tab level, see
+        // drawBatteryTooltip). the only crossfades here are the LPM fill
+        // color and the plug/unplug bolt.
+        let fillColor = lerp(fillFrom, fillTo, fillBlend)
 
         // the glyph's fitted frame decides placement — fill and shell map
         // through the same transform, so they can never disagree
@@ -1477,11 +1584,11 @@ enum Battery {
             NSBezierPath(roundedRect: bodyRect,
                          xRadius: bodyRadius, yRadius: bodyRadius).addClip()
             if fillBlend < 1 {
-                fillFromH.withAlphaComponent(1 - fillBlend).setFill()
+                fillFrom.withAlphaComponent(1 - fillBlend).setFill()
                 NSRect(x: bodyRect.minX, y: bodyRect.minY,
                        width: bodyRect.width * f, height: bodyRect.height).fill()
             }
-            fillToH.withAlphaComponent(fillBlend).setFill()
+            fillTo.withAlphaComponent(fillBlend).setFill()
             NSRect(x: bodyRect.minX, y: bodyRect.minY,
                    width: bodyRect.width * f, height: bodyRect.height).fill()
             context.restoreGState()
@@ -1493,12 +1600,13 @@ enum Battery {
         // fill on top. crossfaded on plug/unplug while the glass is up.
         // the bolt reads in the KNOB ink — the head both sliders share —
         // one darker step than either fill, normal and LPM alike.
-        if boltAlpha > 0.001 {
+        let boltInk = boltAlpha
+        if boltInk > 0.001 {
             let w = 13.3 * s, h = 19 * s
             let boltRect = NSRect(x: frame.minX + bodyRect.midX * s - w / 2,
                                   y: frame.minY + bodyRect.midY * s - h / 2,
                                   width: w, height: h)
-            ChargeBolt.draw(fill: Theme.knob, alpha: boltAlpha, in: boltRect)
+            ChargeBolt.draw(fill: Theme.knob, alpha: boltInk, in: boltRect)
         }
     }
 }
@@ -1537,14 +1645,13 @@ func drawBattery(in slot: NSRect) {
                  fillFrom: fillFrom, fillTo: fillTo, fillBlend: fillBlend, in: slot)
 }
 
-// heroicons, one 24 grid — audio (out), bluetooth, mic (in). the trio
-// rides its collective quiet capsule (see draw), so each glyph draws at
+// heroicons, one 24 grid — audio (out), bluetooth, mic (in), wifi (arcs).
+// the trio rides its collective quiet capsule (see draw), so each glyph draws at
 // track scale — the slot inset to the track's own 24pt footprint — and
 // in the knob family's ink, so it reads inside the 30% quiet run.
 private func drawTrio(_ name: SVGIcon.Name, in slot: NSRect, ink: NSColor) {
-    // the knob faces' own box (sliderHandle − 6), times the glyph's measured
-    // ink equalizer — all three lay down the same inked-pixel mass as the
-    // knob family, no glyph swallowing its third of the fused slot
+    // the knob faces' own box (sliderHandle − 6), at ONE scale for all four —
+    // same library, same grid, the glyphs arrive pre-balanced
     let s = (Theme.sliderHandle - 6) * (Theme.trioScale[name.rawValue] ?? 1)
     SVGIcon.draw(name, color: ink,
                  inRect: NSRect(x: slot.midX - s / 2, y: slot.midY - s / 2,
@@ -1601,6 +1708,43 @@ func drawPower(in slot: NSRect) {
 
 // the power button: system sleep — the same path `pmset sleepnow` walks,
 // user-level (no permissions), the machine's own sleep rules apply
+// run a command, true iff it launched and exited 0
+func runCmd(_ launchPath: String, _ args: [String]) -> Bool {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: launchPath)
+    p.arguments = args
+    p.standardOutput = Pipe(); p.standardError = Pipe()
+    do { try p.run() } catch { return false }
+    p.waitUntilExit()
+    return p.terminationStatus == 0
+}
+
+// Low Power Mode toggle — the battery click. pmset is the only lever, and
+// it demands root, so the rungs climb from silent to one-time-loud:
+//   1. passwordless sudo — instant, forever (the scoped sudoers rule)
+//   2. if the rule is missing, INSTALL IT — the one-time admin prompt here
+//      is the LAST password this toggle ever asks for (self-healing: no
+//      separate setup script, no install.sh run needed). validated with
+//      visudo before it lands, scoped to the two pmset commands only.
+//   3. fallback: one-off admin prompt for the pmset call itself
+func setLowPowerMode(_ on: Bool) {
+    let n = on ? "1" : "0"
+    if runCmd("/usr/bin/sudo", ["-n", "/usr/bin/pmset", "-a", "lowpowermode", n]) { return }
+    let ruleFile = "/etc/sudoers.d/smalt-lpm"
+    if !FileManager.default.fileExists(atPath: ruleFile) {
+        // the rule: exactly two pmset commands, nothing else passwordless
+        let rule = "\(NSUserName()) ALL=(root) NOPASSWD: /usr/bin/pmset -a lowpowermode 0, /usr/bin/pmset -a lowpowermode 1"
+        let setup = "echo '\(rule)' > \(ruleFile).tmp && chmod 440 \(ruleFile).tmp && "
+            + "/usr/sbin/visudo -cf \(ruleFile).tmp && mv \(ruleFile).tmp \(ruleFile)"
+        _ = runCmd("/usr/bin/osascript",
+               ["-e", "do shell script \"\(setup)\" with administrator privileges"])
+        // rule installed? the toggle itself is now silent — go to rung 1
+        if runCmd("/usr/bin/sudo", ["-n", "/usr/bin/pmset", "-a", "lowpowermode", n]) { return }
+    }
+    _ = runCmd("/usr/bin/osascript",
+           ["-e", "do shell script \"/usr/bin/pmset -a lowpowermode \(n)\" with administrator privileges"])
+}
+
 func sleepSystem() {
     let p = Process()
     p.executableURL = URL(fileURLWithPath: "/usr/bin/pmset")
@@ -1610,6 +1754,10 @@ func sleepSystem() {
 
 func drawMicrophone(in slot: NSRect, ink: NSColor) {
     drawTrio(.mic, in: slot, ink: ink)
+}
+
+func drawWifi(in slot: NSRect, ink: NSColor) {
+    drawTrio(.wifi, in: slot, ink: ink)
 }
 
 // time: hour over minute — one CELL slot each, tabular SF Pro centered
@@ -2316,6 +2464,131 @@ let strip: NSWindow = {
     return win
 }()
 
+
+// MARK: - the battery tooltip (a portal, not a painting)
+//
+// the number rides in its OWN borderless window, layered above the strip —
+// the glass can't clip what isn't inside it. it's a CHILD of the strip
+// window (slides along when the glass moves, ordered out when the strip
+// parks), fades on the batteryHover blend (~50ms — soft cut, not theater),
+// and ignores every mouse event — pure display, nothing to intercept.
+
+final class TooltipCapsuleView: NSView {
+    var text = ""
+    var font = NSFont.tabular(13, .semibold)
+    // flipped: drawText un-flips for CoreText assuming y-down (the tab's
+    // convention). without this, the capsule's text renders upside down.
+    override var isFlipped: Bool { true }
+    override func draw(_ dirtyRect: NSRect) {
+        Theme.knob.setFill()
+        NSBezierPath(roundedRect: bounds, xRadius: bounds.height / 2,
+                     yRadius: bounds.height / 2).fill()
+        drawText(text, font: font, color: Theme.glass, in: bounds)
+    }
+}
+
+let batteryTooltipView = TooltipCapsuleView(frame: NSRect(x: 0, y: 0, width: 1, height: 1))
+let batteryTooltip: OverlayPanel = {
+    let win = OverlayPanel(contentRect: NSRect(x: 0, y: 0, width: 1, height: 1),
+                           styleMask: [.borderless, .nonactivatingPanel],
+                           backing: .buffered, defer: false)
+    win.backgroundColor = .clear
+    win.isOpaque = false
+    win.hasShadow = false
+    win.ignoresMouseEvents = true
+    win.level = NSWindow.Level(rawValue: 22)   // one step above the strip (21)
+    win.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
+    win.contentView = batteryTooltipView
+    win.alphaValue = 0
+    strip.addChildWindow(win, ordered: .above)
+    return win
+}()
+
+// geometry + content + alpha, all in one call — every trigger (hover
+// spring, mouse monitor, poll tick, toggle wobble) funnels through here.
+// STRICTLY IDEMPOTENT: this runs at 30Hz from the poll, so it may only
+// touch the window server when something ACTUALLY changed — a stationary
+// cursor over a settled tooltip must cost nothing at all.
+// the TEXT is the percent — and, ONLY while actually charging below full,
+// the SMC's own minutes-to-full: "93%" → "87% · 12m to full". the SMC
+// reports fiction when the pack is full on AC (IsCharging=Yes with a stale
+// estimate), so the gate is strict: charging AND pct < 100 AND a committed
+// number (0/65535 = the hardware shrugging = nothing shown).
+private var ttState = (text: "", x: CGFloat(-1), y: CGFloat(-1),
+                       w: CGFloat(-1), ht: CGFloat(-1), alpha: CGFloat(-1))
+// text measurement is a CoreText layout call and visibleFrame is a window-
+// server query — neither may run per mouse EVENT (the tooltip tracks at
+// event rate). both are cached; the text cache keys on the string, the
+// screen geometry on a 10s stamp + screen identity.
+private var ttGeom = (text: "", w: CGFloat(0), ht: CGFloat(0))
+private var ttVis: (screen: NSScreen, frame: NSRect, stamp: CFTimeInterval)?
+
+func refreshBatteryTooltip() {
+    let h = max(0, min(1, Theme.batteryHover))
+    guard h > 0.001, glassDocked, let win = tab.window,
+          let cp = tab.cursorPoint, let real = batteryLevel() else {
+        // at rest: exactly one teardown, then silence — no per-tick work
+        if ttState.alpha != 0 {
+            ttState.alpha = 0
+            ttState.x = -1; ttState.y = -1; ttState.w = -1; ttState.ht = -1
+            batteryTooltip.alphaValue = 0
+            batteryTooltip.orderOut(nil)
+        }
+        return
+    }
+    var parts: [String] = ["\(real.pct)%"]
+    if let d = batteryDetail(), d.charging, real.pct < 100, d.toFull > 0 {
+        let hrs = d.toFull / 60, rem = d.toFull % 60
+        parts.append(hrs > 0 ? "\(hrs)h \(rem)m to full" : "\(rem)m to full")
+    }
+    let text = parts.joined(separator: " · ")
+
+    // the toggle wobble swells the capsule about its base — recompute the
+    // capsule size ONLY when the text (or the pop) actually changed
+    let font = batteryTooltipView.font
+    let w0: CGFloat, ht0: CGFloat
+    if text == ttGeom.text {
+        (w0, ht0) = (ttGeom.w, ttGeom.ht)
+    } else {
+        let ts = (text as NSString).size(withAttributes: [.font: font])
+        (w0, ht0) = (ts.width + 14, ts.height + 8)
+        ttGeom = (text, w0, ht0)
+    }
+    let g = 1 + 0.14 * max(0, min(1, Theme.batteryPop))
+    let w = w0 * g, ht = ht0 * g
+    // rides 12pt below the cursor tip, centered on it — clamped to the
+    // screen's visible frame, free to leave the glass behind
+    let scr = win.convertToScreen(NSRect(origin: tab.convert(cp, to: nil), size: .zero)).origin
+    let vis: NSRect
+    if let c = ttVis, c.screen === win.screen, CACurrentMediaTime() - c.stamp < 10 {
+        vis = c.frame
+    } else {
+        vis = win.screen?.visibleFrame ?? NSScreen.main!.visibleFrame
+        ttVis = (win.screen!, vis, CACurrentMediaTime())
+    }
+    let x = min(vis.maxX - w - 6, max(vis.minX + 6, scr.x - w / 2))
+    let y = scr.y - 12 - ht
+
+    let textChanged = text != ttState.text
+    let moved = abs(x - ttState.x) > 0.25 || abs(y - ttState.y) > 0.25
+        || abs(w - ttState.w) > 0.25 || abs(ht - ttState.ht) > 0.25
+    let alphaChanged = abs(h - ttState.alpha) > 0.004
+    guard textChanged || moved || alphaChanged else { return }   // settled: NO-OP
+
+    if moved {
+        batteryTooltip.setFrame(NSRect(x: x, y: y, width: w, height: ht), display: false)
+    }
+    if textChanged {
+        batteryTooltipView.text = text
+        batteryTooltipView.needsDisplay = true
+    }
+    if alphaChanged {
+        if !batteryTooltip.isVisible { batteryTooltip.orderFrontRegardless() }
+        batteryTooltip.alphaValue = h
+    }
+    ttState = (text, x, y, w, ht, h)
+}
+
 // MARK: - the extensions (bluetooth · audio · mic · power)
 //
 // hover one of the arm anchors — the bluetooth, audio or mic rune, or the
@@ -2348,22 +2621,25 @@ let EXT_SLACK: CGFloat = 12     // window slack past full width — spring overs
 let EXT_SHOW_DWELL: TimeInterval = 0.12   // hover intent: brush-past never opens it
 let EXT_HIDE_DWELL: TimeInterval = 0.18   // leave intent: darting between runes never closes it
 
-enum ExtAnchor { case bluetooth, audio, mic, power }
+enum ExtAnchor { case bluetooth, wifi, audio, mic, power }
 
 // the anchor's rune/slot band, in pill-local flipped coords (y down from the
-// pill's top): the trio's thirds for bluetooth/audio/mic, the whole slot for
+// pill's top): the trio's quarters for bluetooth/wifi/audio/mic, the whole slot for
 // power
 func anchorOffset(_ anchor: ExtAnchor) -> (y: CGFloat, h: CGFloat) {
     let kind: Theme.Kind = anchor == .power ? .power : .trio
     guard let i = Theme.slots.firstIndex(where: { $0.kind == kind }) else { return (Theme.pad, Theme.cell) }
     let r = Theme.slot(i, in: NSRect(x: 0, y: 0, width: Theme.pillWidth, height: Theme.pillHeight))
     if anchor == .power { return (r.minY, r.height) }
-    let third = r.height / 3
+    let quarter = r.height / 4
     switch anchor {
-    case .bluetooth: return (r.minY, third)
-    case .audio:     return (r.minY + third, third)
-    default:         return (r.minY + 2 * third, third)   // mic
+    case .bluetooth: return (r.minY, quarter)
+    case .wifi:      return (r.minY + quarter, quarter)
+    case .audio:     return (r.minY + 2 * quarter, quarter)
+    case .mic:       return (r.minY + 3 * quarter, quarter)
+    case .power:     break
     }
+    return (r.minY, r.height)
 }
 
 // the arm's top edge for an anchor. mic and power are anchored to the bar's
@@ -2594,6 +2870,7 @@ func updateExtension(xr: CGFloat, y: CGFloat) {
     // which rune is under the cursor, top of the trio down (±3px of slack)
     var hovered: ExtAnchor? = nil
     for (anchor, band) in [(ExtAnchor.bluetooth, anchorBandCG(.bluetooth)),
+                           (ExtAnchor.wifi, anchorBandCG(.wifi)),
                            (ExtAnchor.audio, anchorBandCG(.audio)),
                            (ExtAnchor.mic, anchorBandCG(.mic)),
                            (ExtAnchor.power, anchorBandCG(.power))] {
@@ -2641,7 +2918,8 @@ func snapshotStrip() {
     // silhouette without screen-recording permission
     let armName = ProcessInfo.processInfo.environment["SMALT_SNAPSHOT_ARM"]
     let arm = armName != nil
-    let a: ExtAnchor = armName == "audio" ? .audio : armName == "mic" ? .mic : armName == "power" ? .power : .bluetooth
+    let a: ExtAnchor = armName == "audio" ? .audio : armName == "mic" ? .mic
+        : armName == "power" ? .power : armName == "wifi" ? .wifi : .bluetooth
     if arm {
         let f = ProcessInfo.processInfo.environment["SMALT_SNAPSHOT_SCALE"]
             .flatMap { Double($0) } ?? 1
