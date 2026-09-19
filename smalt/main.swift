@@ -19,9 +19,9 @@ import IOKit.ps
 //   the spring retargets mid-flight, so fast in-out just reverses it
 //   smoothly — no completion-handler races, no flicker.
 //
-//   the pill shows nine widgets on one grid, each in its own fixed slot:
+//   the pill shows seven widgets on one grid, each in its own fixed slot:
 //   hour · minute · battery · audio · bluetooth · microphone · wifi
-//   (the span-5 brightness + night-shift sliders ride below the stack,
+//   (the span-5 slider rides below the stack — Night Shift strength —
 //   power below that)
 //   mission control    off the stage — it's not part of the expose grid
 //
@@ -88,8 +88,9 @@ enum Theme {
         .init(.hour),
         .init(.minute),
         .init(.battery),       // status groups with status: charge above connection
-        .init(.slider, span: 5),
-        // .init(.night, span: 5),        // ← UNCOMMENT to bring the Night Shift slider back
+        .init(.slider, span: 5),   // same M3 styling as ever (cool taupe, Night-Day face) —
+                                   // the value it reads/writes is Night Shift strength now
+        // .init(.night, span: 5), // ← the warm moon-slider variant, parked
         .init(.trio, span: 4),   // bluetooth · wifi · audio · mic — one flush slot: no seams between the icons,
         .init(.power),           // each icon's padding lives inside its own quarter of the block
     ]
@@ -160,7 +161,6 @@ enum Theme {
     static var nightKnobHover: CGFloat = 0   // the night knob's own swell — same component, warm ink
     static var nightKnobPop: CGFloat = 0     // the night knob's first-hover wobble
     static var powerHover: CGFloat = 0       // 0→1 while the cursor is on the power button — drives its swell, disc tint, and the power⇄moon face crossfade
-    static var timeHover: CGFloat = 0        // 0→1 while the cursor is on hour OR minute — the pair's ONE collective blend: the digits deepen together
     static var batteryHover: CGFloat = 0     // 0→1 while the cursor is on the battery slot — the glyph's ink deepens
     static var batteryPop: CGFloat = 0       // damped wobble (1 → 0, overshooting) fired on every battery click (LPM toggle)
 
@@ -364,14 +364,6 @@ final class StripView: NSView {
             if hoverSlot == Theme.slots.firstIndex(where: { $0.kind == .power })
                 || oldValue == Theme.slots.firstIndex(where: { $0.kind == .power }) {
                 powerSpring.start()
-            }
-            // the time pair's collective blend: hour + minute are ONE widget —
-            // entering either slot (or leaving either) drives the same spring
-            let hourIdx = Theme.slots.firstIndex(where: { $0.kind == .hour })
-            let minuteIdx = Theme.slots.firstIndex(where: { $0.kind == .minute })
-            if hoverSlot == hourIdx || hoverSlot == minuteIdx
-                || oldValue == hourIdx || oldValue == minuteIdx {
-                timeHoverSpring.start()
             }
             if hoverSlot == Theme.slots.firstIndex(where: { $0.kind == .battery })
                 || oldValue == Theme.slots.firstIndex(where: { $0.kind == .battery }) {
@@ -581,19 +573,6 @@ final class StripView: NSView {
         },
         rate: 0.22, epsilon: 0.004)
 
-    // the time pair's collective hover blend — hour + minute act as ONE
-    // widget: hovering either slot drives both. same grammar as hoverSpring.
-    private lazy var timeHoverSpring = ChaseTimer(
-        get: { Theme.timeHover },
-        set: { v in Theme.timeHover = v; tab.needsDisplay = true },
-        target: { [weak self] in
-            guard let self, glassDocked else { return 0 }
-            let hourIdx = Theme.slots.firstIndex(where: { $0.kind == .hour })
-            let minuteIdx = Theme.slots.firstIndex(where: { $0.kind == .minute })
-            return hoverSlot == hourIdx || hoverSlot == minuteIdx ? 1 : 0
-        },
-        rate: 0.32, epsilon: 0.004)
-
     // the battery slot's hover blend — the same wash, one slot wide.
     private lazy var batteryHoverSpring = ChaseTimer(
         get: { Theme.batteryHover },
@@ -789,9 +768,9 @@ final class StripView: NSView {
         nightFaceSpring.start()
     }
 
-    // one drag mapping, two writers: the value the cursor maps to is
-    // written straight through to whichever hardware owns the slot —
-    // keyboard backlight or Night Shift strength.
+    // one drag mapping, one writer: the value the cursor maps to is written
+    // straight through to the hardware that owns the slot — Night Shift
+    // strength.
     // ── haptics ── the trackpad "tickle": NSHapticFeedbackManager is what
     // System Settings' sliders use for detents. one .levelChange ratchet
     // tick per 5% crossed DURING A DRAG — nothing on hover, nothing on
@@ -850,7 +829,8 @@ final class StripView: NSView {
         switch Theme.slots[i].kind {
         case .slider:
             Theme.sliderValue = v
-            KeyboardBrightness.set(Float(v))   // the F5/F6 keys' own call path
+            Theme.nightOff = (v == 0)
+            NightShift.set(Float(v))           // the Night Shift pane's own call path
             valueSpring.stop()                 // the cursor is the only spring that matters here
         case .night:
             Theme.nightValue = v
@@ -1762,18 +1742,19 @@ func drawWifi(in slot: NSRect, ink: NSColor) {
 
 // time: hour over minute — one CELL slot each, tabular SF Pro centered
 // the clock: hour over minute — one CELL slot each, SF Mono digits centered,
-// in the spine's trio ink. the pair deepens together ALL the way to the
-// knob ink on the collective hover — one blend, both digits (timeHover).
+// in the trio ink, flat — the clock doesn't react to hover.
 func drawClock(_ component: Calendar.Component, in slot: NSRect) {
     let value = String(format: "%02d", Calendar.current.component(component, from: Date()))
     drawText(value, font: NSFont.monospacedSystemFont(ofSize: Theme.typeSize, weight: .regular),
-             color: lerp(Theme.trioInk, Theme.knob, max(0, min(1, Theme.timeHover))), in: slot)
+             color: Theme.trioInk, in: slot)
 }
 
 // material design 3 slider, vertical, in smalt's skin — M3's own metrics
 // (4dp track, round handle) drawn with CG, but inked
-// in the palette instead of M3's. one CELL slot below the time. v0 draws
-// the live keyboard backlight (CoreBrightness); drag writes straight to it.
+// in the palette instead of M3's. one CELL slot below the time. draws the
+// live Night Shift strength (CBBlueLightClient); drag writes straight to it.
+// same styling the keyboard-brightness slider always wore — only the value
+// it reads and writes changed.
 func drawSlider(in slot: NSRect) {
     let v = max(0, min(1, Theme.sliderDisplay))
     let slotHover = max(0, min(1, Theme.sliderHover))   // whole slot: the fill tint
@@ -1958,26 +1939,17 @@ func dbg(_ s: String) {
 
 var stripVisible = false       // hidden until the cursor hovers the right edge
 
-// the slider's state IS the hardware: read the real keyboard backlight once
-// at launch, then every drag writes straight through to it
-if KeyboardBrightness.available {
-    let hw = CGFloat(KeyboardBrightness.get())
-    Theme.sliderValue = hw
-    Theme.sliderDisplay = hw
-} else {
-    dbg("keyboard brightness: KeyboardBrightnessClient unavailable — slider is visual-only")
-}
-
-// same for night shift: the live strength IS the slider's state
+// the slider's state IS the hardware: Night Shift's live strength — the
+// styling is the original slider's, the value it drives is Night Shift's
 if NightShift.available {
     Theme.nightOff = NightShift.isOff()
     let ns = Theme.nightOff ? CGFloat(0) : CGFloat(NightShift.get())
-    Theme.nightValue = ns
-    Theme.nightDisplay = ns
+    Theme.sliderValue = ns
+    Theme.sliderDisplay = ns
     let m = NightShift.mode()
     if m != 0 { NightShift.lastSchedule = m }   // remember what's armed, for the re-arm on drag-up
 } else {
-    dbg("night shift: CBBlueLightClient unavailable — night slider is visual-only")
+    dbg("night shift: CBBlueLightClient unavailable — slider is visual-only")
 }
 var evalItem: DispatchWorkItem?
 var pendingRelease = false     // key-drop deferred until the exit spring parks the glass
@@ -2978,14 +2950,13 @@ func runDaemon() -> Never {
         options: .userInitiated,
         reason: "smalt: menu strip timers")
 
-    // hardware sync: F5/F6 and the auto-brightness daemon change the
-    // backlight behind our back. there is no push channel at our privilege
-    // level — proven empirically: CoreBrightness posts no darwin
-    // notification and the Keyboard Backlight HID device rejects listeners
-    // (privileged) — so sample. adaptive rate: 30Hz while the glass is on
-    // stage (52µs per read → 0.16% of a core), 2Hz hidden. the RENDER is
-    // decoupled from the SAMPLE: the handle springs to each new value at
-    // 120fps, so even coarse samples glide like the system's own bezel.
+    // hardware sync: the sunset→sunrise ramp and the Night Shift pane change
+    // the strength behind our back. there is no push channel at our privilege
+    // level — CoreBrightness posts no darwin notification — so sample.
+    // adaptive rate: 30Hz while the glass is on
+    // stage, 2Hz hidden. the RENDER is decoupled from the SAMPLE: the handle
+    // springs to each new value at 120fps, so even coarse samples glide like
+    // the system's own bezel.
     let hwSync = DispatchSource.makeTimerSource(queue: .main)
     enum HwSync {
         static let liveInterval: TimeInterval = 1.0 / 30.0   // visible: 0.16% CPU, reads track live
@@ -3000,22 +2971,14 @@ func runDaemon() -> Never {
     hwSync.setEventHandler {
         defer { scheduleHwSync() }
         guard tab.dragSlot == nil else { return }   // mid-drag: we ARE the writer
-        if KeyboardBrightness.available {
-            let hw = CGFloat(KeyboardBrightness.get())
-            if abs(hw - Theme.sliderValue) > 0.001 {
-                Theme.sliderValue = hw
-                if stripVisible { tab.beginValueSpring() }
-                else { Theme.sliderDisplay = hw }
-            }
-        }
         if NightShift.available {
             let off = NightShift.isOff()
             let s = off ? CGFloat(0) : CGFloat(NightShift.get())
-            if off != Theme.nightOff || abs(s - Theme.nightValue) > 0.001 {
+            if off != Theme.nightOff || abs(s - Theme.sliderValue) > 0.001 {
                 Theme.nightOff = off
-                Theme.nightValue = s
-                if stripVisible { tab.beginNightValueSpring() }
-                else { Theme.nightDisplay = s }
+                Theme.sliderValue = s
+                if stripVisible { tab.beginValueSpring() }
+                else { Theme.sliderDisplay = s }
             }
         }
     }

@@ -99,39 +99,27 @@ anyway, so any permission a later version earns survives rebuilds.)
 - constants: `cell/gap/pad`, `iconSize`, `typeSize/pctSize` in `Theme`;
   `sliderTrack` (M3 metric) + `sliderHandle` (24pt — bigger than M3's 18dp, smalt skin) in `Theme`;
   `PILL_RADIUS`, `REVEAL_WIDTH` (12px), `HIDE_MARGIN` (6px) in main.swift
-- the slider below the time is Material Design 3's shape language (4dp
-  track, round handle) drawn with CG in the palette; the knob is the
-  readout — the supplied Night-Day SVG at rest, swelling to a live percentage
-  (tabular semibold, shrink-to-fit) while you drag, lingering ~1.5s after
-  release, then back to the icon;
-  it is live — press anywhere in its 5-cell region and drag, and the real
-  keyboard backlight follows. it drives the same `KeyboardBrightnessClient`
-  (private `CoreBrightness` framework) that the F5/F6 keys use — value
-  0–1, no permissions. the slider state is the hardware, and the render
-  is decoupled from the sample: smalt samples the hardware at 30Hz while
-  the glass is visible (~0.16% of a core — 52µs per read, benchmarked)
-  and 2Hz while hidden, and the handle *springs* to each new sample at
-  120fps — so fn-key and ambient auto-brightness changes glide in exactly
-  like the system's own bezel instead of stepping. there is no push
-  channel at user privilege: CoreBrightness posts no darwin notification
-  and the Keyboard Backlight HID device rejects listeners (privileged) —
-  both were tested; sampling is the only channel macOS gives us
-- the night slider below the brightness slider is the same M3 language in
-  warm ink — lamp amber (#A8732A value run, #7E5414 under the cursor); the
-  knob face is the moon SVG at rest, the % while you drag, OFF at zero
-  when the schedule is off. it is live too: it drives `CBBlueLightClient`
+- the span-5 slider below the time is Material Design 3's shape language
+  (4dp track, round handle) drawn with CG in the palette — the same cool
+  taupe styling the keyboard-brightness slider always wore (#75564F value
+  run, #5E463F under the cursor), the Night-Day SVG at rest swelling to a
+  live percentage (tabular semibold, shrink-to-fit) while you drag,
+  lingering ~1.5s after release, then back to the icon. the value it
+  reads and writes is Night Shift's now: it drives `CBBlueLightClient`
   — the Night Shift pane's own client class — `getStrength:` /
   `setStrength:commit:`, the pane's own call path. the slider IS the live
   strength (0 = shallow, 1 = intensive; System Settings calls it
   Less/More) and samples it on the same 30Hz/2Hz clock, so the sunset →
-  sunrise ramp glides the knob on its own while you watch. two
-  hard-won system facts shaped it: the applied warmth is its own layer —
-  schedule Off alone leaves the screen warm, so OFF also pins the applied
-  CCT to neutral 6000K; and the client caches the schedule, so every call
-  builds a FRESH client (a long-lived one reads stale — that's the bug
-  that once made drag-back-up fail to re-arm). dragging to zero switches
-  the schedule Off; dragging back up re-arms exactly what was there.
-  verify from the terminal: `smalt night status | off | <0..1>`
+  sunrise ramp glides the knob on its own while you watch. two hard-won
+  system facts shaped the Night Shift side: the applied warmth is its own
+  layer — schedule Off alone leaves the screen warm, so OFF also pins the
+  applied CCT to neutral 6000K; and the client caches the schedule, so
+  every call builds a FRESH client (a long-lived one reads stale — that's
+  the bug that once made drag-back-up fail to re-arm). dragging to zero
+  switches the schedule Off; dragging back up re-arms exactly what was
+  there. verify from the terminal: `smalt night status | off | <0..1>`
+  (the warm moon-slider variant — lamp-amber ink, OFF face — lives on in
+  the code, parked with no slot.)
 - the pill is clickable; widgets don't do anything yet — v1 flips that
 - focus: hover = attention. while the cursor is on the glass the panel
   takes KEY status (`OverlayPanel` canBecomeKey + `strip.makeKey()`) —
