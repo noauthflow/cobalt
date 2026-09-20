@@ -6,6 +6,7 @@ import CoreWLAN
 import IOKit
 import IOKit.ps
 import IOBluetooth
+import Carbon
 
 // smalt — ground cobalt glass.
 //
@@ -48,6 +49,20 @@ enum Theme {
     static let ink     = NSColor(srgbRed: 0x99/255.0, green: 0x94/255.0, blue: 0x7F/255.0, alpha: 1)  // #99947F strokes + labels
     static let inkDeep = NSColor(srgbRed: 0x3D/255.0, green: 0x38/255.0, blue: 0x29/255.0, alpha: 1)  // #3D3829 the darker on-palette ink
     static let trioInk = NSColor(srgbRed: 0x70/255.0, green: 0x56/255.0, blue: 0x51/255.0, alpha: 1)  // #705651 the spine's ink — clock · battery, stepped down from plain ink
+
+    // the overlay's dark skin — the pill palette inverted for the dimmed
+    // screen. same warm family, flipped: near-black glass, cream ink. the
+    // widgets read the SAME state, the ink just points the other way.
+    static let darkGlass    = NSColor(srgbRed: 0x24/255.0, green: 0x1E/255.0, blue: 0x19/255.0, alpha: 1)  // #241E19 the card
+    static let darkStroke   = NSColor.white.withAlphaComponent(0.10)                                       // the card's hairline
+    static let darkText     = NSColor(srgbRed: 0xFA/255.0, green: 0xF6/255.0, blue: 0xF3/255.0, alpha: 1)  // cream — primary ink
+    static let darkMuted    = NSColor(srgbRed: 0xA8/255.0, green: 0x9F/255.0, blue: 0x93/255.0, alpha: 1)  // #A89F93 quiet ink
+    static let darkShell    = NSColor(srgbRed: 0xC4/255.0, green: 0xB2/255.0, blue: 0x9F/255.0, alpha: 1)  // #C4B29F battery shell + charge fill
+    static let darkShellHover = NSColor(srgbRed: 0xE7/255.0, green: 0xDC/255.0, blue: 0xCB/255.0, alpha: 1) // battery hover: one step toward cream
+    static let darkShellLPM = NSColor(srgbRed: 0xC9/255.0, green: 0x8F/255.0, blue: 0x3F/255.0, alpha: 1)  // LPM: lighter lamp amber
+    static let darkTrack    = NSColor.white.withAlphaComponent(0.15)                                       // the slider's empty run
+    static let darkValue    = NSColor(srgbRed: 0xC4/255.0, green: 0xB2/255.0, blue: 0x9F/255.0, alpha: 1)   // the slider's value run
+    static let darkValueHover = NSColor(srgbRed: 0xE7/255.0, green: 0xDC/255.0, blue: 0xCB/255.0, alpha: 1) // value run under the cursor — one step brighter
 
     // the trio's ink standard: every glyph renders with the SAME ink
     // footprint area (345pt² of bounding box), tuned so the widest glyph
@@ -269,6 +284,77 @@ final class ChaseTimer {
     func stop() {
         timer?.invalidate(); timer = nil
         set(target())
+    }
+}
+
+// the knob's hover machine — ONE component, three users: the pill's two
+// sliders and the overlay's slider. it answers the cursor↔knob relationship
+// wherever sync() is called: the FIRST hover of a session fires the wobble
+// (the latch), EVERY arrival fires the haptic tick, and the knob's hover
+// blend springs in and out. the surface repaint belongs to the popWrite
+// closure — each user marks its own view.
+final class KnobHoverMachine {
+    private let hovered: () -> Bool
+    private let read: () -> CGFloat
+    private let write: (CGFloat) -> Void
+    private let popWrite: (CGFloat) -> Void
+    private let latch: () -> Bool
+    private let setLatch: () -> Void
+    private let haptic: () -> Void
+    private(set) var wasHovered = false
+    private lazy var spring = ChaseTimer(
+        get: read,
+        set: write,
+        target: { [weak self] in (self?.hovered() ?? false) ? 1 : 0 },
+        rate: 0.25, epsilon: 0.004)
+    private var popTimer: Timer?
+    private var pop: CGFloat = 0
+    private var popV: CGFloat = 0
+
+    init(hovered: @escaping () -> Bool, read: @escaping () -> CGFloat,
+         write: @escaping (CGFloat) -> Void, popWrite: @escaping (CGFloat) -> Void,
+         latch: @escaping () -> Bool, setLatch: @escaping () -> Void,
+         haptic: @escaping () -> Void) {
+        self.hovered = hovered; self.read = read
+        self.write = write; self.popWrite = popWrite
+        self.latch = latch; self.setLatch = setLatch
+        self.haptic = haptic
+    }
+
+    func sync() {
+        let h = hovered()
+        if h, !wasHovered, glassDocked {
+            haptic()
+            if !latch() {
+                setLatch()
+                firePop()
+            }
+        }
+        wasHovered = h
+        spring.start()
+    }
+
+    // the first-hover bounce: an underdamped spring released from
+    // displacement 1 — the knob swells ~12% and wobbles back to rest
+    // (ω ≈ 20.5 rad/s, ζ ≈ 0.34 → two visible overshoots, ~0.5s). its own
+    // 120fps integrator, started on demand, self-stopping at rest.
+    private func firePop() {
+        pop = 1
+        popV = 0
+        guard popTimer == nil else { return }
+        let t = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            let K: CGFloat = 420, C: CGFloat = 14, dt: CGFloat = 1.0 / 120.0
+            popV += (-K * pop - C * popV) * dt
+            pop += popV * dt
+            if abs(pop) < 0.002, abs(popV) < 0.02 {
+                pop = 0
+                popTimer?.invalidate(); popTimer = nil
+            }
+            popWrite(pop)
+        }
+        RunLoop.main.add(t, forMode: .common)
+        popTimer = t
     }
 }
 
@@ -631,83 +717,18 @@ final class StripView: NSView {
     // and only this — drives the knob swell + first-hover wobble. ONE
     // machinery, TWO sliders: the brightness knob and the night knob are
     // the same component, differing only in which state they read and write.
-    private final class KnobHoverMachine {
-        private let hovered: () -> Bool
-        private let read: () -> CGFloat
-        private let write: (CGFloat) -> Void
-        private let popWrite: (CGFloat) -> Void
-        private let latch: () -> Bool          // summon's shared first-hover latch
-        private let setLatch: () -> Void
-        private let haptic: () -> Void         // every arrival at the knob — the power button's own
-        private(set) var wasHovered = false
-        private lazy var spring = ChaseTimer(
-            get: read,
-            set: write,
-            target: { [weak self] in (self?.hovered() ?? false) ? 1 : 0 },
-            rate: 0.25, epsilon: 0.004)
-        private var popTimer: Timer?
-        private var pop: CGFloat = 0
-        private var popV: CGFloat = 0
-
-        init(hovered: @escaping () -> Bool, read: @escaping () -> CGFloat,
-             write: @escaping (CGFloat) -> Void, popWrite: @escaping (CGFloat) -> Void,
-             latch: @escaping () -> Bool, setLatch: @escaping () -> Void,
-             haptic: @escaping () -> Void) {
-            self.hovered = hovered; self.read = read
-            self.write = write; self.popWrite = popWrite
-            self.latch = latch; self.setLatch = setLatch
-            self.haptic = haptic
-        }
-
-        // called wherever the cursor↔knob relationship may have changed. the
-        // FIRST knob hover of a summon (a shared latch the daemon poll clears
-        // on park) fires the wobble; EVERY entry into a knob fires the haptic
-        // tick — the power button's own behavior, one tick per arrival.
-        func sync() {
-            let h = hovered()
-            if h, !wasHovered, glassDocked {
-                haptic()
-                if !latch() {
-                    setLatch()
-                    firePop()
-                }
-            }
-            wasHovered = h
-            spring.start()
-        }
-
-        // the first-hover bounce: an underdamped spring released from
-        // displacement 1 — the knob swells ~12% and wobbles back to rest
-        // (ω ≈ 20.5 rad/s, ζ ≈ 0.34 → two visible overshoots, ~0.5s). its own
-        // 120fps integrator, started on demand, self-stopping at rest.
-        private func firePop() {
-            pop = 1
-            popV = 0
-            guard popTimer == nil else { return }
-            let t = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in
-                guard let self else { return }
-                let K: CGFloat = 420, C: CGFloat = 14, dt: CGFloat = 1.0 / 120.0
-                popV += (-K * pop - C * popV) * dt
-                pop += popV * dt
-                if abs(pop) < 0.002, abs(popV) < 0.02 {
-                    pop = 0
-                    popTimer?.invalidate(); popTimer = nil
-                }
-                popWrite(pop)
-                tab.needsDisplay = true
-            }
-            RunLoop.main.add(t, forMode: .common)
-            popTimer = t
-        }
-    }
-
-    // one per slider — the brightness knob and the night knob are the same
-    // component; only the state they read/write differs.
+    // the KNOB's own hover, position-driven: cursor vs the knob's live rect
+    // (recomputed every check, so it tracks the handle as it travels). this —
+    // and only this — drives the knob swell + first-hover wobble. ONE
+    // machinery, TWO sliders: the brightness knob and the night knob are
+    // the same component, differing only in which state they read and write.
+    // (the machine itself is file-scope now — the overlay's slider runs the
+    // exact same component; only the closures differ.)
     private lazy var sliderKnob = KnobHoverMachine(
         hovered: { [weak self] in self?.knobHovered(.slider) ?? false },
         read: { Theme.knobHover },
         write: { v in Theme.knobHover = v; tab.needsDisplay = true },
-        popWrite: { Theme.knobPop = $0 },
+        popWrite: { Theme.knobPop = $0; tab.needsDisplay = true },
         latch: { [weak self] in self?.bouncedThisSummon ?? true },
         setLatch: { [weak self] in self?.bouncedThisSummon = true },
         haptic: { [weak self] in self?.hapticTick(.alignment) })
@@ -1139,10 +1160,10 @@ enum SVGIcon {
 // knob ink on top — the darker head both sliders share. built once per
 // tint, cached.
 enum ChargeBolt {
-    static let border = NSColor(srgbRed: 0xFA/255.0, green: 0xF6/255.0, blue: 0xF3/255.0, alpha: 1)  // the glass — the border must vanish into it
+    static let border = NSColor(srgbRed: 0xFA/255.0, green: 0xF6/255.0, blue: 0xF3/255.0, alpha: 1)  // the default halo — the pill's glass — the border must vanish into its surface
     private static let scale: CGFloat = 4                   // silhouette build scale (retina-crisp)
     private static let borderPt: CGFloat = 1.25             // visible outside border
-    private static var borderImg: NSImage?                  // tint-independent — built once
+    private static var borderImgs: [String: NSImage] = [:]  // halo tinted per surface color
     private static var fillImgs: [String: NSImage] = [:]    // silhouette tinted per body color
     private static var sil: (alpha: [UInt8], w: Int, h: Int)?
 
@@ -1261,21 +1282,23 @@ enum ChargeBolt {
         NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
     }
 
-    private static func borderImage() -> NSImage? {
-        if borderImg == nil {
-            guard getSilhouette(), let a = sil else { return nil }
-            let R = borderPt * scale
-            let pad = Int(R) + 2
-            let (d2, W, H) = outsideDist2(a.alpha, w: a.w, h: a.h, pad: pad)
-            var ring = [UInt8](repeating: 0, count: W * H)
-            for i in 0..<(W * H) {
-                let v = max(0, min(1, R + 0.5 - d2[i].squareRoot()))
-                ring[i] = UInt8(v * 255)
-            }
-            guard let cg = cgImage(alpha: ring, w: W, h: H, border) else { return nil }
-            borderImg = nsImage(cg)
+    private static func borderImage(_ tint: NSColor) -> NSImage? {
+        let key = hex(tint)
+        if let img = borderImgs[key] { return img }
+        if borderImgs.count > 8 { borderImgs.removeAll() }
+        guard getSilhouette(), let a = sil else { return nil }
+        let R = borderPt * scale
+        let pad = Int(R) + 2
+        let (d2, W, H) = outsideDist2(a.alpha, w: a.w, h: a.h, pad: pad)
+        var ring = [UInt8](repeating: 0, count: W * H)
+        for i in 0..<(W * H) {
+            let v = max(0, min(1, R + 0.5 - d2[i].squareRoot()))
+            ring[i] = UInt8(v * 255)
         }
-        return borderImg
+        guard let cg = cgImage(alpha: ring, w: W, h: H, tint) else { return nil }
+        let img = nsImage(cg)
+        borderImgs[key] = img
+        return img
     }
 
     private static func fillImage(_ color: NSColor) -> NSImage? {
@@ -1290,15 +1313,18 @@ enum ChargeBolt {
     }
 
     // border ring under, fill over — the fill is the body's own color, so
-    // what reads is the thin outside border; `alpha` crossfades the bolt
-    static func draw(fill color: NSColor, alpha: CGFloat, in rect: NSRect) {
-        guard alpha > 0.001, let border = borderImage() else { return }
+    // what reads is the thin outside border; `alpha` crossfades the bolt.
+    // `border` defaults to the pill's glass; the overlay passes its card
+    // color so the halo vanishes into the dark surface instead.
+    static func draw(fill color: NSColor, alpha: CGFloat, border borderColor: NSColor? = nil, in rect: NSRect) {
+        let halo = borderColor ?? border
+        guard alpha > 0.001, let haloImg = borderImage(halo) else { return }
         // the border bitmap carries pad px of margin, mapping to pad/scale
         // pt: expanded by that, its silhouette lands exactly on the rect,
         // ring hanging outside it
         let padPt = (borderPt * scale + 2) / scale
         let full = { (img: NSImage) in NSRect(origin: .zero, size: img.size) }
-        border.draw(in: rect.insetBy(dx: -padPt, dy: -padPt), from: full(border),
+        haloImg.draw(in: rect.insetBy(dx: -padPt, dy: -padPt), from: full(haloImg),
                     operation: .sourceOver, fraction: alpha,
                     respectFlipped: true, hints: nil)
         if let fill = fillImage(color) {
@@ -1477,7 +1503,10 @@ var batteryCache: (result: (pct: Int, charging: Bool)?, stamp: CFTimeInterval)?
 // never has to be the thing that notices.
 func invalidateBatteryState() {
     batteryCache = nil
-    DispatchQueue.main.async { tab.needsDisplay = true }
+    DispatchQueue.main.async {
+        tab.needsDisplay = true
+        if overlayShown { overlayView.needsDisplay = true }
+    }
 }
 
 func batteryLevel() -> (pct: Int, charging: Bool)? {
@@ -2376,16 +2405,21 @@ func setSessionLocked(_ locked: Bool) {
     guard locked != sessionLocked else { return }
     sessionLocked = locked
     if locked {
-        spring.stop()
-        tab.dragSlot = nil                  // a lock mid-drag kills the drag —
-                                            // otherwise dragSlot pins the glass open forever
-        closeExtension(instant: true)       // gone from the lock screen entirely
-        applyVisibility(false, animate: false)   // park instantly — no spring on the way out
-        releaseAttention()                        // drop any key/focus claim
-        strip.orderOut(nil)                       // gone from the lock screen entirely
+        hideOverlay()                         // the overlay never sits on the login screen
+        if PILL_ENABLED {
+            spring.stop()
+            tab.dragSlot = nil                // a lock mid-drag kills the drag —
+                                              // otherwise dragSlot pins the glass open forever
+            closeExtension(instant: true)     // gone from the lock screen entirely
+            applyVisibility(false, animate: false)   // park instantly — no spring on the way out
+            releaseAttention()                // drop any key/focus claim
+            strip.orderOut(nil)               // gone from the lock screen entirely
+        }
     } else {
-        strip.orderFrontRegardless()              // back on every space
-        scheduleUpdate()                          // re-derive hover state from the live cursor
+        if PILL_ENABLED {
+            strip.orderFrontRegardless()      // back on every space
+            scheduleUpdate()                  // re-derive hover state from the live cursor
+        }
     }
 }
 
@@ -3460,7 +3494,630 @@ func updateExtension(xr: CGFloat, y: CGFloat) {
 }
 
 relayoutExt(width: 0)   // parked: zero-width, faded, no slack
+
+// MARK: - the overlay (⌘⇧Space launcher)
+//
+// the front end now. ⌘⇧Space dims the whole screen and floats one cream
+// card in the middle: time, date, battery, the Night Shift strength
+// slider, and the three power actions — restart / sleep / shut down, the
+// destructive two behind native AppleScript confirmations. Escape, a
+// click on the dimmed desktop, or a session lock puts it away. the notch
+// pill is parked behind PILL_ENABLED = false — its machinery stays (it
+// works; the launcher replaced it), the daemon just never runs it.
+
+let PILL_ENABLED = false
+
+enum OverlayCard {
+    static let pad: CGFloat = 30
+    static let width: CGFloat = 540
+    static let timeH: CGFloat = 58       // 46pt SF Mono, ink-centered
+    static let dateH: CGFloat = 18
+    static let batteryH: CGFloat = 40
+    static let labelH: CGFloat = 14      // the NIGHT SHIFT small caps
+    static let sliderH: CGFloat = 34     // the pill's own track: 28.25 stadium, knob 28.25
+    static let buttonsH: CGFloat = 44
+    static let hintH: CGFloat = 14
+    static let gap: CGFloat = 16
+    static let tightGap: CGFloat = 6
+    static let radius: CGFloat = 24
+    static var height: CGFloat {
+        pad + timeH + tightGap + dateH + gap + batteryH + gap + labelH + tightGap
+            + sliderH + gap + buttonsH + gap + hintH + pad
+    }
+    static let buttonNames = ["Restart", "Sleep", "Shut Down"]
+}
+
+var overlayShown = false
+var overlaySnapshotMode = false    // SMALT_SNAPSHOT=2 renders the card bare, no dim
+var overlayDragSlider = false
+var overlayHoverButton: Int? = nil
+var overlayPressButton: Int? = nil
+var overlaySliderHover = false
+var overlayBatteryHovered = false
+var overlayKnobLatched = false     // the knob's first-hover wobble latch — fresh each open
+var overlayHapticStep = Int.min    // the drag ratchet
+var overlayFaceTarget: CGFloat = 0 // knob face: 0 = Night-Day icon, 1 = %
+
+// the overlay battery's crossfade state — the pill's drawBattery machinery,
+// ported; the springs mark the overlay instead of the parked tab
+var overlayBatteryInit = false
+var overlayBatteryShown = (charging: false, lpm: false)
+var overlayBoltAlpha: CGFloat = 0
+var overlayFillFrom = Theme.darkShell
+var overlayFillTo = Theme.darkShell
+var overlayFillBlend: CGFloat = 1
+var overlayBatteryPopTimer: Timer?
+var overlayBatteryPopV: CGFloat = 0
+
+final class OverlayLauncherView: NSView {
+    override var isFlipped: Bool { true }
+    override var acceptsFirstResponder: Bool { true }   // Escape lands here
+    override var wantsDefaultClipping: Bool { false }   // the shadow spills past the card
+
+    // the card + its rows, recomputed on demand — the layout is one column
+    // of rows, no state to go stale
+    var cardRect: NSRect {
+        let b = bounds
+        let h = OverlayCard.height
+        return NSRect(x: b.midX - OverlayCard.width / 2, y: b.midY - h / 2,
+                      width: OverlayCard.width, height: h)
+    }
+
+    func rows(card: NSRect) -> (time: NSRect, date: NSRect, battery: NSRect,
+                                label: NSRect, slider: NSRect, buttons: [NSRect]) {
+        var y = card.minY + OverlayCard.pad
+        let x = card.minX + OverlayCard.pad
+        let w = card.width - 2 * OverlayCard.pad
+        let time = NSRect(x: x, y: y, width: w, height: OverlayCard.timeH); y += OverlayCard.timeH + OverlayCard.tightGap
+        let date = NSRect(x: x, y: y, width: w, height: OverlayCard.dateH); y += OverlayCard.dateH + OverlayCard.gap
+        let batt = NSRect(x: x, y: y, width: w, height: OverlayCard.batteryH); y += OverlayCard.batteryH + OverlayCard.gap
+        let label = NSRect(x: x, y: y, width: w, height: OverlayCard.labelH); y += OverlayCard.labelH + OverlayCard.tightGap
+        let slider = NSRect(x: x, y: y, width: w, height: OverlayCard.sliderH); y += OverlayCard.sliderH + OverlayCard.gap
+        let bw = (w - 32) / 3
+        var buttons: [NSRect] = []
+        for i in 0..<3 {
+            buttons.append(NSRect(x: x + CGFloat(i) * (bw + 16), y: y,
+                                  width: bw, height: OverlayCard.buttonsH))
+        }
+        return (time, date, batt, label, slider, buttons)
+    }
+
+    func sliderValue() -> CGFloat { max(0, min(1, Theme.sliderDisplay)) }
+
+    // the pill's dark-skin helpers — the same widgets, ink pointed the other way
+    func overlayShellColor(_ lpm: Bool) -> NSColor { lpm ? Theme.darkShellLPM : Theme.darkShell }
+
+    func setSlider(_ v: CGFloat) {
+        let clamped = max(0, min(1, v))
+        Theme.sliderValue = clamped
+        Theme.sliderDisplay = clamped
+        Theme.nightOff = (clamped == 0)
+        NightShift.set(Float(clamped))
+        needsDisplay = true
+    }
+
+    // the pill's own M3 slider, horizontal, in the dark skin — full
+    // fidelity: quiet run / value run / knob face crossfading Night-Day ⇄ %,
+    // knob swell + first-hover wobble (the machine drives Theme.knobHover /
+    // Theme.knobPop), drag with the 50% detent and the haptic ratchet.
+    func drawOverlaySlider(in slot: NSRect) {
+        let v = max(0, min(1, Theme.sliderDisplay))
+        let slotHover = max(0, min(1, Theme.sliderHover))
+        let knobHover = max(0, min(1, Theme.knobHover))
+        let cy = slot.midY
+        let knobSize = max(18, Theme.sliderHandle * (1 + 0.08 * knobHover + 0.12 * Theme.knobPop))
+
+        // handle center travel: v=0 parks at the left, v=1 at the right
+        let xLeft = slot.minX + knobSize / 2
+        let xRight = slot.maxX - knobSize / 2
+        let hc = xLeft + (xRight - xLeft) * v
+
+        // track: one thick stadium the slot's full width — Theme.sliderTrack
+        // (28.25) tall, the pill's exact metric. the empty run is what lights
+        // at 0%: the value run hides entirely under the knob.
+        let zero = v < 0.005
+        let trackRect = NSRect(x: slot.minX, y: cy - Theme.sliderTrack / 2,
+                               width: slot.width, height: Theme.sliderTrack)
+        let stadium = NSBezierPath(roundedRect: trackRect, xRadius: Theme.sliderTrack / 2,
+                                   yRadius: Theme.sliderTrack / 2)
+        let quiet = zero
+            ? NSColor.white.withAlphaComponent(0.15 + 0.10 * slotHover)
+            : Theme.darkTrack
+        quiet.setFill()
+        stadium.fill()
+        // active run: FLAT-end fill from the track's left edge to the knob's
+        // center line, clipped to the stadium; hover brightens one step
+        if let ctx = NSGraphicsContext.current?.cgContext {
+            ctx.saveGState()
+            stadium.addClip()
+            lerp(Theme.darkValue, Theme.darkValueHover, slotHover).setFill()
+            NSBezierPath(rect: NSRect(x: trackRect.minX, y: trackRect.minY,
+                                      width: hc - trackRect.minX + 1,
+                                      height: trackRect.height)).fill()
+            ctx.restoreGState()
+        }
+
+        // knob: cream disc on the dark card — the inversion of the pill's
+        // dark disc on cream
+        let handle = NSRect(x: hc - knobSize / 2, y: cy - knobSize / 2,
+                            width: knobSize, height: knobSize)
+        Theme.darkText.setFill()
+        NSBezierPath(ovalIn: handle).fill()
+
+        // the face: implode/explode — Night-Day glyph ⇄ %, the pill's own
+        // theater, in the knob ink (dark on cream)
+        let face = max(0, min(1, Theme.sliderFace))
+        let edgeAlpha: (CGFloat) -> CGFloat = { min(1, $0 * 4) }
+        let pct = Int((Theme.sliderValue * 100).rounded())
+
+        if face > 0 {
+            drawText("\(pct)", font: .tabular(KnobFace.base * face, .semibold),
+                     color: Theme.knob.withAlphaComponent(edgeAlpha(face)), in: handle)
+        }
+
+        if face < 1 {
+            let f = 1 - face
+            let size = (knobSize - 6) * f
+            SVGIcon.draw(.nightDay, color: Theme.knob, inRect: NSRect(x: handle.midX - size / 2,
+                                                                      y: handle.midY - size / 2,
+                                                                      width: size, height: size),
+                         fraction: edgeAlpha(f))
+        }
+    }
+
+    // the pill's battery painter with its full state machine — plug/unplug
+    // bolt crossfade, LPM amber crossfade, hover: the charge brightens one
+    // step toward cream (the dark skin's "deepen"), click: Low Power Mode
+    // toggle + the underdamped pop.
+    func drawOverlayBattery(in row: NSRect) {
+        let real = batteryLevel()
+        let lpm = ProcessInfo.processInfo.isLowPowerModeEnabled
+        let charging = real?.charging ?? false
+        guard let pct = real?.pct else { return }
+
+        if !overlayBatteryInit {
+            overlayBatteryInit = true
+            overlayBatteryShown = (charging: charging, lpm: lpm)
+            overlayBoltAlpha = charging ? 1 : 0
+            overlayFillFrom = overlayShellColor(lpm); overlayFillTo = overlayFillFrom; overlayFillBlend = 1
+        } else {
+            if charging != overlayBatteryShown.charging {
+                overlayBatteryShown.charging = charging
+                overlayBoltSpring.start()
+            }
+            if lpm != overlayBatteryShown.lpm {
+                overlayFillFrom = lerp(overlayFillFrom, overlayFillTo, overlayFillBlend)
+                overlayFillTo = overlayShellColor(lpm)
+                overlayFillBlend = 0
+                overlayBatteryShown.lpm = lpm
+                overlayFillSpring.start()
+            }
+        }
+        overlayBoltSpring.start()
+
+        let hover = max(0, min(1, Theme.batteryHover))
+        let fillFrom = lerp(overlayFillFrom, Theme.darkShellHover, hover)
+        let fillTo = lerp(overlayFillTo, Theme.darkShellHover, hover)
+
+        // the glyph + pct (+ charging estimate) centered as one group
+        let detail = batteryDetail()
+        var detailStr: String? = nil
+        if let d = detail, charging, pct < 100, d.toFull > 0 {
+            let hrs = d.toFull / 60, rem = d.toFull % 60
+            detailStr = hrs > 0 ? "\(hrs)h \(rem)m to full" : "\(rem)m to full"
+        }
+        let glyphW: CGFloat = 46, slotH: CGFloat = 34
+        let pctW: CGFloat = 64, detailW: CGFloat = 130
+        let groupW = glyphW + 10 + pctW + (detailStr != nil ? 10 + detailW : 0)
+        let gx = row.midX - groupW / 2
+        let slot = NSRect(x: gx, y: row.midY - slotH / 2, width: glyphW, height: slotH)
+        if let ctx = NSGraphicsContext.current?.cgContext {
+            ctx.saveGState()
+            ctx.translateBy(x: slot.midX, y: slot.midY)
+            ctx.scaleBy(x: 1.4, y: 1.4)
+            ctx.translateBy(x: -slot.midX, y: -slot.midY)
+            Battery.draw(pct: pct, boltAlpha: overlayBoltAlpha,
+                         fillFrom: fillFrom, fillTo: fillTo, fillBlend: overlayFillBlend, in: slot)
+            ctx.restoreGState()
+        }
+        drawText("\(pct)%", font: .tabular(18, .semibold), color: Theme.darkText,
+                 in: NSRect(x: gx + glyphW + 10, y: row.minY, width: pctW, height: row.height))
+        if let detailStr {
+            drawText(detailStr, font: NSFont.systemFont(ofSize: 12, weight: .regular),
+                     color: Theme.darkMuted,
+                     in: NSRect(x: gx + glyphW + 10 + pctW, y: row.minY, width: detailW, height: row.height))
+        }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        // the dim: the whole screen, one dark pass. the card floats above it.
+        if !overlaySnapshotMode {
+            NSColor.black.withAlphaComponent(0.55).setFill()
+            bounds.fill()
+        }
+
+        let card = cardRect
+        let path = NSBezierPath(roundedRect: card, xRadius: OverlayCard.radius,
+                                yRadius: OverlayCard.radius)
+        strokeFakeShadow(path)
+        Theme.darkGlass.setFill()
+        path.fill()
+        Theme.darkStroke.setStroke()
+        path.lineWidth = 1
+        path.stroke()
+
+        let r = rows(card: card)
+
+        // the time — one fused HH:MM block, cream on the dark glass
+        let now = Date()
+        let cal = Calendar.current
+        let h = String(format: "%02d", cal.component(.hour, from: now))
+        let m = String(format: "%02d", cal.component(.minute, from: now))
+        drawText("\(h):\(m)", font: NSFont.monospacedSystemFont(ofSize: 46, weight: .regular),
+                 color: Theme.darkText, in: r.time)
+
+        // the date, quiet ink
+        let df = DateFormatter()
+        df.dateFormat = "EEEE d MMM"
+        drawText(df.string(from: now), font: NSFont.systemFont(ofSize: 13, weight: .medium),
+                 color: Theme.darkMuted, in: r.date)
+
+        drawOverlayBattery(in: r.battery)
+
+        // the Night Shift slider — the pill's widget, full interactivity
+        drawText("NIGHT SHIFT", font: NSFont.systemFont(ofSize: 10, weight: .semibold),
+                 color: Theme.darkMuted, in: r.label, kern: 1.5)
+        drawOverlaySlider(in: r.slider)
+
+        // the power chips — Restart · Sleep · Shut Down
+        for (i, br) in r.buttons.enumerated() {
+            let hovered = overlayHoverButton == i
+            let pressed = overlayPressButton == i
+            let chip = NSBezierPath(roundedRect: br, xRadius: 12, yRadius: 12)
+            let fill: CGFloat = pressed ? 0.26 : hovered ? 0.14 : 0.06
+            NSColor.white.withAlphaComponent(fill).setFill()
+            chip.fill()
+            NSColor.white.withAlphaComponent(0.14).setStroke()
+            chip.lineWidth = 1
+            chip.stroke()
+            drawText(OverlayCard.buttonNames[i],
+                     font: NSFont.systemFont(ofSize: 13, weight: .semibold),
+                     color: Theme.darkText, in: br)
+        }
+
+        // the affordance hint
+        drawText("⌘⇧Space toggles · esc or click outside dismisses · battery toggles Low Power Mode",
+                 font: NSFont.systemFont(ofSize: 11, weight: .regular),
+                 color: Theme.darkMuted.withAlphaComponent(0.8),
+                 in: NSRect(x: card.minX, y: r.buttons.last!.maxY + OverlayCard.gap,
+                            width: card.width, height: OverlayCard.hintH))
+    }
+
+    // MARK: events
+
+    override func mouseDown(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        let card = cardRect
+        guard card.contains(p) else { hideOverlay(); return }   // the dim: dismiss
+        let r = rows(card: card)
+        if r.slider.insetBy(dx: -6, dy: -8).contains(p) {
+            // the pill's drag: face to %, ratchet armed at the grab point
+            overlayDragSlider = true
+            overlayFaceTarget = 1
+            overlayFaceSpring.start()
+            overlayHapticStep = Int((min(1, max(0, (p.x - r.slider.minX) / r.slider.width)) * 20).rounded(.down))
+            overlaySetSlider(from: p)
+            return
+        }
+        if r.battery.contains(p) {
+            // the battery's click: the Low Power Mode toggle — the pill's
+            // own rungs (passwordless sudo → self-installing rule → admin
+            // prompt), run off-main so the card never freezes mid-toggle
+            fireOverlayBatteryPop()
+            NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+            DispatchQueue.global().async {
+                setLowPowerMode(!ProcessInfo.processInfo.isLowPowerModeEnabled)
+            }
+            return
+        }
+        for (i, br) in r.buttons.enumerated() where br.contains(p) {
+            overlayPressButton = i
+            needsDisplay = true
+            return
+        }
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard overlayDragSlider else { return }
+        let p = convert(event.locationInWindow, from: nil)
+        overlaySetSlider(from: p)
+        overlaySliderKnob.sync()   // the cursor IS the knob mid-drag
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        if overlayDragSlider {
+            overlayDragSlider = false
+            overlayHapticStep = Int.min          // fresh ratchet next grab
+            overlayFaceTarget = 0                // back to the Night-Day icon
+            overlayFaceSpring.start()
+        }
+        guard let press = overlayPressButton else { return }
+        overlayPressButton = nil
+        needsDisplay = true
+        let p = convert(event.locationInWindow, from: nil)
+        let r = rows(card: cardRect)
+        guard r.buttons[press].contains(p) else { return }
+        switch press {
+        case 0: hideOverlay(); confirmThen("Restart your Mac now?", "Restart",
+                                          "tell application \"System Events\" to restart")
+        case 1: hideOverlay(); sleepSystem()
+        case 2: hideOverlay(); confirmThen("Shut down the Mac now?", "Shut Down",
+                                           "tell application \"System Events\" to shut down")
+        default: break
+        }
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        let r = rows(card: cardRect)
+        var changed = false
+        let hb = r.buttons.firstIndex { $0.contains(p) }
+        if hb != overlayHoverButton { overlayHoverButton = hb; changed = true }
+        let sh = r.slider.insetBy(dx: -6, dy: -8).contains(p)
+        if sh != overlaySliderHover { overlaySliderHover = sh; changed = true }
+        let bh = r.battery.contains(p)
+        if bh != overlayBatteryHovered { overlayBatteryHovered = bh; changed = true }
+        overlaySliderKnob.sync()   // position-driven knob hover + the wobble latch
+        if changed {
+            needsDisplay = true
+            window?.invalidateCursorRects(for: self)
+        }
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        if overlayHoverButton != nil || overlaySliderHover || overlayBatteryHovered {
+            overlayHoverButton = nil; overlaySliderHover = false; overlayBatteryHovered = false
+            needsDisplay = true
+        }
+    }
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 53 { hideOverlay(); return }        // esc
+        super.keyDown(with: event)
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: bounds,
+            options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways], owner: self))
+    }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .arrow)
+        let r = rows(card: cardRect)
+        for br in r.buttons { addCursorRect(br, cursor: .pointingHand) }
+        addCursorRect(r.slider.insetBy(dx: -6, dy: -8), cursor: .pointingHand)
+        addCursorRect(r.battery, cursor: .pointingHand)   // the battery: the LPM toggle
+    }
+}
+
+let overlayView = OverlayLauncherView(frame: NSRect(origin: .zero,
+    size: mainScreen()?.frame.size ?? NSSize(width: 800, height: 600)))
+
+// the overlay's widget springs — the pill's own ChaseTimers, ported; each
+// set marks the overlay instead of the parked tab
+let overlayValueSpring = ChaseTimer(
+    get: { Theme.sliderDisplay },
+    set: { Theme.sliderDisplay = $0; overlayView.needsDisplay = true },
+    target: { Theme.sliderValue }, rate: 0.22, epsilon: 0.0004)
+let overlayFaceSpring = ChaseTimer(
+    get: { Theme.sliderFace },
+    set: { Theme.sliderFace = $0; overlayView.needsDisplay = true },
+    target: { overlayFaceTarget }, rate: 0.25, epsilon: 0.002)
+let overlayHoverSpring = ChaseTimer(
+    get: { Theme.sliderHover },
+    set: { Theme.sliderHover = $0; overlayView.needsDisplay = true },
+    target: { overlaySliderHover && !overlayDragSlider ? 1 : 0 }, rate: 0.22, epsilon: 0.004)
+let overlayBatteryHoverSpring = ChaseTimer(
+    get: { Theme.batteryHover },
+    set: { Theme.batteryHover = $0; overlayView.needsDisplay = true },
+    target: { overlayBatteryHovered ? 1 : 0 }, rate: 0.7, epsilon: 0.01)
+let overlayBoltSpring = ChaseTimer(
+    get: { overlayBoltAlpha },
+    set: { overlayBoltAlpha = $0; overlayView.needsDisplay = true },
+    target: { overlayBatteryShown.charging ? 1 : 0 }, rate: 0.2, epsilon: 0.01)
+let overlayFillSpring = ChaseTimer(
+    get: { overlayFillBlend },
+    set: { overlayFillBlend = $0; overlayView.needsDisplay = true },
+    target: { 1 }, rate: 0.2, epsilon: 0.005)
+
+// the same KnobHoverMachine the pill's sliders run — swell + wobble + haptics
+let overlaySliderKnob = KnobHoverMachine(
+    hovered: { overlayKnobHovered() },
+    read: { Theme.knobHover },
+    write: { Theme.knobHover = $0; overlayView.needsDisplay = true },
+    popWrite: { Theme.knobPop = $0; overlayView.needsDisplay = true },
+    latch: { overlayKnobLatched },
+    setLatch: { overlayKnobLatched = true },
+    haptic: { NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now) })
+
+// geometry + cursor helpers for the machine
+func overlaySliderRect() -> NSRect {
+    overlayView.rows(card: overlayView.cardRect).slider
+}
+
+func overlayCursorPoint() -> NSPoint? {
+    guard let w = overlayView.window else { return nil }
+    let p = w.convertFromScreen(NSRect(origin: NSEvent.mouseLocation, size: .zero)).origin
+    return overlayView.convert(p, from: nil)
+}
+
+func overlayKnobHovered() -> Bool {
+    guard overlayShown, let p = overlayCursorPoint() else { return false }
+    let r = overlaySliderRect()
+    let knobSize = max(18, Theme.sliderHandle
+        * (1 + 0.08 * max(0, min(1, Theme.knobHover)) + 0.12 * Theme.knobPop))
+    let v = max(0, min(1, Theme.sliderDisplay))
+    let hc = r.minX + knobSize / 2 + (r.width - knobSize) * v
+    return abs(p.x - hc) <= Theme.sliderHandle / 2 + 3
+        && abs(p.y - r.midY) <= Theme.sliderHandle / 2 + 3
+}
+
+// the pill's drag writer, ported: cursor → value, the 50% detent, and the
+// levelChange ratchet (one tick per 5% crossed during a drag)
+func overlaySetSlider(from p: NSPoint) {
+    let r = overlaySliderRect()
+    var v = min(1, max(0, (p.x - r.minX) / r.width))
+    if abs(v - 0.5) < 0.035 { v = 0.5 }   // the 50% detent: within a knob's pull, snap
+    Theme.sliderValue = v
+    Theme.sliderDisplay = v               // the cursor IS the display mid-drag
+    Theme.nightOff = (v == 0)
+    NightShift.set(Float(v))
+    overlayValueSpring.stop()
+    let step = Int((v * 20).rounded(.down))
+    if step != overlayHapticStep {
+        overlayHapticStep = step
+        NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .now)
+    }
+    overlayView.needsDisplay = true
+}
+
+// the battery's toggle pop — the knobs' own underdamped wobble
+func fireOverlayBatteryPop() {
+    Theme.batteryPop = 1
+    overlayBatteryPopV = 0
+    guard overlayBatteryPopTimer == nil else { return }
+    let t = Timer(timeInterval: 1.0 / 120.0, repeats: true) { _ in
+        let K: CGFloat = 420, C: CGFloat = 14, dt: CGFloat = 1.0 / 120.0
+        overlayBatteryPopV += (-K * Theme.batteryPop - C * overlayBatteryPopV) * dt
+        Theme.batteryPop += overlayBatteryPopV * dt
+        if abs(Theme.batteryPop) < 0.002, abs(overlayBatteryPopV) < 0.02 {
+            Theme.batteryPop = 0
+            overlayBatteryPopTimer?.invalidate(); overlayBatteryPopTimer = nil
+        }
+        overlayView.needsDisplay = true
+    }
+    RunLoop.main.add(t, forMode: .common)
+    overlayBatteryPopTimer = t
+}
+
+let overlayWindow: NSWindow = {
+    let f = mainScreen()?.frame ?? NSRect(x: 0, y: 0, width: 800, height: 600)
+    let win = OverlayPanel(contentRect: f,
+                           styleMask: [.borderless, .nonactivatingPanel],
+                           backing: .buffered, defer: false)
+    win.backgroundColor = .clear
+    win.isOpaque = false
+    win.hasShadow = false
+    win.level = NSWindow.Level(rawValue: 21)
+    win.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+    win.ignoresMouseEvents = false
+    win.alphaValue = 0
+    win.contentView = overlayView
+    return win
+}()
+
+func showOverlay() {
+    guard !overlayShown else { return }
+    overlayShown = true
+    overlayKnobLatched = false           // fresh open, fresh first-hover wobble
+    overlayValueSpring.start()           // adopt the live Night Shift value
+    overlayFaceSpring.start()
+    if let s = mainScreen() { overlayWindow.setFrame(s.frame, display: false) }
+    overlayWindow.alphaValue = 0
+    overlayWindow.makeKeyAndOrderFront(nil)
+    overlayView.window?.makeFirstResponder(overlayView)   // esc lands on the view
+    overlayWindow.invalidateCursorRects(for: overlayView)
+    NSAnimationContext.runAnimationGroup { ctx in
+        ctx.duration = 0.18
+        overlayWindow.animator().alphaValue = 1
+    }
+}
+
+func hideOverlay() {
+    guard overlayShown else { return }
+    overlayShown = false
+    overlayDragSlider = false
+    overlayPressButton = nil
+    NSAnimationContext.runAnimationGroup({ ctx in
+        ctx.duration = 0.15
+        overlayWindow.animator().alphaValue = 0
+    }, completionHandler: {
+        guard !overlayShown else { return }   // re-shown mid-fade
+        overlayWindow.orderOut(nil)
+    })
+}
+
+func toggleOverlay() {
+    overlayShown ? hideOverlay() : showOverlay()
+}
+
+// restart / shut down behind a NATIVE AppleScript confirmation (NSAlert
+// under the hood). osascript treats each -e as one script LINE — the
+// dialog rides one line, the action the next. Cancel (or 30s away) does
+// nothing. first ever use asks a one-time System Events Automation grant.
+func confirmThen(_ message: String, _ button: String, _ action: String) {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+    p.arguments = [
+        "-e",
+        "display dialog \"\(message)\" with title \"smalt\" buttons {\"Cancel\", \"\(button)\"} " +
+            "default button \"\(button)\" cancel button \"Cancel\" with icon caution giving up after 30",
+        "-e",
+        action,
+    ]
+    try? p.run()
+}
+
+// the hotkey: ⌘⇧Space, registered system-wide via Carbon — no permissions,
+// no event tap. (⌘Space alone stays Spotlight's; the shift lands the
+// combo on us.)
+var overlayHotKeyRef: EventHotKeyRef?
+
+func installOverlayHotKey() {
+    var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+    let handler: EventHandlerUPP = { _, _, _ in
+        DispatchQueue.main.async { toggleOverlay() }
+        return noErr
+    }
+    InstallEventHandler(GetApplicationEventTarget(), handler, 1, &spec, nil, nil)
+    let status = RegisterEventHotKey(UInt32(kVK_Space), UInt32(cmdKey | shiftKey),
+                                     EventHotKeyID(signature: OSType(0x53_4D_4C_54) /* 'SMLT' */, id: 1),
+                                     GetApplicationEventTarget(), 0, &overlayHotKeyRef)
+    if status != noErr {
+        FileHandle.standardError.write(Data("hotkey registration failed: \(status) — is ⌘⇧Space taken by another app?\n".utf8))
+    }
+    dbg("hotkey registration status: \(status)")
+}
+
 // MARK: - daemon
+
+// one-shot diagnostic (SMALT_SNAPSHOT=2): render the overlay card bare —
+// no dim — into a png and exit, same deal as snapshotStrip.
+func snapshotOverlay() {
+    let pad: CGFloat = 24
+    let W = OverlayCard.width + pad * 2
+    let H = OverlayCard.height + pad * 2
+    let scale: CGFloat = 2
+    let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(W * scale),
+        pixelsHigh: Int(H * scale), bitsPerSample: 8, samplesPerPixel: 4,
+        hasAlpha: true, isPlanar: false, colorSpaceName: .calibratedRGB,
+        bytesPerRow: 0, bitsPerPixel: 0)!
+    let cg = NSGraphicsContext(bitmapImageRep: rep)!.cgContext
+    cg.saveGState()
+    cg.translateBy(x: pad * scale, y: (H - pad) * scale)   // flipped coords, y down
+    cg.scaleBy(x: scale, y: -scale)
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = NSGraphicsContext(cgContext: cg, flipped: true)
+    overlayView.setFrameSize(NSSize(width: W, height: H))
+    overlayView.draw(overlayView.bounds)
+    NSGraphicsContext.restoreGraphicsState()
+    cg.restoreGState()
+    try? rep.representation(using: .png, properties: [:])!
+        .write(to: URL(fileURLWithPath: "/tmp/smalt-overlay.png"))
+    exit(0)
+}
 
 // one-shot diagnostic (SMALT_SNAPSHOT=1): render the strip's widgets into
 // a png and exit — lets the agent see exactly what the glass draws without
@@ -3532,7 +4189,11 @@ func snapshotStrip() {
     exit(0)
 }
 
-func runDaemon() -> Never {
+func runDaemon(showOverlayNow: Bool = false) -> Never {
+    if ProcessInfo.processInfo.environment["SMALT_SNAPSHOT"] == "2" {
+        overlaySnapshotMode = true
+        snapshotOverlay()
+    }
     if ProcessInfo.processInfo.environment["SMALT_SNAPSHOT"] != nil { snapshotStrip() }
     // NSApplication is required for workspace/screen notifications to fire.
     // accessory = no dock icon.
@@ -3576,7 +4237,7 @@ func runDaemon() -> Never {
     }
     hwSync.setEventHandler {
         defer { scheduleHwSync() }
-        guard tab.dragSlot == nil else { return }   // mid-drag: we ARE the writer
+        guard tab.dragSlot == nil, !overlayDragSlider else { return }   // mid-drag: we ARE the writer
         if NightShift.available {
             let off = NightShift.isOff()
             let s = off ? CGFloat(0) : CGFloat(NightShift.get())
@@ -3584,20 +4245,25 @@ func runDaemon() -> Never {
                 Theme.nightOff = off
                 Theme.sliderValue = s
                 if stripVisible { tab.beginValueSpring() }
-                else { Theme.sliderDisplay = s }
+                else { Theme.sliderDisplay = s; overlayValueSpring.start() }
+                if overlayShown { overlayView.needsDisplay = true }
             }
         }
     }
     scheduleHwSync()
     hwSync.resume()
 
-    // the window is docked from this moment on — it owns the screen edge
-    // while on stage (that's the cursor fix); only the glass ever moves.
-    // parked at launch = ordered out: an ordered-in window with off-screen
-    // content is what the lock-screen zoom reveals.
-    strip.setFrame(stripWindowFrame(), display: true)
-    setGlassX(glassX(docked: false))   // glass parked off-screen at launch
-    applyVisibility(false, animate: false)   // parked = click-through at the edge → window OUT
+    // the pill is parked (PILL_ENABLED = false) — the overlay is the front
+    // end. when PILL_ENABLED returns, all of this comes back unchanged.
+    if PILL_ENABLED {
+        // the window is docked from this moment on — it owns the screen edge
+        // while on stage (that's the cursor fix); only the glass ever moves.
+        // parked at launch = ordered out: an ordered-in window with off-screen
+        // content is what the lock-screen zoom reveals.
+        strip.setFrame(stripWindowFrame(), display: true)
+        setGlassX(glassX(docked: false))   // glass parked off-screen at launch
+        applyVisibility(false, animate: false)   // parked = click-through at the edge → window OUT
+    }
 
     // the summon. a global mouse monitor — not an event tap — so there is
     // nothing to intercept and nothing to grant. the cursor entering the
@@ -3605,7 +4271,10 @@ func runDaemon() -> Never {
     // pill (or past its band) springs it away. hysteresis between the two
     // lines means edge jitter can't flicker it — and the spring retargets,
     // so even fast in-out is a smooth reversal, never a glitch.
-    NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged, .otherMouseDragged]) { _ in
+    // the summon monitor + the attention poll — PILL machinery, parked with
+    // the pill. the overlay is event-driven by the hotkey, not the cursor.
+    if PILL_ENABLED {
+        NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged, .otherMouseDragged]) { _ in
         guard !sessionLocked else { return }       // lock screen: the edge is nobody's
         guard tab.dragSlot == nil else { return }  // mid-drag: the cursor is the knob —
                                                    // nobody summons or collapses mid-drag
@@ -3629,18 +4298,25 @@ func runDaemon() -> Never {
         case false: applyVisibility(false)
         case nil:   break
         }
+        }   // — the monitor closure
     }
 
     let wnc = NSWorkspace.shared.notificationCenter
     _ = [
-        wnc.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main) { _ in scheduleUpdate() },
-        wnc.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { _ in scheduleUpdate() },
-        wnc.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main) { _ in scheduleUpdate() },
+        // space/app transitions re-evaluate the pill's hover state (parked with it)
+        NSWorkspace.activeSpaceDidChangeNotification, NSWorkspace.didActivateApplicationNotification,
+        NSWorkspace.didTerminateApplicationNotification,
+    ].filter { _ in PILL_ENABLED }.forEach { name in
+        wnc.addObserver(forName: name, object: nil, queue: .main) { _ in scheduleUpdate() }
+    }
+    _ = [
         // lock/unlock: screen lock comes via distributed notifications, fast
         // user switching via the session lifecycle — cover both.
-        wnc.addObserver(forName: NSWorkspace.sessionDidResignActiveNotification, object: nil, queue: .main) { _ in setSessionLocked(true) },
-        wnc.addObserver(forName: NSWorkspace.sessionDidBecomeActiveNotification, object: nil, queue: .main) { _ in setSessionLocked(false) },
-    ]
+        (NSWorkspace.sessionDidResignActiveNotification, true),
+        (NSWorkspace.sessionDidBecomeActiveNotification, false),
+    ].forEach { name, lock in
+        wnc.addObserver(forName: name, object: nil, queue: .main) { _ in setSessionLocked(lock) }
+    }
     let dnc = DistributedNotificationCenter.default()
     dnc.addObserver(forName: NSNotification.Name("com.apple.screenIsLocked"), object: nil, queue: .main) { _ in setSessionLocked(true) }
     dnc.addObserver(forName: NSNotification.Name("com.apple.screenIsUnlocked"), object: nil, queue: .main) { _ in setSessionLocked(false) }
@@ -3661,30 +4337,34 @@ func runDaemon() -> Never {
         forName: NSApplication.didChangeScreenParametersNotification,
         object: nil, queue: .main
     ) { _ in
-        closeExtension(instant: true)                   // geometry changed — don't ride it out
-        updateStrip()
-        applyVisibility(stripVisible, animate: false)   // snap to the new geometry, don't slide
+        if PILL_ENABLED {
+            closeExtension(instant: true)                   // geometry changed — don't ride it out
+            updateStrip()
+            applyVisibility(stripVisible, animate: false)   // snap to the new geometry, don't slide
+        }
+        // the overlay: re-cover the new main screen, redraw on its geometry
+        if let s = mainScreen() {
+            overlayView.setFrameSize(s.frame.size)
+            overlayWindow.setFrame(s.frame, display: false)
+            overlayView.needsDisplay = true
+        }
     }
 
-    // widgets tick — the clock is minute-grade, a 10s repaint is plenty
-    // (and cheap: the window only repaints on demand). hidden glass doesn't
-    // repaint at all — the spring marks needsDisplay every frame on the way
-    // out anyway, so the reveal is never stale.
-    Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { _ in
-        guard stripVisible else { return }
-        strip.contentView?.needsDisplay = true
+    // the overlay's tick: 1s — clock/date refresh, and a lock-screen
+    // self-heal (the overlay must never sit on top of the login screen)
+    Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
+        guard overlayShown else { return }
+        if loginWindowOnScreen() { hideOverlay(); return }
+        overlayView.needsDisplay = true
     }
+
+    // the hotkey — ⌘⇧Space, system-wide, no permissions
+    installOverlayHotKey()
+    if showOverlayNow { showOverlay() }
 
     // the attention engine — the poll that drives the whole hover state
-    // machine. the global monitor stays as the fast path for real mouse
-    // moves, but the state itself is POSITION-driven here: summon, hide,
-    // and attention all follow the cursor whether or not an event made it
-    // to the monitor (programmatic warps, missed coalesced events, etc).
-    // cursor on the glass → take activation + key (arrow is then guaranteed:
-    // the active app's cursor rects can't be overridden by a background
-    // redraw); cursor off the glass → focus hands straight back. cmd is
-    // re-checked here too, because while smalt is active its own window
-    // swallows mouse events — the global monitor goes quiet.
+    // machine. PILL machinery, parked with the pill.
+    if PILL_ENABLED {
     Timer.scheduledTimer(withTimeInterval: 1 / 30, repeats: true) { _ in
         // lock ground truth. the flash budget: a glass that's on stage at
         // lock-press (hovering, or mid-spring) is what rides the zoom — so
@@ -3731,12 +4411,14 @@ func runDaemon() -> Never {
         // the extension — position-driven off the same tick (see updateExtension)
         updateExtension(xr: c.xr, y: c.y)
     }
+    }   // — PILL_ENABLED
 
     // low power mode toggles repaint the battery instantly
     NotificationCenter.default.addObserver(
         forName: NSNotification.Name("NSProcessInfoPowerStateDidChangeNotification"), object: nil, queue: .main
     ) { _ in
         strip.contentView?.needsDisplay = true
+        if overlayShown { overlayView.needsDisplay = true }
     }
 
     app.run() // full app run loop — runs the monitors and notifications
@@ -3859,14 +4541,14 @@ func cmdStatus() {
     print("process:  \(running ? "running" : "not running")")
 
     if running {
-        print("pill:     up — cream glass, mid-right edge (summon zone: \(Int(REVEAL_WIDTH))px)")
+        print("overlay:  armed — ⌘⇧Space dims the screen and floats the card")
     } else if loaded {
-        print("pill:     down — launchd is retrying; check \(errLog)")
+        print("overlay:  down — launchd is retrying; check \(errLog)")
         if let tail = try? String(contentsOfFile: errLog, encoding: .utf8).suffix(200) {
             print("log:      \(tail.trimmingCharacters(in: .whitespacesAndNewlines))")
         }
     } else {
-        print("pill:     off (starts again at next login)")
+        print("overlay:  off (starts again at next login)")
     }
 }
 
@@ -3874,6 +4556,7 @@ func cmdStatus() {
 
 switch CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "run" {
 case "run":              runDaemon()
+case "overlay":          runDaemon(showOverlayNow: true)   // daemon + open the card now
 case "on", "enable":     cmdOn()
 case "off", "disable":   cmdOff()
 case "status":           cmdStatus()
@@ -3883,7 +4566,8 @@ default:
     print("""
     usage: smalt [command]
 
-      (none)          daemon mode — the pill (what launchd runs)
+      (none)          daemon mode — ⌘⇧Space toggles the overlay (what launchd runs)
+      overlay         daemon + open the overlay card immediately
       on, enable      start the daemon
       off, disable    stop the daemon (starts again at next login)
       status          installed / loaded / running

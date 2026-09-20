@@ -39,7 +39,7 @@ mkdir -p "$HOME/.local/bin"
 mkdir -p "$ASSET_DIR"
 for asset in "${SVG_ASSETS[@]}"; do cp "icons/$asset.svg" "$ASSET_DIR/"; done
 # build straight to the install target — nothing lands in the repo folder
-swiftc -O -o "$BIN_LOCAL" main.swift -framework AppKit -framework QuartzCore -framework IOBluetooth -F /System/Library/PrivateFrameworks -framework CoreBrightness
+swiftc -O -o "$BIN_LOCAL" main.swift -framework AppKit -framework QuartzCore -framework IOBluetooth -framework Carbon -F /System/Library/PrivateFrameworks -framework CoreBrightness
 codesign --force --sign "$IDENTITY" "$BIN_LOCAL"
 if [[ "$IDENTITY" != "-" ]]; then echo "signed (cobalt-dev)"; fi
 
@@ -82,7 +82,7 @@ echo
 echo "installed: $BIN_LOCAL"
 echo "launchd:   $LABEL — starts at login, restarts on crash, logs: /tmp/$NAME.err"
 echo
-echo "permissions: none — the reveal is a global mouse monitor, not an event tap"
+echo "permissions: none — the hotkey is a Carbon registration, no event tap"
 echo 'battery click: toggles Low Power Mode — passwordless rule auto-installed on'
 echo '  first ./install.sh (sudo ./enable-lpm.sh remove undoes it; ./enable-lpm.sh re-adds it)'
-echo "try it: fullscreen an app — the strip hides; move the cursor to the top edge — it slides down"
+echo "try it: press ⌘⇧Space — the screen dims and the card floats in; esc puts it away"
