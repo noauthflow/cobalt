@@ -4093,6 +4093,49 @@ func toggleOverlay() {
     overlayShown ? hideOverlay() : showOverlay()
 }
 
+// tap vs hold for the hotkey. the Carbon registration only ever sees the
+// PRESS — so the release is polled: CGEventSource.keyState, the same
+// permission-free source family cmdHeld() reads. the grammar:
+//
+//   tap   → toggle (a press on a hidden card shows it and it STAYS;
+//            another tap hides it again)
+//   hold  → peek (the card appears on press and collapses on release)
+//
+// a press while the card is already up defers the decision to the release:
+// a quick tap hides it, a long hold just peeks and collapses either way.
+// key-repeat hotkey events land while a session is live and are ignored —
+// the session is keyed to the one physical key-down.
+var overlayHotKeySession: (start: Date, wasVisible: Bool)?
+var overlayHotKeyReleaseTimer: Timer?
+let overlayHotKeyTapThreshold: TimeInterval = 0.3
+
+func overlayHotKeyDown() {
+    guard overlayHotKeySession == nil else { return }   // auto-repeat mid-hold
+    let wasVisible = overlayShown
+    if !wasVisible { showOverlay() }
+    overlayHotKeySession = (Date(), wasVisible)
+    overlayHotKeyReleaseTimer?.invalidate()
+    overlayHotKeyReleaseTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { _ in
+        guard let session = overlayHotKeySession else {
+            overlayHotKeyReleaseTimer?.invalidate()
+            overlayHotKeyReleaseTimer = nil
+            return
+        }
+        guard !CGEventSource.keyState(.hidSystemState, key: UInt16(kVK_Space)) else { return }
+        overlayHotKeyReleaseTimer?.invalidate()
+        overlayHotKeyReleaseTimer = nil
+        let held = Date().timeIntervalSince(session.start)
+        overlayHotKeySession = nil
+        // quick tap on a card that was already up → the toggle-off; anything
+        // else that ends a session collapses the card (long hold, or the
+        // tap-open that a second tap closes)
+        if session.wasVisible || held >= overlayHotKeyTapThreshold {
+            hideOverlay()
+        }
+        // quick tap on a hidden-before card: the show from keyDown stands
+    }
+}
+
 // restart / shut down behind a NATIVE AppleScript confirmation (NSAlert
 // under the hood). osascript treats each -e as one script LINE — the
 // dialog rides one line, the action the next. Cancel (or 30s away) does
@@ -4118,7 +4161,7 @@ var overlayHotKeyRef: EventHotKeyRef?
 func installOverlayHotKey() {
     var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
     let handler: EventHandlerUPP = { _, _, _ in
-        DispatchQueue.main.async { toggleOverlay() }
+        DispatchQueue.main.async { overlayHotKeyDown() }
         return noErr
     }
     InstallEventHandler(GetApplicationEventTarget(), handler, 1, &spec, nil, nil)
@@ -4606,7 +4649,8 @@ default:
     print("""
     usage: smalt [command]
 
-      (none)          daemon mode — ⌘⇧Space toggles the overlay (what launchd runs)
+      (none)          daemon mode — ⌘⇧Space: tap toggles the overlay, hold peeks it
+                      (collapses on release) — what launchd runs
       overlay         daemon + open the overlay card immediately
       on, enable      start the daemon
       off, disable    stop the daemon (starts again at next login)
