@@ -1036,6 +1036,8 @@ enum SVGIcon {
         case nightDay = "Night-Day"
         case night = "night"            // the night-shift moon (Material bedtime_off, filled)
         case nightOff = "night-off"     // the slashed moon — shown when Night Shift is fully off
+        case restart                    // Material refresh — the Restart chip
+        case sleep                      // Material bedtime (filled) — the Sleep chip
     }
 
     private static let assetDirectory = FileManager.default.homeDirectoryForCurrentUser
@@ -1092,6 +1094,8 @@ enum SVGIcon {
         .mic:       CGRect(x: 5.0,  y: 3.0,  width: 14.0, height: 19.0),  // material: capsule + stand
         .wifi:      CGRect(x: 0.0,  y: 3.0,  width: 24.0, height: 17.0),  // material: two wedges + dot
         .power:     CGRect(x: 3,    y: 3,    width: 18,   height: 18),
+        .restart:   CGRect(x: 2.51, y: 2.5,  width: 18.98, height: 18.5),  // material: refresh
+        .sleep:     CGRect(x: 2.0,  y: 2.02, width: 18.66, height: 19.98), // material: bedtime (filled)
     ]
     static let optical: CGFloat = 21   // ink target (longest side), 24-grid units
 
@@ -1346,13 +1350,23 @@ func ellipsize(_ s: String, font: NSFont, width: CGFloat) -> String {
 }
 
 // text centered on its ink — CoreText glyph bounds, not the line box
-func drawText(_ s: String, font: NSFont, color: NSColor, in r: NSRect, kern: CGFloat = 0) {
+func drawText(_ s: String, font: NSFont, color: NSColor, in r: NSRect, kern: CGFloat = 0,
+              align: NSTextAlignment = .center) {
     let line = CTLineCreateWithAttributedString(NSAttributedString(
         string: s, attributes: [.font: font, .foregroundColor: color, .kern: kern]))
     let inkBounds = CTLineGetBoundsWithOptions(line, .useGlyphPathBounds)
+    // the anchor x: center (default) pins the ink's middle to the slot's
+    // middle; left/right pin the ink's edge to the slot's edge — so rows
+    // can fill the card from its pad instead of floating centered
+    let ax: CGFloat
+    switch align {
+    case .left: ax = r.minX + inkBounds.width / 2
+    case .right: ax = r.maxX - inkBounds.width / 2
+    default: ax = r.midX
+    }
     let ctx = NSGraphicsContext.current!.cgContext
     ctx.saveGState()
-    ctx.translateBy(x: r.midX, y: r.midY)   // to the slot center…
+    ctx.translateBy(x: ax, y: r.midY)   // to the ink anchor…
     ctx.scaleBy(x: 1, y: -1)                // …unflip for CoreText (y-up)
     ctx.textMatrix = .identity
     ctx.translateBy(x: -inkBounds.midX, y: -inkBounds.midY)
@@ -3498,9 +3512,10 @@ relayoutExt(width: 0)   // parked: zero-width, faded, no slack
 // MARK: - the overlay (⌘⇧Space launcher)
 //
 // the front end now. ⌘⇧Space dims the whole screen and floats one cream
-// card in the middle: time, date, battery, the Night Shift strength
-// slider, and the three power actions — restart / sleep / shut down, the
-// destructive two behind native AppleScript confirmations. Escape, a
+// card in the middle: the time with the date riding the same row, the
+// battery status, the Night Shift control row — label · track · live %,
+// one line — and the three power actions — restart / sleep / shut down,
+// the destructive two behind native AppleScript confirmations. Escape, a
 // click on the dimmed desktop, or a session lock puts it away. the notch
 // pill is parked behind PILL_ENABLED = false — its machinery stays (it
 // works; the launcher replaced it), the daemon just never runs it.
@@ -3511,18 +3526,16 @@ enum OverlayCard {
     static let pad: CGFloat = 30
     static let width: CGFloat = 540
     static let timeH: CGFloat = 58       // 46pt SF Mono, ink-centered
-    static let dateH: CGFloat = 18
+    static let dateH: CGFloat = 18       // rides the time row, right-aligned
     static let batteryH: CGFloat = 40
-    static let labelH: CGFloat = 14      // the NIGHT SHIFT small caps
+    static let controlH: CGFloat = 34    // the Night Shift row: label · track · live %
     static let sliderH: CGFloat = 34     // the pill's own track: 28.25 stadium, knob 28.25
     static let buttonsH: CGFloat = 44
-    static let hintH: CGFloat = 14
     static let gap: CGFloat = 16
     static let tightGap: CGFloat = 6
     static let radius: CGFloat = 24
     static var height: CGFloat {
-        pad + timeH + tightGap + dateH + gap + batteryH + gap + labelH + tightGap
-            + sliderH + gap + buttonsH + gap + hintH + pad
+        pad + timeH + gap + batteryH + gap + controlH + gap + buttonsH + pad
     }
     static let buttonNames = ["Restart", "Sleep", "Shut Down"]
 }
@@ -3564,22 +3577,33 @@ final class OverlayLauncherView: NSView {
     }
 
     func rows(card: NSRect) -> (time: NSRect, date: NSRect, battery: NSRect,
-                                label: NSRect, slider: NSRect, buttons: [NSRect]) {
+                                label: NSRect, slider: NSRect, pct: NSRect,
+                                buttons: [NSRect]) {
         var y = card.minY + OverlayCard.pad
         let x = card.minX + OverlayCard.pad
         let w = card.width - 2 * OverlayCard.pad
-        let time = NSRect(x: x, y: y, width: w, height: OverlayCard.timeH); y += OverlayCard.timeH + OverlayCard.tightGap
-        let date = NSRect(x: x, y: y, width: w, height: OverlayCard.dateH); y += OverlayCard.dateH + OverlayCard.gap
+        // the top row: the clock leads at the left edge, the date rides the
+        // same row at the right edge
+        let time = NSRect(x: x, y: y, width: w, height: OverlayCard.timeH)
+        let date = NSRect(x: x, y: time.maxY - OverlayCard.dateH, width: w, height: OverlayCard.dateH)
+        y += OverlayCard.timeH + OverlayCard.gap
         let batt = NSRect(x: x, y: y, width: w, height: OverlayCard.batteryH); y += OverlayCard.batteryH + OverlayCard.gap
-        let label = NSRect(x: x, y: y, width: w, height: OverlayCard.labelH); y += OverlayCard.labelH + OverlayCard.tightGap
-        let slider = NSRect(x: x, y: y, width: w, height: OverlayCard.sliderH); y += OverlayCard.sliderH + OverlayCard.gap
+        // the control row: the label ON the slider's row, not above it —
+        // label · track · live %, one full-width line
+        let label = NSRect(x: x, y: y, width: 96, height: OverlayCard.controlH)
+        let pct = NSRect(x: x + w - 56, y: y, width: 56, height: OverlayCard.controlH)
+        let slider = NSRect(x: label.maxX + 14, y: y,
+                            width: w - label.width - pct.width - 28,
+                            height: OverlayCard.sliderH)
+        y += OverlayCard.controlH + OverlayCard.gap
         let bw = (w - 32) / 3
         var buttons: [NSRect] = []
         for i in 0..<3 {
             buttons.append(NSRect(x: x + CGFloat(i) * (bw + 16), y: y,
                                   width: bw, height: OverlayCard.buttonsH))
         }
-        return (time, date, batt, label, slider, buttons)
+        y += OverlayCard.buttonsH
+        return (time, date, batt, label, slider, pct, buttons)
     }
 
     func sliderValue() -> CGFloat { max(0, min(1, Theme.sliderDisplay)) }
@@ -3665,6 +3689,24 @@ final class OverlayLauncherView: NSView {
         }
     }
 
+    // the battery's status group: glyph · pct (+ charging estimate), laid
+    // out once and shared by the painter AND the hit-testers — the click
+    // target is the group, not the whole row
+    func batteryGroup(in row: NSRect) -> (rect: NSRect, detail: String?) {
+        let real = batteryLevel()
+        var detailStr: String? = nil
+        if let d = batteryDetail(), real?.charging ?? false,
+           (real?.pct ?? 100) < 100, d.toFull > 0 {
+            let hrs = d.toFull / 60, rem = d.toFull % 60
+            detailStr = hrs > 0 ? "\(hrs)h \(rem)m to full" : "\(rem)m to full"
+        }
+        let glyphW: CGFloat = 46, slotH: CGFloat = 34
+        let pctW: CGFloat = 64, detailW: CGFloat = 130
+        let groupW = glyphW + 10 + pctW + (detailStr != nil ? 10 + detailW : 0)
+        return (NSRect(x: row.minX, y: row.midY - slotH / 2,
+                       width: groupW, height: slotH), detailStr)
+    }
+
     // the pill's battery painter with its full state machine — plug/unplug
     // bolt crossfade, LPM amber crossfade, hover: the charge brightens one
     // step toward cream (the dark skin's "deepen"), click: Low Power Mode
@@ -3699,18 +3741,12 @@ final class OverlayLauncherView: NSView {
         let fillFrom = lerp(overlayFillFrom, Theme.darkShellHover, hover)
         let fillTo = lerp(overlayFillTo, Theme.darkShellHover, hover)
 
-        // the glyph + pct (+ charging estimate) centered as one group
-        let detail = batteryDetail()
-        var detailStr: String? = nil
-        if let d = detail, charging, pct < 100, d.toFull > 0 {
-            let hrs = d.toFull / 60, rem = d.toFull % 60
-            detailStr = hrs > 0 ? "\(hrs)h \(rem)m to full" : "\(rem)m to full"
-        }
-        let glyphW: CGFloat = 46, slotH: CGFloat = 34
-        let pctW: CGFloat = 64, detailW: CGFloat = 130
-        let groupW = glyphW + 10 + pctW + (detailStr != nil ? 10 + detailW : 0)
-        let gx = row.midX - groupW / 2
-        let slot = NSRect(x: gx, y: row.midY - slotH / 2, width: glyphW, height: slotH)
+        // the glyph + pct (+ charging estimate) as one left-anchored group —
+        // the same rect the hit-testers see (batteryGroup)
+        let group = batteryGroup(in: row)
+        let detailStr = group.detail
+        let gx = group.rect.minX
+        let slot = NSRect(x: gx, y: group.rect.midY - 17, width: 46, height: 34)
         if let ctx = NSGraphicsContext.current?.cgContext {
             ctx.saveGState()
             ctx.translateBy(x: slot.midX, y: slot.midY)
@@ -3721,11 +3757,11 @@ final class OverlayLauncherView: NSView {
             ctx.restoreGState()
         }
         drawText("\(pct)%", font: .tabular(18, .semibold), color: Theme.darkText,
-                 in: NSRect(x: gx + glyphW + 10, y: row.minY, width: pctW, height: row.height))
+                 in: NSRect(x: gx + 46 + 10, y: row.minY, width: 64, height: row.height))
         if let detailStr {
             drawText(detailStr, font: NSFont.systemFont(ofSize: 12, weight: .regular),
                      color: Theme.darkMuted,
-                     in: NSRect(x: gx + glyphW + 10 + pctW, y: row.minY, width: detailW, height: row.height))
+                     in: NSRect(x: gx + 46 + 10 + 64, y: row.minY, width: 130, height: row.height))
         }
     }
 
@@ -3748,28 +3784,40 @@ final class OverlayLauncherView: NSView {
 
         let r = rows(card: card)
 
-        // the time — one fused HH:MM block, cream on the dark glass
+        // the top row: the clock leads at the left edge, the date rides the
+        // same row at the right edge — cream + quiet ink, one line
         let now = Date()
         let cal = Calendar.current
         let h = String(format: "%02d", cal.component(.hour, from: now))
         let m = String(format: "%02d", cal.component(.minute, from: now))
         drawText("\(h):\(m)", font: NSFont.monospacedSystemFont(ofSize: 46, weight: .regular),
-                 color: Theme.darkText, in: r.time)
+                 color: Theme.darkText, in: r.time, align: .left)
 
-        // the date, quiet ink
+        // the date, quiet ink, riding the clock's row
         let df = DateFormatter()
         df.dateFormat = "EEEE d MMM"
         drawText(df.string(from: now), font: NSFont.systemFont(ofSize: 13, weight: .medium),
-                 color: Theme.darkMuted, in: r.date)
+                 color: Theme.darkMuted, in: r.date, align: .right)
 
         drawOverlayBattery(in: r.battery)
 
-        // the Night Shift slider — the pill's widget, full interactivity
+        // the Night Shift control row — the pill's widget, full
+        // interactivity: the label ON the slider's row (left), the live
+        // strength at the right in the value ink, the track between them
         drawText("NIGHT SHIFT", font: NSFont.systemFont(ofSize: 10, weight: .semibold),
                  color: Theme.darkMuted, in: r.label, kern: 1.5)
         drawOverlaySlider(in: r.slider)
+        if Theme.nightOff {
+            drawText("OFF", font: .tabular(15, .semibold),
+                     color: Theme.darkMuted, in: r.pct)
+        } else {
+            drawText("\(Int((Theme.sliderValue * 100).rounded()))%",
+                     font: .tabular(15, .semibold),
+                     color: Theme.darkValue, in: r.pct)
+        }
 
-        // the power chips — Restart · Sleep · Shut Down
+        // the power chips — Restart · Sleep · Shut Down — each chip one
+        // MD3 glyph, inked cream on the dark card, ink-centered
         for (i, br) in r.buttons.enumerated() {
             let hovered = overlayHoverButton == i
             let pressed = overlayPressButton == i
@@ -3780,17 +3828,9 @@ final class OverlayLauncherView: NSView {
             NSColor.white.withAlphaComponent(0.14).setStroke()
             chip.lineWidth = 1
             chip.stroke()
-            drawText(OverlayCard.buttonNames[i],
-                     font: NSFont.systemFont(ofSize: 13, weight: .semibold),
-                     color: Theme.darkText, in: br)
+            let name: SVGIcon.Name = [.restart, .sleep, .power][i]
+            SVGIcon.draw(name, color: Theme.darkText, in: br)
         }
-
-        // the affordance hint
-        drawText("⌘⇧Space toggles · esc or click outside dismisses · battery toggles Low Power Mode",
-                 font: NSFont.systemFont(ofSize: 11, weight: .regular),
-                 color: Theme.darkMuted.withAlphaComponent(0.8),
-                 in: NSRect(x: card.minX, y: r.buttons.last!.maxY + OverlayCard.gap,
-                            width: card.width, height: OverlayCard.hintH))
     }
 
     // MARK: events
@@ -3809,7 +3849,7 @@ final class OverlayLauncherView: NSView {
             overlaySetSlider(from: p)
             return
         }
-        if r.battery.contains(p) {
+        if batteryGroup(in: r.battery).rect.contains(p) {
             // the battery's click: the Low Power Mode toggle — the pill's
             // own rungs (passwordless sudo → self-installing rule → admin
             // prompt), run off-main so the card never freezes mid-toggle
@@ -3865,7 +3905,7 @@ final class OverlayLauncherView: NSView {
         if hb != overlayHoverButton { overlayHoverButton = hb; changed = true }
         let sh = r.slider.insetBy(dx: -6, dy: -8).contains(p)
         if sh != overlaySliderHover { overlaySliderHover = sh; changed = true }
-        let bh = r.battery.contains(p)
+        let bh = batteryGroup(in: r.battery).rect.contains(p)
         if bh != overlayBatteryHovered { overlayBatteryHovered = bh; changed = true }
         overlaySliderKnob.sync()   // position-driven knob hover + the wobble latch
         if changed {
@@ -3898,7 +3938,7 @@ final class OverlayLauncherView: NSView {
         let r = rows(card: cardRect)
         for br in r.buttons { addCursorRect(br, cursor: .pointingHand) }
         addCursorRect(r.slider.insetBy(dx: -6, dy: -8), cursor: .pointingHand)
-        addCursorRect(r.battery, cursor: .pointingHand)   // the battery: the LPM toggle
+        addCursorRect(batteryGroup(in: r.battery).rect, cursor: .pointingHand)   // the battery: the LPM toggle
     }
 }
 
