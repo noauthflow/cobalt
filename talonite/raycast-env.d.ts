@@ -30,6 +30,10 @@ declare namespace Preferences {
   /** Drag Mode - By default: click point A and point B to measure distance */
   "dragMode": boolean
 }
+  /** Preferences accessible in the `audio` command */
+  export type Audio = ExtensionPreferences & {}
+  /** Preferences accessible in the `bluetooth` command */
+  export type Bluetooth = ExtensionPreferences & {}
 }
 
 declare namespace Arguments {
@@ -41,5 +45,9 @@ declare namespace Arguments {
   export type Color = {}
   /** Arguments passed to the `ruler` command */
   export type Ruler = {}
+  /** Arguments passed to the `audio` command */
+  export type Audio = {}
+  /** Arguments passed to the `bluetooth` command */
+  export type Bluetooth = {}
 }
 

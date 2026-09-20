@@ -3,7 +3,7 @@
   "name": "talonite",
   "title": "Talonite",
   "version": "0.1.0",
-  "description": "Four edges, one blade: pinned timezones, a proxy toggle, a color picker, and an on-screen ruler",
+  "description": "Pinned timezones, a proxy toggle, a color picker, an on-screen ruler, audio switching, and Bluetooth devices",
   "icon": "icon.png",
   "author": "jamielink",
   "license": "MIT",
@@ -61,6 +61,20 @@
           "required": false
         }
       ]
+    },
+    {
+      "name": "audio",
+      "title": "Audio Devices",
+      "subtitle": "Talonite",
+      "description": "List audio devices and switch the default output or input",
+      "mode": "view"
+    },
+    {
+      "name": "bluetooth",
+      "title": "Bluetooth Devices",
+      "subtitle": "Talonite",
+      "description": "List paired Bluetooth devices and connect or disconnect them",
+      "mode": "view"
     }
   ],
   "dependencies": {

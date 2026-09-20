@@ -16,6 +16,29 @@ export type PickedColor = {
   alpha: number;
 };
 
+export type AudioDevice = {
+  id: number;
+  uid: string;
+  name: string;
+  transport: string;
+  isOutput: boolean;
+  isInput: boolean;
+  isDefaultOutput: boolean;
+  isDefaultInput: boolean;
+  isDefaultSystem: boolean;
+  // 0-100, output side only; null when the device has no master volume
+  volume: number | null;
+  muted: boolean;
+};
+
+export type BTDevice = {
+  name: string;
+  address: string;
+  isConnected: boolean;
+  isFavorite: boolean;
+  kind: "keyboard" | "mouse" | "unknown";
+};
+
 export class NativeError extends Error {
   stdout?: string;
   stderr?: string;
@@ -77,4 +100,31 @@ export function pickColor(): Promise<PickedColor | null> {
 
 export function measureDistance(dragMode: boolean): Promise<string | null> {
   return runNative("Ruler", "measureDistance", dragMode);
+}
+
+export function listAudio(): Promise<AudioDevice[] | null> {
+  return runNative("audio", "listDevices");
+}
+
+export function setDefaultAudio(
+  direction: "output" | "input" | "system",
+  id: number,
+): Promise<boolean | null> {
+  return runNative("audio", "setDefaultDevice", { direction, id });
+}
+
+export function listBluetooth(): Promise<BTDevice[] | null> {
+  return runNative("bluetooth", "listDevices");
+}
+
+export function connectBluetooth(address: string): Promise<boolean | null> {
+  return runNative("bluetooth", "connectDevice", { address });
+}
+
+export function disconnectBluetooth(address: string): Promise<boolean | null> {
+  return runNative("bluetooth", "disconnectDevice", { address });
+}
+
+export function toggleBluetooth(address: string): Promise<boolean | null> {
+  return runNative("bluetooth", "toggleDevice", { address });
 }

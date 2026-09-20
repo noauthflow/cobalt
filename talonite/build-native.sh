@@ -8,7 +8,7 @@ cd "$(dirname "$0")"
 OUT=assets/compiled_raycast_swift
 mkdir -p "$OUT"
 
-for name in color-picker Ruler; do
+for name in color-picker Ruler audio bluetooth; do
   echo "building $name"
   swiftc -O \
     -target arm64-apple-macos13 \

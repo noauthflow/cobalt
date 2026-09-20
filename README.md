@@ -14,7 +14,7 @@ A collection of small, self-contained desktop utilities for macOS (plus one cros
 | [elgiloy-mac-arm/](elgiloy-mac-arm/) | tab overlay daemon | macOS (Apple Silicon) |
 | [elgiloy-linux/](elgiloy-linux/) | tab overlay daemon, linux port | linux (in progress) |
 | [stellite/](stellite/) | new tab page + shorts blocker Chrome extension + template theme | anywhere Chrome runs |
-| [talonite/](talonite/) | Raycast extension: timezones + proxy toggle | macOS |
+| [talonite/](talonite/) | Raycast extension: timezones, proxy toggle, color picker, ruler, audio + bluetooth switching | macOS |
 
 Each folder is self-contained: source + its own `install.sh` where applicable. Nothing here depends on anything else in the repo. See each folder's README for details.
 
