@@ -8,7 +8,6 @@ A collection of small, self-contained desktop utilities for macOS (plus one cros
 |---|---|---|
 | [cobalt-sync/](cobalt-sync/) | bookmarks + omnibox sync CLI | macOS, linux, windows (auto-detects browser paths; `avatar` subcommand is macOS + Chrome only) |
 | [cobalt-60/](cobalt-60/) | cursor wall daemon | macOS |
-| [smalt/](smalt/) | menu bar strip daemon | macOS |
 | [cerulean/](cerulean/) | completely enable/disable a display (compositor-level) | macOS |
 | [erythrite/](erythrite/) | custom videos as native aerials: animated lock screen wallpaper | macOS 26+ |
 | [elgiloy-mac-arm/](elgiloy-mac-arm/) | tab overlay daemon | macOS (Apple Silicon) |
@@ -50,11 +49,6 @@ Same pipeline as cobalt-60: binary to `~/.local/bin/elgiloy`, launchd agent `dev
 
 - Requires: `swiftc`, the `cobalt-dev` signing identity
 - Permissions: Accessibility + Input Monitoring (listens for ctrl+tab), plus one Automation prompt on first use (queries Chrome's tabs)
-
-### smalt
-
-- Requires: `swiftc`, the `cobalt-dev` signing identity
-- See `smalt/README.md` for specifics
 
 ### cerulean
 
