@@ -26,7 +26,7 @@ final class Overlay {
         let glass: NSGlassEffectView
         let content: NSView
         let highlight = CALayer()
-        var rows: [(RowView, Int)] = []
+        var rows: [(RowView, Browser.Tab, Int)] = []
         var empty = true   // no rows last build → show() must not front it
 
         init() {
@@ -63,25 +63,72 @@ final class Overlay {
             highlight.isHidden = true
         }
 
-        func setHeight(_ h: CGFloat, bottomY: CGFloat, x: CGFloat) {
+        func setHeight(_ h: CGFloat, bottomY: CGFloat, x: CGFloat, animate: Bool) {
             var f = panel.frame
             f.size.height = h
             f.origin = NSPoint(x: x, y: bottomY)
-            panel.setFrame(f, display: true)
-            glass.frame = NSRect(origin: .zero, size: f.size)
-            content.frame = NSRect(origin: .zero, size: f.size)
+            if animate {
+                // a LIVE resize (tab closed/added mid-session): ease the pill
+                // to its new frame instead of snapping — an instant collapse
+                // of 40pt reads as a glitch. glass/content ride along via
+                // their autoresizing, so only the window frame is animated.
+                NSAnimationContext.runAnimationGroup { ctx in
+                    ctx.duration = 0.18
+                    ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                    ctx.allowsImplicitAnimation = true
+                    panel.animator().setFrame(f, display: true)
+                }
+            } else {
+                panel.setFrame(f, display: true)
+                glass.frame = NSRect(origin: .zero, size: f.size)
+                content.frame = NSRect(origin: .zero, size: f.size)
+            }
         }
 
-        func buildRows(_ tabs: [(Browser.Tab, Int)], showPin: Bool) {
+        // live exit mid-session (last pinned tab closed, …): fade the pill
+        // out instead of yanking it off screen. empty flips NOW so show()
+        // can't front a dying pill; the completion cleans up the rest.
+        func dismiss() {
+            empty = true
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = 0.15
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                panel.animator().alphaValue = 0
+            }, completionHandler: {
+                // a rebuild that re-populated this pill in the meantime wins
+                guard self.empty else { return }
+                self.panel.orderOut(nil)
+                self.panel.alphaValue = 1
+            })
+        }
+
+        func buildRows(_ tabs: [(Browser.Tab, Int)], showPin: Bool, animate: Bool) {
+            // remember where each visible tab's row WAS, so a live rebuild
+            // can slide rows into their new slots instead of teleporting
+            let oldFrames = Dictionary(rows.map { ("\($0.1.title)\u{1f}\($0.1.url)", $0.0.frame) },
+                                       uniquingKeysWith: { a, _ in a })
+            // target height from the row count — NOT panel.frame.height,
+            // which may still report the pre-animation frame mid-resize
+            let targetH = Overlay.height(for: max(tabs.count, 1))
             content.subviews.forEach { $0.removeFromSuperview() }
             rows.removeAll()
             if content.layer?.sublayers?.contains(highlight) != true {
                 content.layer?.insertSublayer(highlight, at: 0)
             }
             for (i, entry) in tabs.enumerated() {
-                let row = RowView(frame: rowFrame(i, height: panel.frame.height), tab: entry.0, showPin: showPin)
+                let final = rowFrame(i, height: targetH)
+                let row = RowView(frame: final, tab: entry.0, showPin: showPin)
+                if animate, let old = oldFrames["\(entry.0.title)\u{1f}\(entry.0.url)"], old != final {
+                    row.frame = old
+                    NSAnimationContext.runAnimationGroup { ctx in
+                        ctx.duration = 0.18
+                        ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                        ctx.allowsImplicitAnimation = true
+                        row.animator().frame = final
+                    }
+                }
                 content.addSubview(row)
-                rows.append((row, entry.1))
+                rows.append((row, entry.0, entry.1))
             }
         }
 
@@ -93,7 +140,7 @@ final class Overlay {
         // returns true when sel is a row of THIS pill (its highlight moved)
         @discardableResult
         func placeHighlight(index sel: Int, animate: Bool) -> Bool {
-            guard let row = rows.first(where: { $0.1 == sel }) else {
+            guard let row = rows.first(where: { $0.2 == sel }) else {
                 highlight.isHidden = true
                 return false
             }
@@ -137,8 +184,14 @@ final class Overlay {
     func show() {
         // only pills that hold rows — an empty pill must stay ordered out,
         // otherwise it ghosts at its initial frame (bottom-left)
-        if !pinPill.empty { pinPill.panel.orderFrontRegardless() }
-        if !mainPill.empty { mainPill.panel.orderFrontRegardless() }
+        if !pinPill.empty {
+            pinPill.panel.alphaValue = 1
+            pinPill.panel.orderFrontRegardless()
+        }
+        if !mainPill.empty {
+            mainPill.panel.alphaValue = 1
+            mainPill.panel.orderFrontRegardless()
+        }
     }
 
     func hide() {
@@ -203,6 +256,14 @@ final class Overlay {
             let mainH = Self.height(for: mainVisible.count)
             let showPin = !pinVisible.isEmpty
             let showMain = !mainVisible.isEmpty
+            // live-update easing: only when the session is already open AND
+            // a pill's height actually changes (a close/add). scroll-driven
+            // renders keep their instant snap — animating those would lag
+            // rapid ctrl+tab cycling. fresh opens always snap (center).
+            let easePin = !center && pinPill.panel.isVisible
+                && abs(pinPill.panel.frame.height - pinH) > 0.5
+            let easeMain = !center && mainPill.panel.isVisible
+                && abs(mainPill.panel.frame.height - mainH) > 0.5
 
             // position the pair: union centered on the screen's mid-line
             if let s = NSScreen.main {
@@ -210,14 +271,18 @@ final class Overlay {
                 let total = pinH + (showPin && showMain ? Overlay.PILL_GAP : 0) + mainH
                 let bottom = s.frame.midY - total / 2
                 if showMain {
-                    mainPill.setHeight(mainH, bottomY: bottom, x: x)
+                    mainPill.setHeight(mainH, bottomY: bottom, x: x, animate: easeMain)
                     mainPill.panel.orderFrontRegardless()
+                } else if mainPill.panel.isVisible {
+                    mainPill.dismiss()   // fade — last row closed mid-session
                 } else {
                     mainPill.panel.orderOut(nil)
                 }
                 if showPin {
-                    pinPill.setHeight(pinH, bottomY: bottom + mainH + (showMain ? Overlay.PILL_GAP : 0), x: x)
+                    pinPill.setHeight(pinH, bottomY: bottom + mainH + (showMain ? Overlay.PILL_GAP : 0), x: x, animate: easePin)
                     pinPill.panel.orderFrontRegardless()
+                } else if pinPill.panel.isVisible {
+                    pinPill.dismiss()   // fade — last pinned tab closed
                 } else {
                     pinPill.panel.orderOut(nil)
                 }
@@ -227,8 +292,8 @@ final class Overlay {
             mainPill.rows.removeAll()
             pinPill.empty = !showPin
             mainPill.empty = !showMain
-            pinPill.buildRows(pinVisible.map { ($0.tab, $0.index) }, showPin: false)
-            mainPill.buildRows(mainVisible.map { ($0.tab, $0.index) }, showPin: !splitView)
+            pinPill.buildRows(pinVisible.map { ($0.tab, $0.index) }, showPin: false, animate: easePin)
+            mainPill.buildRows(mainVisible.map { ($0.tab, $0.index) }, showPin: !splitView, animate: easeMain)
 
             // the thumb rides ON TOP of the rows — add it after them so it
             // survives every rebuild as the topmost layer
