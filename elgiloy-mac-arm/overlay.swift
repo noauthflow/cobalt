@@ -105,8 +105,10 @@ final class Overlay {
         func buildRows(_ tabs: [(Browser.Tab, Int)], showPin: Bool, animate: Bool) {
             // remember where each visible tab's row WAS, so a live rebuild
             // can slide rows into their new slots instead of teleporting
-            let oldFrames = Dictionary(rows.map { ("\($0.1.title)\u{1f}\($0.1.url)", $0.0.frame) },
+            let oldFrames = Dictionary(rows.map { (Self.key($0.1), $0.0.frame) },
                                        uniquingKeysWith: { a, _ in a })
+            let oldViews = Dictionary(rows.map { (Self.key($0.1), $0.0) },
+                                      uniquingKeysWith: { a, _ in a })
             // target height from the row count — NOT panel.frame.height,
             // which may still report the pre-animation frame mid-resize
             let targetH = Overlay.height(for: max(tabs.count, 1))
@@ -115,10 +117,13 @@ final class Overlay {
             if content.layer?.sublayers?.contains(highlight) != true {
                 content.layer?.insertSublayer(highlight, at: 0)
             }
+            var seen = Set<String>()
             for (i, entry) in tabs.enumerated() {
+                let k = Self.key(entry.0)
+                seen.insert(k)
                 let final = rowFrame(i, height: targetH)
                 let row = RowView(frame: final, tab: entry.0, showPin: showPin)
-                if animate, let old = oldFrames["\(entry.0.title)\u{1f}\(entry.0.url)"], old != final {
+                if animate, let old = oldFrames[k], old != final {
                     row.frame = old
                     NSAnimationContext.runAnimationGroup { ctx in
                         ctx.duration = 0.2
@@ -126,11 +131,44 @@ final class Overlay {
                         ctx.allowsImplicitAnimation = true
                         row.animator().frame = final
                     }
+                } else if animate, oldFrames[k] == nil {
+                    // newly visible row: fade in — popping into existence at
+                    // full opacity mid-resize reads as a glitch next to the
+                    // neighbors gliding into place
+                    row.alphaValue = 0
+                    NSAnimationContext.runAnimationGroup { ctx in
+                        ctx.duration = 0.2
+                        ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                        ctx.allowsImplicitAnimation = true
+                        row.animator().alphaValue = 1
+                    }
                 }
                 content.addSubview(row)
                 rows.append((row, entry.0, entry.1))
             }
+            // rows that left the visible set: dissolve where they stood
+            // instead of vanishing — the pack gliding up across the fading
+            // ghost reads as one motion, an instant disappearance reads as
+            // a cut. ghosts sit at the BOTTOM of the z-order so the sliding
+            // rows pass over them; a rebuild during the fade sweeps them
+            // (the removeFromSuperview sweep above collects any leftovers).
+            if animate {
+                for (k, ghost) in oldViews where !seen.contains(k) {
+                    ghost.alphaValue = 1
+                    content.addSubview(ghost, positioned: .below, relativeTo: nil)
+                    NSAnimationContext.runAnimationGroup({ ctx in
+                        ctx.duration = 0.2
+                        ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                        ctx.allowsImplicitAnimation = true
+                        ghost.animator().alphaValue = 0
+                    }, completionHandler: ghost.removeFromSuperview)
+                }
+            }
         }
+
+        // row identity across rebuilds — same keying the close-settling
+        // logic in main.swift uses
+        private static func key(_ t: Browser.Tab) -> String { "\(t.title)\u{1f}\(t.url)" }
 
         private func rowFrame(_ i: Int, height: CGFloat) -> NSRect {
             let y = height - Overlay.MARGIN - Overlay.ROW_H * (CGFloat(i) + 1) - Overlay.GAP * CGFloat(i)
