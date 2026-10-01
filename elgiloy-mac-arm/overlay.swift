@@ -73,8 +73,8 @@ final class Overlay {
                 // of 40pt reads as a glitch. glass/content ride along via
                 // their autoresizing, so only the window frame is animated.
                 NSAnimationContext.runAnimationGroup { ctx in
-                    ctx.duration = 0.18
-                    ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                    ctx.duration = 0.2
+                    ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
                     ctx.allowsImplicitAnimation = true
                     panel.animator().setFrame(f, display: true)
                 }
@@ -121,8 +121,8 @@ final class Overlay {
                 if animate, let old = oldFrames["\(entry.0.title)\u{1f}\(entry.0.url)"], old != final {
                     row.frame = old
                     NSAnimationContext.runAnimationGroup { ctx in
-                        ctx.duration = 0.18
-                        ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                        ctx.duration = 0.2
+                        ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
                         ctx.allowsImplicitAnimation = true
                         row.animator().frame = final
                     }
@@ -139,7 +139,7 @@ final class Overlay {
 
         // returns true when sel is a row of THIS pill (its highlight moved)
         @discardableResult
-        func placeHighlight(index sel: Int, animate: Bool) -> Bool {
+        func placeHighlight(index sel: Int, animate: Bool, duration: CFTimeInterval = 0.05) -> Bool {
             guard let row = rows.first(where: { $0.2 == sel }) else {
                 highlight.isHidden = true
                 return false
@@ -156,7 +156,7 @@ final class Overlay {
                 && abs(row.0.frame.minY - highlight.frame.minY)
                     <= Overlay.ROW_H + Overlay.GAP + 0.5
             CATransaction.begin()
-            CATransaction.setAnimationDuration(adjacent && animate ? 0.05 : 0)
+            CATransaction.setAnimationDuration(adjacent && animate ? duration : 0)
             highlight.frame = row.0.frame
             highlight.isHidden = false
             CATransaction.commit()
@@ -245,7 +245,9 @@ final class Overlay {
         let mainVisible = regular.isEmpty ? [] : Array(regular[start..<start + count])
 
         // rebuild only when the visible tab set actually changed (pinned flags
-        // AND view mode are part of the key — either changing redraws)
+        // AND view mode are part of the key — either changing redraws). easeMain
+        // survives the block: the highlight glide below rides the same motion.
+        var easeMain = false
         let key = (splitView ? "s\u{1f}" : "f\u{1f}")
             + pinVisible.map { "p\($0.index):\($0.tab.n):\($0.tab.audible ? 1 : 0):\($0.tab.title)" }.joined(separator: "\u{1e}")
             + "\u{1d}"
@@ -256,35 +258,58 @@ final class Overlay {
             let mainH = Self.height(for: mainVisible.count)
             let showPin = !pinVisible.isEmpty
             let showMain = !mainVisible.isEmpty
-            // live-update easing: only when the session is already open AND
-            // a pill's height actually changes (a close/add). scroll-driven
-            // renders keep their instant snap — animating those would lag
-            // rapid ctrl+tab cycling. fresh opens always snap (center).
-            let easePin = !center && pinPill.panel.isVisible
-                && abs(pinPill.panel.frame.height - pinH) > 0.5
-            let easeMain = !center && mainPill.panel.isVisible
+            // live-update easing applies to exactly ONE case: a main-pill
+            // height change (a close) while the pill layout is otherwise
+            // stable — pin pill present before and after, same height. the
+            // main pill's TOP edge stays put, its bottom edge rises, and the
+            // rows below the removed one glide up to meet it. rows are laid
+            // out from the top, so anchoring the top edge means every row
+            // above the closed one holds STILL — animating anything else
+            // (re-centering, a moving top edge) squishes the whole overlay
+            // toward the middle and reads as a glitch. every other case —
+            // fresh open, pin pill appearing/vanishing/changing, scroll-
+            // driven renders — snaps instantly.
+            let wasPin = pinPill.panel.isVisible
+            let wasMain = mainPill.panel.isVisible
+            easeMain = !center && wasMain && showMain && wasPin == showPin
+                && (!showPin || abs(pinPill.panel.frame.height - pinH) <= 0.5)
                 && abs(mainPill.panel.frame.height - mainH) > 0.5
 
-            // position the pair: union centered on the screen's mid-line
             if let s = NSScreen.main {
                 let x = s.frame.midX - Overlay.W / 2
-                let total = pinH + (showPin && showMain ? Overlay.PILL_GAP : 0) + mainH
-                let bottom = s.frame.midY - total / 2
-                if showMain {
-                    mainPill.setHeight(mainH, bottomY: bottom, x: x, animate: easeMain)
+                if easeMain {
+                    // top edge frozen: only the bottom rises
+                    let mainTop = mainPill.panel.frame.maxY
+                    mainPill.setHeight(mainH, bottomY: mainTop - mainH, x: x, animate: true)
                     mainPill.panel.orderFrontRegardless()
-                } else if mainPill.panel.isVisible {
-                    mainPill.dismiss()   // fade — last row closed mid-session
+                    if showPin {
+                        // pin pill rides above the main pill's top edge —
+                        // which didn't move, so this frame is a no-op
+                        pinPill.setHeight(pinH, bottomY: mainTop + Overlay.PILL_GAP, x: x, animate: false)
+                        pinPill.panel.orderFrontRegardless()
+                    } else {
+                        pinPill.dismiss()   // fade — last pinned tab closed
+                    }
                 } else {
-                    mainPill.panel.orderOut(nil)
-                }
-                if showPin {
-                    pinPill.setHeight(pinH, bottomY: bottom + mainH + (showMain ? Overlay.PILL_GAP : 0), x: x, animate: easePin)
-                    pinPill.panel.orderFrontRegardless()
-                } else if pinPill.panel.isVisible {
-                    pinPill.dismiss()   // fade — last pinned tab closed
-                } else {
-                    pinPill.panel.orderOut(nil)
+                    // position the pair: union centered on the screen's mid-line
+                    let total = pinH + (showPin && showMain ? Overlay.PILL_GAP : 0) + mainH
+                    let bottom = s.frame.midY - total / 2
+                    if showMain {
+                        mainPill.setHeight(mainH, bottomY: bottom, x: x, animate: false)
+                        mainPill.panel.orderFrontRegardless()
+                    } else if wasMain {
+                        mainPill.dismiss()   // fade — last row closed mid-session
+                    } else {
+                        mainPill.panel.orderOut(nil)
+                    }
+                    if showPin {
+                        pinPill.setHeight(pinH, bottomY: bottom + mainH + (showMain ? Overlay.PILL_GAP : 0), x: x, animate: false)
+                        pinPill.panel.orderFrontRegardless()
+                    } else if wasPin {
+                        pinPill.dismiss()   // fade — last pinned tab closed
+                    } else {
+                        pinPill.panel.orderOut(nil)
+                    }
                 }
             }
 
@@ -292,7 +317,7 @@ final class Overlay {
             mainPill.rows.removeAll()
             pinPill.empty = !showPin
             mainPill.empty = !showMain
-            pinPill.buildRows(pinVisible.map { ($0.tab, $0.index) }, showPin: false, animate: easePin)
+            pinPill.buildRows(pinVisible.map { ($0.tab, $0.index) }, showPin: false, animate: false)
             mainPill.buildRows(mainVisible.map { ($0.tab, $0.index) }, showPin: !splitView, animate: easeMain)
 
             // the thumb rides ON TOP of the rows — add it after them so it
@@ -304,9 +329,12 @@ final class Overlay {
         currentStart = start
         currentCount = mainVisible.count
 
-        // exactly one pill's highlight shows: the one holding sel
+        // exactly one pill's highlight shows: the one holding sel. an eased
+        // rebuild glides the highlight at the same duration as the rows so it
+        // rides the row it lands on instead of racing ahead of it.
         let inPin = pinPill.placeHighlight(index: sel, animate: !center)
-        let inMain = mainPill.placeHighlight(index: sel, animate: !center)
+        let inMain = mainPill.placeHighlight(index: sel, animate: !center,
+                                             duration: easeMain ? 0.2 : 0.05)
         if inPin { mainPill.highlight.isHidden = true }
         if inMain { pinPill.highlight.isHidden = true }
 
