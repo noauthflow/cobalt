@@ -35,9 +35,18 @@
           "description": "The format to copy the picked color in",
           "type": "dropdown",
           "data": [
-            { "title": "Hex", "value": "hex" },
-            { "title": "RGB", "value": "rgb" },
-            { "title": "HSL", "value": "hsl" }
+            {
+              "title": "Hex",
+              "value": "hex"
+            },
+            {
+              "title": "RGB",
+              "value": "rgb"
+            },
+            {
+              "title": "HSL",
+              "value": "hsl"
+            }
           ],
           "default": "hex",
           "required": false
@@ -75,6 +84,31 @@
       "subtitle": "Talonite",
       "description": "List paired Bluetooth devices and connect or disconnect them",
       "mode": "view"
+    },
+    {
+      "name": "resize",
+      "title": "Resize Window",
+      "subtitle": "Talonite",
+      "description": "Resize the frontmost window to a fixed default size",
+      "mode": "no-view",
+      "preferences": [
+        {
+          "name": "size",
+          "title": "Size",
+          "description": "Pixels (1280x800), percent (50%), or mixed (50%x100%)",
+          "type": "textfield",
+          "default": "50%x100%",
+          "required": false
+        },
+        {
+          "name": "pos",
+          "title": "Position",
+          "description": "center, left, right, top, bottom, top-left, top-right, bottom-left, bottom-right, or X,Y pixels",
+          "type": "textfield",
+          "default": "center",
+          "required": false
+        }
+      ]
     }
   ],
   "dependencies": {
@@ -84,7 +118,7 @@
   "devDependencies": {
     "@types/node": "^20.10.0",
     "@types/react": "^18.2.0",
-    "typescript": "^5.2.2"
+    "typescript": "^5.9.3"
   },
   "scripts": {
     "native": "sh build-native.sh",

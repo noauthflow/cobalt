@@ -34,6 +34,13 @@ declare namespace Preferences {
   export type Audio = ExtensionPreferences & {}
   /** Preferences accessible in the `bluetooth` command */
   export type Bluetooth = ExtensionPreferences & {}
+  /** Preferences accessible in the `resize` command */
+  export type Resize = ExtensionPreferences & {
+  /** Size - Pixels (1280x800), percent (50%), or mixed (50%x100%) */
+  "size": string,
+  /** Position - center, left, right, top, bottom, top-left, top-right, bottom-left, bottom-right, or X,Y pixels */
+  "pos": string
+}
 }
 
 declare namespace Arguments {
@@ -49,5 +56,7 @@ declare namespace Arguments {
   export type Audio = {}
   /** Arguments passed to the `bluetooth` command */
   export type Bluetooth = {}
+  /** Arguments passed to the `resize` command */
+  export type Resize = {}
 }
 
