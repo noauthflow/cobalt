@@ -1,4 +1,4 @@
-// talonite resize (slot 1) — thin wrapper; logic lives in resize-core.ts.
+// talonite resize (slot 2) — thin wrapper; logic lives in resize-core.ts.
 // size & position are configured in Raycast's settings for this command.
 
 import { getPreferenceValues } from "@raycast/api";

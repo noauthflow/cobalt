@@ -41,6 +41,20 @@ declare namespace Preferences {
   /** Position - center, left, right, top, bottom, top-left, top-right, bottom-left, bottom-right, or X,Y pixels */
   "pos": string
 }
+  /** Preferences accessible in the `resize2` command */
+  export type Resize2 = ExtensionPreferences & {
+  /** Size - Pixels (1280x800), percent (50%), or mixed (50%x100%) */
+  "size": string,
+  /** Position - center, left, right, top, bottom, top-left, top-right, bottom-left, bottom-right, or X,Y pixels */
+  "pos": string
+}
+  /** Preferences accessible in the `resize3` command */
+  export type Resize3 = ExtensionPreferences & {
+  /** Size - Pixels (1280x800), percent (50%), or mixed (50%x100%) */
+  "size": string,
+  /** Position - center, left, right, top, bottom, top-left, top-right, bottom-left, bottom-right, or X,Y pixels */
+  "pos": string
+}
 }
 
 declare namespace Arguments {
@@ -58,5 +72,9 @@ declare namespace Arguments {
   export type Bluetooth = {}
   /** Arguments passed to the `resize` command */
   export type Resize = {}
+  /** Arguments passed to the `resize2` command */
+  export type Resize2 = {}
+  /** Arguments passed to the `resize3` command */
+  export type Resize3 = {}
 }
 
