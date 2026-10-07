@@ -11,7 +11,9 @@ import CoreGraphics
 //   SLSCompleteDisplayConfiguration(config, cid, option)          // option 3 works
 //   SLSCancelDisplayConfiguration(config, cid)                    // config FIRST
 //
-// usage: cerulean [list|off|on|on-all]
+// usage: cerulean [list|off|on|on-all|watch]
+//   watch  = daemon: keeps every external display disabled while the state
+//            file exists. Re-applies on replug / sleep-wake / login (launchd).
 
 typealias CGSConnectionID = UInt32
 typealias CGSDisplayConfigRef = UnsafeMutableRawPointer?
@@ -62,6 +64,13 @@ func apply(_ display: CGDirectDisplayID, _ enable: Bool) {
     }
 }
 
+func onlineDisplaysCG() -> [CGDirectDisplayID] {
+    var ids = [CGDirectDisplayID](repeating: 0, count: 32)
+    var count: UInt32 = 0
+    CGGetOnlineDisplayList(32, &ids, &count)
+    return Array(ids[0..<Int(count)])
+}
+
 func label(_ d: CGDirectDisplayID) -> String {
     String(format: "0x%08x (vendor 0x%08x)", d, CGDisplayVendorNumber(d))
 }
@@ -80,11 +89,31 @@ func loadDisabled() -> [CGDirectDisplayID] {
 
 let args = CommandLine.arguments
 guard args.count >= 2 else {
-    print("usage: cerulean [list|off|on|on-all]")
+    print("usage: cerulean [list|off|on|on-all|watch]")
     exit(1)
 }
 
 let main = CGMainDisplayID()
+
+// Re-apply 'off': if the state file exists, disable every non-main display
+// that is currently online (SLS + public CG lists, to be safe), and refresh
+// the saved IDs so 'on' can find them even if IDs changed on replug.
+func enforceOff() {
+    guard FileManager.default.fileExists(atPath: stateFile) else { return }
+    let nowMain = CGMainDisplayID()
+    let targets = Set(onlineDisplays()).union(onlineDisplaysCG()).filter { $0 != nowMain }
+    guard !targets.isEmpty else { return }
+    for d in targets {
+        apply(d, false)
+        print("[watch] disabled \(label(d))")
+    }
+    saveDisabled(Array(targets))
+}
+
+// C-function-pointer entry for CGDisplayRegisterReconfigurationCallback
+func reconfCallback(_ display: CGDirectDisplayID, _ flags: CGDisplayChangeSummaryFlags, _ info: UnsafeMutableRawPointer?) {
+    enforceOff()
+}
 
 switch args[1] {
 case "list":
@@ -98,24 +127,33 @@ case "off":
         print("disabled \(label(d))")
     }
     saveDisabled(targets)
+    print("state saved — if the watch agent is running, replug/sleep/reboot will not bring it back")
 
 case "on":
-    let targets = loadDisabled()
+    // remove the intent flag FIRST so a running watcher doesn't re-disable
+    let saved = loadDisabled()
+    try? FileManager.default.removeItem(atPath: stateFile)
+    let targets = Set(saved).union(onlineDisplays()).union(onlineDisplaysCG()).filter { $0 != main }
     if targets.isEmpty { print("no recorded disabled displays (\(stateFile) empty)"); exit(1) }
     for d in targets {
         apply(d, true)
         print("enabled \(label(d))")
     }
-    try? FileManager.default.removeItem(atPath: stateFile)
 
 case "on-all":
-    var all = onlineDisplays()
-    for d in loadDisabled() where !all.contains(d) { all.append(d) }
+    try? FileManager.default.removeItem(atPath: stateFile)
+    let all = Set(onlineDisplays()).union(onlineDisplaysCG()).union(loadDisabled())
     for d in all {
         apply(d, true)
         print("enabled \(label(d))")
     }
-    try? FileManager.default.removeItem(atPath: stateFile)
+
+case "watch":
+    enforceOff()  // catch anything that appeared before we started
+    CGDisplayRegisterReconfigurationCallback(reconfCallback, nil)
+    Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { _ in enforceOff() }
+    print("[watch] enforcing 'off' (state file: \(stateFile))")
+    RunLoop.main.run()  // never returns
 
 default:
     print("unknown command: \(args[1])")
