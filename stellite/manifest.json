@@ -9,7 +9,7 @@
     "128": "icons/icon128.png"
   },
   "manifest_version": 3,
-  "permissions": ["storage", "unlimitedStorage"],
+  "permissions": ["storage"],
   "background": { "service_worker": "pin.js" },
   "commands": {
     "pin-tab": {

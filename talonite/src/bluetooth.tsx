@@ -16,13 +16,20 @@ import {
   Color,
   Icon,
   List,
+  LocalStorage,
   Toast,
+  getPreferenceValues,
   showToast,
 } from "@raycast/api";
 import { useCallback, useEffect, useState } from "react";
 import { BTDevice, connectBluetooth, disconnectBluetooth, listBluetooth, toggleBluetooth } from "./native";
 
 type AddressedAction = "connect" | "disconnect" | "toggle";
+
+// command preference (set in Talonite → Bluetooth Devices settings, persisted
+// by Raycast): hide paired LE gadgets that can't actually connect
+type BluetoothPrefs = { hideNonConnectable: boolean };
+const prefs = getPreferenceValues<BluetoothPrefs>();
 
 // material design 3 glyphs, shipped as svg assets — image paths resolve
 // relative to the assets/ folder (same convention as the timezone maps).
@@ -46,6 +53,14 @@ function perform(action: AddressedAction, address: string): Promise<boolean | nu
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+// last-known device list, kept in a module var so re-opens within the same
+// raycast session paint synchronously (the js context survives between
+// opens), and mirrored to LocalStorage so even a cold session starts from
+// real data instead of an empty list. the native spawn still runs on every
+// open — but in the background, only patching what actually changed.
+const DEVICES_KEY = "talonite/bt-devices";
+let memoryDevices: BTDevice[] | null = null;
+
 // the past-tense verb each action resolves to, for toasts
 function verb(action: AddressedAction): string {
   switch (action) {
@@ -59,34 +74,80 @@ function verb(action: AddressedAction): string {
 }
 
 export default function Command() {
-  const [devices, setDevices] = useState<BTDevice[] | null>(null);
-  const [loading, setLoading] = useState(true);
+  // starts from the last-known list (memory first, LocalStorage if we get
+  // there before the spawn finishes) — never from an empty list
+  const [devices, setDevices] = useState<BTDevice[] | null>(memoryDevices);
+  const [loading, setLoading] = useState(memoryDevices === null);
   // addresses with an action in flight — their rows spin
   const [busy, setBusy] = useState<Set<string>>(new Set());
 
   const patchDevice = useCallback((address: string, patch: Partial<BTDevice>) => {
-    setDevices((prev) =>
-      prev?.map((d) => (d.address === address ? { ...d, ...patch } : d)),
-    );
+    setDevices((prev) => prev?.map((d) => (d.address === address ? { ...d, ...patch } : d)) ?? prev);
+  }, []);
+
+  const apply = useCallback((fresh: BTDevice[]) => {
+    // skip the re-render entirely when nothing changed — swapping the state
+    // object for an identical one re-mounts icons visibly
+    setDevices((prev) => {
+      const same =
+        prev?.length === fresh.length &&
+        prev.every((p, i) => {
+          const f = fresh[i];
+          return (
+            p.address === f.address &&
+            p.isConnected === f.isConnected &&
+            p.kind === f.kind &&
+            p.isFavorite === f.isFavorite &&
+            p.name === f.name
+          );
+        });
+      if (same) return prev;
+      memoryDevices = fresh;
+      LocalStorage.setItem(DEVICES_KEY, JSON.stringify(fresh)).catch(() => {});
+      return fresh;
+    });
   }, []);
 
   const refresh = useCallback(async () => {
-    setLoading(true);
     try {
-      setDevices((await listBluetooth()) ?? []);
+      const fresh = await listBluetooth();
+      if (fresh) apply(fresh);
     } catch (err) {
-      await showToast({
-        style: Toast.Style.Failure,
-        title: "Could not list Bluetooth devices",
-        message: (err as Error).message,
-      });
+      // cold start with nothing to show — surface the failure loudly;
+      // background refreshes just keep the last-known list
+      if (memoryDevices === null) {
+        await showToast({
+          style: Toast.Style.Failure,
+          title: "Could not list Bluetooth devices",
+          message: (err as Error).message,
+        });
+      }
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [apply]);
 
   useEffect(() => {
-    refresh();
+    if (memoryDevices !== null) {
+      // instant paint already on screen — just reconcile in the background
+      refresh();
+      return;
+    }
+    // cold session: LocalStorage read is ~1ms vs ~100ms for the spawn, so
+    // paint from it first, then let refresh() quietly replace it if changed
+    (async () => {
+      try {
+        const raw = await LocalStorage.getItem<string>(DEVICES_KEY);
+        if (raw && memoryDevices === null) {
+          memoryDevices = JSON.parse(raw) as BTDevice[];
+          setDevices(memoryDevices);
+          setLoading(false);
+        }
+      } catch {
+        // no cache — refresh() alone will fill the list
+      }
+      refresh();
+    })();
   }, [refresh]);
 
   const act = useCallback(
@@ -161,15 +222,17 @@ export default function Command() {
 
   return (
     <List isLoading={loading} navigationTitle="Bluetooth Devices">
-      {(devices ?? []).map((d) => (
-        <DeviceRow
-          key={d.address}
-          device={d}
-          busy={busy.has(d.address)}
-          onAction={busyRow}
-          refresh={refresh}
-        />
-      ))}
+      {(devices ?? [])
+        .filter((d) => !prefs.hideNonConnectable || d.isConnectable)
+        .map((d) => (
+          <DeviceRow
+            key={d.address}
+            device={d}
+            busy={busy.has(d.address)}
+            onAction={busyRow}
+            refresh={refresh}
+          />
+        ))}
     </List>
   );
 }

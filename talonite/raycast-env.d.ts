@@ -33,7 +33,10 @@ declare namespace Preferences {
   /** Preferences accessible in the `audio` command */
   export type Audio = ExtensionPreferences & {}
   /** Preferences accessible in the `bluetooth` command */
-  export type Bluetooth = ExtensionPreferences & {}
+  export type Bluetooth = ExtensionPreferences & {
+  /** Hide Non-Connectable Devices - Only show devices that can actually connect — matches what System Settings shows (paired LE beacons etc. are hidden) */
+  "hideNonConnectable": boolean
+}
   /** Preferences accessible in the `resize` command */
   export type Resize = ExtensionPreferences & {
   /** Size - Pixels (1280x800), percent (50%), or mixed (50%x100%) */

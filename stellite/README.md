@@ -15,10 +15,15 @@ hand-rolled material design 3 tokens/components — no libraries, no build)
   closes. md3 switch, sliders, tonal buttons, 28px card, state layers.
 - **icon color**: colour picker + hex field, favicon updates live,
   persists via chrome.storage. reset restores the default lavender.
-- **photos**: drag-and-drop grid (or + tile -> file picker) with
-  per-photo remove. stored as data urls (unlimitedStorage). each new
-  tab shows a random photo fading in over the grey (200ms delay,
-  500ms fade — tunable in the #bg transition).
+- **photos**: one local folder picked once (File System Access API — the
+  picker starts on the Desktop; the handle persists in IndexedDB, with a
+  one-click Reconnect in the panel if Chrome ever needs permission again).
+  the folder is rescanned every 2s (plus on tab focus), so images added or
+  removed on disk show up live: each new tab shows a random photo from the
+  folder, fading in over the grey (200ms delay, 500ms fade — tunable in the
+  #bg transition). no images are copied or stored — nothing bloats
+  chrome.storage. panel shows folder name, count, a thumbnail strip and a
+  pulsing "watching for changes" indicator.
 - **adjust**: brightness (25-150%) slider. photo mode applies live via css
   filter; ascii re-samples on slider release.
 - **ascii art mode**: m3 switch. port of aeolian's DotImage.tsx

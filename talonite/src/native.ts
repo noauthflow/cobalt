@@ -36,6 +36,8 @@ export type BTDevice = {
   address: string;
   isConnected: boolean;
   isFavorite: boolean;
+  // false for paired-but-not-connectable LE gadgets (beacons etc.)
+  isConnectable: boolean;
   kind: "keyboard" | "mouse" | "unknown";
 };
 

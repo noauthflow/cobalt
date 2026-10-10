@@ -13,14 +13,16 @@
       "title": "Timezones",
       "subtitle": "Talonite",
       "description": "Pinned timezones for now or any custom instant",
-      "mode": "view"
+      "mode": "view",
+      "icon": "clock"
     },
     {
       "name": "proxy",
       "title": "Proxy Status",
       "subtitle": "Talonite",
       "description": "Show current Wi-Fi, proxy state, host:port, and toggle each proxy",
-      "mode": "view"
+      "mode": "view",
+      "icon": "globe-01"
     },
     {
       "name": "color",
@@ -28,6 +30,7 @@
       "subtitle": "Talonite",
       "description": "Pick any pixel on screen and copy its color",
       "mode": "no-view",
+      "icon": "swatch",
       "preferences": [
         {
           "name": "format",
@@ -59,6 +62,7 @@
       "subtitle": "Talonite",
       "description": "Measure the distance between two points on screen, in pixels",
       "mode": "no-view",
+      "icon": "ruler",
       "preferences": [
         {
           "name": "dragMode",
@@ -76,14 +80,27 @@
       "title": "Audio Devices",
       "subtitle": "Talonite",
       "description": "List audio devices and switch the default output or input",
-      "mode": "view"
+      "mode": "view",
+      "icon": "speaker"
     },
     {
       "name": "bluetooth",
       "title": "Bluetooth Devices",
       "subtitle": "Talonite",
       "description": "List paired Bluetooth devices and connect or disconnect them",
-      "mode": "view"
+      "mode": "view",
+      "icon": "bluetooth",
+      "preferences": [
+        {
+          "name": "hideNonConnectable",
+          "title": "Hide Non-Connectable Devices",
+          "description": "Only show devices that can actually connect — matches what System Settings shows (paired LE beacons etc. are hidden)",
+          "type": "checkbox",
+          "label": "Hide paired devices that cannot connect",
+          "default": true,
+          "required": false
+        }
+      ]
     },
     {
       "name": "resize",
@@ -91,6 +108,7 @@
       "subtitle": "Talonite",
       "description": "Resize the frontmost window to a fixed default size",
       "mode": "no-view",
+      "icon": "app-window",
       "preferences": [
         {
           "name": "size",
@@ -116,6 +134,7 @@
       "subtitle": "Talonite",
       "description": "Resize the frontmost window to a second configurable size",
       "mode": "no-view",
+      "icon": "app-window-grid-2x2",
       "preferences": [
         {
           "name": "size",
@@ -141,6 +160,7 @@
       "subtitle": "Talonite",
       "description": "Resize the frontmost window to a third configurable size",
       "mode": "no-view",
+      "icon": "app-window-grid-3x3",
       "preferences": [
         {
           "name": "size",

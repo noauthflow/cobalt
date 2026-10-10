@@ -19,6 +19,9 @@ struct BTDevice: Codable {
   var address: String
   var isConnected: Bool
   var isFavorite: Bool
+  // false for paired-but-not-connectable LE gadgets (beacons, app pendants…)
+  // — these are what System Settings hides
+  var isConnectable: Bool
   // "keyboard" | "mouse" | "unknown"
   var kind: String
 }
@@ -30,18 +33,10 @@ func devices() -> [IOBluetoothDevice] {
 
 // BLE HID devices leave classOfDevice empty, so their type has to come from
 // blued's own scan data — system_profiler reports device_minorType (Keyboard,
-// Mouse, …) keyed by address. first-party binary, one call per list.
-func minorTypes() -> [String: String] {
-  let p = Process()
-  p.executableURL = URL(fileURLWithPath: "/usr/sbin/system_profiler")
-  p.arguments = ["SPBluetoothDataType", "-json"]
-  let pipe = Pipe()
-  p.standardOutput = pipe
-  p.standardError = FileHandle.nullDevice
-  do { try p.run() } catch { return [:] }
-  let data = pipe.fileHandleForReading.readDataToEndOfFile()
-  p.waitUntilExit()
-
+// Mouse, …) keyed by address. system_profiler costs 300–500ms per call, so
+// the raw report is cached to disk and parsed on read; a detached refresh
+// keeps the cache warm without ever blocking a list.
+func parseTypes(_ data: Data) -> [String: String] {
   var map: [String: String] = [:]
   func normalize(_ a: String) -> String {
     a.lowercased().replacingOccurrences(of: ":", with: "-")
@@ -75,6 +70,38 @@ func minorTypes() -> [String: String] {
   return map
 }
 
+func typesCachePath() -> String {
+  NSTemporaryDirectory() + "talonite_bt_minor_types.json"
+}
+
+// cache-only read — instant, never spawns system_profiler
+func cachedTypes() -> [String: String] {
+  guard let data = FileManager.default.contents(atPath: typesCachePath()) else { return [:] }
+  return parseTypes(data)
+}
+
+// if the cache is missing or older than the ttl, kick off a detached
+// system_profiler that lands in the cache via a tmp-and-mv (the sh survives
+// our exit, so the write completes even though we return immediately)
+func refreshTypesInBackground() {
+  let ttl: TimeInterval = 600
+  let path = typesCachePath()
+  let fm = FileManager.default
+  if let attrs = try? fm.attributesOfItem(atPath: path),
+    let mtime = attrs[.modificationDate] as? Date,
+    Date().timeIntervalSince(mtime) < ttl
+  { return }
+  let tmp = path + ".tmp"
+  let sh = Process()
+  sh.executableURL = URL(fileURLWithPath: "/bin/sh")
+  sh.arguments = [
+    "-c",
+    "/usr/sbin/system_profiler SPBluetoothDataType -json > '\(tmp)' && mv '\(tmp)' '\(path)'",
+  ]
+  sh.standardError = FileHandle.nullDevice
+  try? sh.run() // deliberately not waited on
+}
+
 // classic devices carry a full class-of-device; keyboard = major Peripheral
 // (5) minor 0x10, mouse = major 5 minor 0x20 (pointing). BLE HID gear reports
 // class 0 — fall through to blued's minorType, then give up and show the rune
@@ -92,22 +119,32 @@ func classify(_ cls: UInt32, _ minorType: String?) -> String {
   return "unknown"
 }
 
-func describe(_ device: IOBluetoothDevice, _ types: [String: String]) -> BTDevice {
+func describe(_ device: IOBluetoothDevice, _ types: [String: String], _ haveCache: Bool) -> BTDevice {
   let cls = (device.value(forKey: "classOfDevice") as? NSNumber)?.uint32Value ?? 0
   let minorType = types[device.addressString.lowercased()]
+  // "connectable" = the things System Settings shows: has a real device type
+  // in blued's report, or is currently connected. Passive BLE gadgets (rssi-
+  // only entries) sit in the registry but can't be connected. With no cache
+  // at all we can't tell, so err on the side of showing everything.
+  let connectable = device.isConnected() || minorType != nil || !haveCache
   return BTDevice(
     name: device.name ?? "Unknown",
     address: device.addressString,
     isConnected: device.isConnected(),
     isFavorite: device.isFavorite(),
+    isConnectable: connectable,
     kind: classify(cls, minorType)
   )
 }
 
 func listDevices() -> [BTDevice] {
-  let types = minorTypes()
+  // kinds come from the disk cache (instant); the report refresh happens
+  // detached so a stale cache never blocks the list
+  let types = cachedTypes()
+  let haveCache = FileManager.default.fileExists(atPath: typesCachePath())
+  refreshTypesInBackground()
   return devices()
-    .map { describe($0, types) }
+    .map { describe($0, types, haveCache) }
     .sorted { lhs, rhs in
       if lhs.isConnected != rhs.isConnected { return lhs.isConnected }
       return lhs.name < rhs.name
