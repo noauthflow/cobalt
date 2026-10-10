@@ -46,8 +46,11 @@ mkdir -p "$HOME/.local/bin" "$HOME/.local/share/elgiloy"
 # build straight to the install target — nothing lands in the repo folder
 swiftc -O -o "$BIN_LOCAL" main.swift tap.swift overlay.swift browser.swift favicon.swift \
   -framework AppKit -framework ApplicationServices -framework OSAKit
-codesign --force --sign "cobalt-dev" "$BIN_LOCAL"
-echo "signed (cobalt-dev)"
+# --identifier pins the TCC identity to the label. without it codesign
+# defaults to the binary name and tcc records end up keyed 'elgiloy' while
+# the reset below targets 'dev.cobalt.elgiloy' — a silent no-op.
+codesign --force --sign "cobalt-dev" --identifier "$BUNDLE_ID" "$BIN_LOCAL"
+echo "signed (cobalt-dev, id $BUNDLE_ID)"
 
 # material symbols subset (single glyph: volume_up) for the audio-playing
 # indicator — installed next to the binary's data dir; the daemon registers
@@ -62,7 +65,9 @@ launchctl bootout "$GUI/$LABEL" 2>/dev/null || true
 # automation prompt never appears (silent -1743). this reset is scoped to the
 # bundle id and touches no other app's permissions. NEVER run a bare
 # `tccutil reset AppleEvents` — that wipes every app's automation grants.
-tccutil reset AppleEvents "$BUNDLE_ID" 2>/dev/null || true
+if ! tccutil reset AppleEvents "$BUNDLE_ID"; then
+  echo "note: no stale apple-events record for $BUNDLE_ID (normal on first install)"
+fi
 
 cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -84,6 +89,8 @@ echo
 if ! pgrep -xq "$NAME"; then
   echo "one-time setup:"
   echo "  system settings -> privacy & security -> accessibility"
+  echo "    (os 27 renamed this pane 'device control and data access' —"
+  echo "    same permission underneath)"
   echo "  add: $BIN_LOCAL"
   echo "  automation (tab switching): first ctrl+tab over chromium should pop an"
   echo "  automation prompt -> allow. if no popup ever appears (macos suppresses"

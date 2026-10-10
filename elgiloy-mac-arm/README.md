@@ -103,7 +103,7 @@ what it does: builds with swiftc, signs with the `cobalt-dev` codesign identity 
 
 permissions (one-time):
 
-1. **accessibility + input monitoring** — system settings → privacy & security → accessibility → add `~/.local/bin/elgiloy`
+1. **accessibility + input monitoring** — system settings → privacy & security → accessibility (os 27 renamed this pane "device control and data access" — same permission underneath) → add `~/.local/bin/elgiloy`
 2. **automation** — the first ctrl+tab over chromium should pop "elgiloy wants to control Chromium" → allow. if no popup ever appears (macos suppresses it for launchd-spawned agents), run the binary once in the foreground from a terminal, press ctrl+tab, allow, ctrl+C — launchd takes it from there. the grant is recorded against the binary's `cobalt-dev` signature, so it survives rebuilds.
 
 ### the stale-denial trap (read if the prompt never appears)

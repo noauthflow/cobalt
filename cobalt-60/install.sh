@@ -66,5 +66,7 @@ echo
 if ! pgrep -xq "$NAME"; then
   echo "one-time setup:"
   echo "  system settings -> privacy & security -> accessibility"
+  echo "    (os 27 renamed this pane 'device control and data access' —"
+  echo "    same permission underneath)"
   echo "  add: $BIN_LOCAL"
 fi

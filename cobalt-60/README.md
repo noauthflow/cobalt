@@ -41,7 +41,7 @@ what it does: builds with swiftc, signs with the `cobalt-dev` codesign identity 
 
 ## permissions
 
-**Accessibility** (system settings → privacy & security → accessibility). the event tap is the entire mechanism — without the grant, tap creation fails and the daemon writes the reason to its log and exits (launchd restarts it, it tries again, forever, politely).
+**Accessibility** (system settings → privacy & security → accessibility; os 27 renamed this pane "device control and data access" — same permission underneath). the event tap is the entire mechanism — without the grant, tap creation fails and the daemon writes the reason to its log and exits (launchd restarts it, it tries again, forever, politely).
 
 the binary is installed to `~/.local/bin/cobalt-60` — that exact path is what you add to the accessibility list. signing with `cobalt-dev` matters here: ad-hoc (unsigned) builds change hash every rebuild and invalidate the grant; a signed build keeps it.
 

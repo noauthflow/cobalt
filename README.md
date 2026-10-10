@@ -41,14 +41,14 @@ Symlinks the CLI to `~/.local/bin/erythrite`. The old v1 window daemon (`main.sw
 Builds with `swiftc`, signs, copies the binary to `~/.local/bin/cobalt-60`, registers launchd agent `dev.cobalt.cobalt-60`.
 
 - Requires: `swiftc`, the `cobalt-dev` signing identity (see below)
-- Permissions: Accessibility (rewrites mouse events system-wide)
+- Permissions: Accessibility (rewrites mouse events system-wide) — on OS 27+ the Settings pane is renamed "Device Control and Data Access"
 
 ### elgiloy-mac-arm
 
 Same pipeline as cobalt-60: binary to `~/.local/bin/elgiloy`, launchd agent `dev.cobalt.elgiloy`.
 
 - Requires: `swiftc`, the `cobalt-dev` signing identity
-- Permissions: Accessibility + Input Monitoring (listens for ctrl+tab), plus one Automation prompt on first use (queries Chrome's tabs)
+- Permissions: Accessibility + Input Monitoring (listens for ctrl+tab), plus one Automation prompt on first use (queries Chrome's tabs) — on OS 27+ the Accessibility pane is renamed "Device Control and Data Access"
 
 ### cerulean
 
@@ -76,7 +76,7 @@ Raycast extension. Install via Raycast's development extension workflow.
 
 ## One-time setup: the `cobalt-dev` signing identity
 
-The daemon install scripts sign their binaries with a self-signed codesigning certificate named `cobalt-dev`. macOS anchors TCC permissions to the code signature, so a stable identity means Accessibility grants survive rebuilds.
+The daemon install scripts sign their binaries with a self-signed codesigning certificate named `cobalt-dev`. macOS anchors TCC permissions to the code signature, so a stable identity means Accessibility grants survive rebuilds. (OS 27 renamed the Accessibility pane in Privacy & Security to "Device Control and Data Access" — it's the same TCC service underneath.)
 
 Create it once:
 
