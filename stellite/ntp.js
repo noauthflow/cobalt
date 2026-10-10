@@ -151,7 +151,7 @@ const setFolderState = (state) => {
   card.classList.toggle('needs-perm', state === 'needs-perm');
   card.classList.toggle('connected', state === 'connected');
   card.classList.toggle('unsupported', state === 'unsupported');
-  $('folderdetail').hidden = state !== 'connected';
+  $('folderdisconnect').hidden = state !== 'connected';
   $('folderbtn').hidden = state === 'unsupported';
   const labels = { empty: 'Choose folder', 'needs-perm': 'Reconnect', connected: 'Change', unsupported: '' };
   $('folderbtn').textContent = labels[state] ?? '';
@@ -187,9 +187,11 @@ const renderPreview = () => {
 
 const stopPolling = () => { clearInterval(pollTimer); pollTimer = null; };
 
-const setBgInfo = () =>
-  $('bginfo').textContent = S.photos.length === 0 ? 'none'
-    : S.photos.length === 1 ? '1 photo' : `${S.photos.length} photos`;
+const setFolderBadge = (n) => {
+  const b = $('folderbadge');
+  b.textContent = n;
+  b.hidden = n == null;
+};
 
 const scanFolder = async (dir) => {
   if (!dir) return;
@@ -235,12 +237,15 @@ const scanFolder = async (dir) => {
   blobUrls = next;
   S.photos = urls;
 
-  setBgInfo();
   renderPreview();
   const n = urls.length;
-  setFolderHead(dir.name,
-    n === 0 ? 'Folder is empty'
-      : n === 1 ? '1 image' : `${n} images`);
+  if (n === 0) {
+    setFolderBadge(null);
+    setFolderHead(dir.name, 'Folder is empty');
+  } else {
+    setFolderBadge(n);
+    setFolderHead(dir.name, '');
+  }
   // only (re)pick a background when photos just appeared or the current one vanished
   const vanished = currentBg && !urls.includes(currentBg);
   if ((hadPhotos === 0 && n > 0) || vanished) showMode();
@@ -276,9 +281,6 @@ $('folderbtn').addEventListener('click', async () => {
   }
   pickFolder();
 });
-$('foldercard').addEventListener('click', () => {
-  if ($('foldercard').classList.contains('empty')) pickFolder();
-});
 
 // ---- adjustments (brightness) ----
 
@@ -311,10 +313,10 @@ $('folderdisconnect').addEventListener('click', async () => {
   lastSig = null;
   S.photos = [];
   currentBg = null;
-  setBgInfo();
   renderPreview();
+  setFolderBadge(null);
   setFolderState('empty');
-  setFolderHead('No folder yet', 'Pick a folder to use for photos');
+  setFolderHead('No folder selected', 'Photos are read live from a local folder');
   stopAscii?.();
   stopAscii = null;
   $('artwrap').classList.remove('on');
@@ -389,10 +391,6 @@ store.get(S, (vals) => {
   $('interactivetoggle').checked = S.interactive;
   $('menutoggle').checked = S.menu;
   $('brightness').value = S.brightness;
-  paintSlider($('brightness'));
-  $('brightval').textContent = S.brightness + '%';
-  setBgInfo();
-  renderPreview();
   paintSlider($('brightness'));
   $('brightval').textContent = S.brightness + '%';
   setFolderState('empty'); // until a saved folder proves otherwise

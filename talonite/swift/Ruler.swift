@@ -7,9 +7,9 @@
 // units CSS/layout use); labelled px to match the oracle.
 //
 // esc or right-click cancels (prints null), space accepts the point under
-// the crosshair. holding cmd snaps the measured line to 45° increments
-// around the start point. no args beyond dragMode, no permissions — the
-// overlay is our own key window.
+// the crosshair. holding cmd or shift snaps the measured line to 45°
+// increments around the start point. no args beyond dragMode, no permissions —
+// the overlay is our own key window.
 
 import AppKit
 
@@ -40,7 +40,8 @@ private final class RulerView: NSView {
       needsDisplay = true
 
     case .flagsChanged:
-      snapping = event.modifierFlags.contains(.command)
+      // cmd or shift both snap the line to 45° increments
+      snapping = event.modifierFlags.contains(.command) || event.modifierFlags.contains(.shift)
       needsDisplay = true
 
     case .leftMouseDown:
@@ -107,7 +108,7 @@ private final class RulerView: NSView {
 
     if let s = start {
       let end = effectiveEnd()
-      // the measured line — amber while cmd-snapped to 45°, white otherwise
+      // the measured line — amber while snapped to 45° (cmd/shift), white otherwise
       let line = NSBezierPath()
       line.lineWidth = 1.5
       line.move(to: s)
@@ -193,6 +194,15 @@ func measureDistance(dragMode: Bool) -> String? {
   window.makeKeyAndOrderFront(nil)
   window.makeFirstResponder(view)
   NSCursor.crosshair.push()
+
+  // paint the crosshair immediately at the cursor's position — otherwise the
+  // overlay is fully transparent until the first mouse-moved event lands
+  let mouseGlobal = NSEvent.mouseLocation
+  view.current = NSPoint(
+    x: mouseGlobal.x - screen.frame.origin.x,
+    y: mouseGlobal.y - screen.frame.origin.y
+  )
+  view.needsDisplay = true
 
   var result: String?
   var running = true
