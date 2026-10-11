@@ -63,26 +63,15 @@ final class Overlay {
             highlight.isHidden = true
         }
 
-        func setHeight(_ h: CGFloat, bottomY: CGFloat, x: CGFloat, animate: Bool) {
+        // the container NEVER animates: a live add/remove readjusts the glass
+        // instantly. the changed ROW carries the motion (see buildRows).
+        func setHeight(_ h: CGFloat, bottomY: CGFloat, x: CGFloat) {
             var f = panel.frame
             f.size.height = h
             f.origin = NSPoint(x: x, y: bottomY)
-            if animate {
-                // a LIVE resize (tab closed/added mid-session): ease the pill
-                // to its new frame instead of snapping — an instant collapse
-                // of 40pt reads as a glitch. glass/content ride along via
-                // their autoresizing, so only the window frame is animated.
-                NSAnimationContext.runAnimationGroup { ctx in
-                    ctx.duration = 0.2
-                    ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                    ctx.allowsImplicitAnimation = true
-                    panel.animator().setFrame(f, display: true)
-                }
-            } else {
-                panel.setFrame(f, display: true)
-                glass.frame = NSRect(origin: .zero, size: f.size)
-                content.frame = NSRect(origin: .zero, size: f.size)
-            }
+            panel.setFrame(f, display: true)
+            glass.frame = NSRect(origin: .zero, size: f.size)
+            content.frame = NSRect(origin: .zero, size: f.size)
         }
 
         // live exit mid-session (last pinned tab closed, …): fade the pill
@@ -104,38 +93,37 @@ final class Overlay {
 
         func buildRows(_ tabs: [(Browser.Tab, Int)], showPin: Bool, animate: Bool,
                        topFixed: Bool = true) {
-            // remember where each visible tab's row WAS, so a live rebuild
-            // can slide rows into their new slots instead of teleporting
-            let oldFrames = Dictionary(rows.map { (Self.key($0.1), $0.0.frame) },
-                                       uniquingKeysWith: { a, _ in a })
+            // remember which rows WERE visible, so a live rebuild can tween
+            // the one added/removed row instead of reflowing the list
             let oldViews = Dictionary(rows.map { (Self.key($0.1), $0.0) },
                                       uniquingKeysWith: { a, _ in a })
             let oldH = Overlay.height(for: max(rows.count, 1))
-            // target height from the row count — NOT panel.frame.height,
-            // which may still report the pre-animation frame mid-resize
             let targetH = Overlay.height(for: max(tabs.count, 1))
-            // EASED REBUILDS HAVE EXACTLY ONE ANIMATED SYSTEM: the window
-            // frame itself. rows carry NO CA tweens — each row is PINNED via
-            // autoresizing to the edge it must follow, so its motion IS the
-            // glass's motion, frame for frame. (the previous design tweened
-            // row frames with Core Animation while NSWindow animated the
-            // frame underneath them — two clocks that never quite agree, so
-            // the rows meant to hold still visibly sagged on every close,
-            // by a different amount each time.)
-            //   • a row that keeps its screen position pins to the FIXED
-            //     edge — it cannot move a pixel
-            //   • a row that slides pins to the MOVING edge and glides in
-            //     lockstep with the glass edge itself
-            //   • ghosts pin to the fixed edge: they dissolve exactly where
-            //     they stood while the pack slides across them
-            // topFixed (main pill): the TOP edge is frozen and the bottom
-            // edge carries the height change → the origin moves by
-            // −heightDelta. !topFixed (pin pill): the BOTTOM edge is frozen
-            // (glued to the main pill below) and the TOP edge carries the
-            // change → the origin never moves.
-            let heightDelta = targetH - oldH
-            let originDelta = animate && topFixed ? -heightDelta : 0
-            let edgeDelta = animate ? (topFixed ? originDelta : heightDelta) : 0
+            // THE ADDED/REMOVED ROW IS THE ONLY ANIMATED SYSTEM. the glass
+            // and every other row snap straight to their final frames — a
+            // close must not drag the pack below the dead row through a
+            // 0.2s glide, and an open must not push it. the change is
+            // conveyed by the changed row alone:
+            //   • added → unfolds open at its slot, anchored to the pill's
+            //     FIXED edge (main pill: grows downward from under the row
+            //     above; pin pill: grows upward from above the row below),
+            //     fading in as it fills.
+            //   • removed → squishes shut in its slot, anchored to the same
+            //     fixed edge, over the row that snapped into its place (it
+            //     sits ABOVE that row in z so the collapse reads as the row
+            //     closing, not a crossfade).
+            // anything impure — scroll-window churn (a row leaves as another
+            // enters), reorders, title edits — snaps with no tween: a
+            // collapse there would fight the churn. purity gates below: a
+            // tween only fires when NOTHING else changed — one row in with
+            // none out, or one row out with none in.
+            let newKeys = Set(tabs.map { Self.key($0.0) })
+            let adding = animate && !oldViews.isEmpty
+                && oldViews.keys.allSatisfy { newKeys.contains($0) }
+            let removing = animate && !adding
+                && !newKeys.isEmpty
+                && newKeys.allSatisfy { oldViews[$0] != nil }
+                && oldViews.count > newKeys.count
             content.subviews.forEach { $0.removeFromSuperview() }
             rows.removeAll()
             if content.layer?.sublayers?.contains(highlight) != true {
@@ -147,61 +135,49 @@ final class Overlay {
                 seen.insert(k)
                 let final = rowFrame(i, height: targetH)
                 let row = RowView(frame: final, tab: entry.0, showPin: showPin)
-                if animate, let old = oldFrames[k] {
-                    let drift = (final.minY - old.minY) + originDelta // net screen move
-                    if abs(drift) < 0.5 {
-                        // holds still on screen → pin to the FIXED edge
-                        // (topFixed: rigid top margin; !topFixed: rigid
-                        // bottom margin). the old frame's fixed-edge margin
-                        // is exactly the intended final margin.
-                        row.frame = old
-                        row.autoresizingMask = topFixed ? .minYMargin : .maxYMargin
-                    } else if abs(drift - edgeDelta) < 0.5 {
-                        // rides the moving edge → pin to it, starting from
-                        // the old frame. a rigid bottom margin is height-
-                        // independent; a rigid top margin is derived against
-                        // the CURRENT (still old-sized) bounds — either way
-                        // the old frame carries the intended final margin.
-                        row.frame = old
-                        row.autoresizingMask = topFixed ? .maxYMargin : .minYMargin
-                    }
-                    // anything else (mixed scroll-window churn) → snap:
-                    // frame stays final, no pin
-                } else if animate {
-                    // newly visible row: fade in — popping into existence at
-                    // full opacity mid-resize reads as a glitch next to the
-                    // neighbors gliding into place. pinned to the bottom edge
-                    // at its final slot: on growth it rides the extending
-                    // edge down, otherwise it materializes in place.
-                    row.autoresizingMask = [.maxYMargin]
+                if adding, oldViews[k] == nil {
+                    // newly added row: unfold open, anchored to the fixed
+                    // edge — zero height at its final top (main pill) or
+                    // final bottom (pin pill), expanding toward the other
+                    // edge. everything around it is already final.
+                    var start = final
+                    if topFixed { start.origin.y = final.maxY }
+                    start.size.height = 0
+                    row.frame = start
                     row.alphaValue = 0
+                    content.addSubview(row)
                     NSAnimationContext.runAnimationGroup { ctx in
-                        ctx.duration = 0.2
+                        ctx.duration = 0.12
                         ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                        ctx.allowsImplicitAnimation = true
+                        row.animator().frame = final
                         row.animator().alphaValue = 1
                     }
+                } else {
+                    content.addSubview(row)
                 }
-                content.addSubview(row)
                 rows.append((row, entry.0, entry.1))
             }
-            // rows that left the visible set: dissolve where they stood
-            // instead of vanishing — the pack gliding up across the fading
-            // ghost reads as one motion, an instant disappearance reads as
-            // a cut. ghosts pin to the FIXED edge (they stay put on screen
-            // while the pack slides across them) and sit at the BOTTOM of
-            // the z-order so the sliding rows pass over them; a rebuild
-            // during the fade sweeps them (the removeFromSuperview sweep
-            // above collects any leftovers).
-            if animate {
+            // rows that left the visible set: squish shut in their slot.
+            // the ghost restates its frame in the FINAL window's content
+            // coords first — a screen-fixed slot shifts by the height delta
+            // when the bottom edge moves (main pill, top frozen) and is
+            // unchanged when it doesn't (pin pill, bottom glued). z-order
+            // ABOVE: the collapsing ghost draws over the row that snapped
+            // into its slot, so the squish reads as the row closing. a
+            // rebuild during the tween sweeps it (the removeFromSuperview
+            // sweep above collects any leftovers).
+            if removing {
+                let dh = topFixed ? targetH - oldH : CGFloat(0)
                 for (k, ghost) in oldViews where !seen.contains(k) {
-                    ghost.alphaValue = 1
-                    ghost.autoresizingMask = topFixed ? .minYMargin : .maxYMargin
-                    content.addSubview(ghost, positioned: .below, relativeTo: nil)
+                    var target = ghost.frame
+                    target.origin.y += dh
+                    if topFixed { target.origin.y = target.maxY }  // anchored: top
+                    target.size.height = 0
+                    content.addSubview(ghost, positioned: .above, relativeTo: nil)
                     NSAnimationContext.runAnimationGroup({ ctx in
-                        ctx.duration = 0.2
+                        ctx.duration = 0.12
                         ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                        ctx.allowsImplicitAnimation = true
+                        ghost.animator().frame = target
                         ghost.animator().alphaValue = 0
                     }, completionHandler: ghost.removeFromSuperview)
                 }
@@ -325,11 +301,7 @@ final class Overlay {
         let mainVisible = regular.isEmpty ? [] : Array(regular[start..<start + count])
 
         // rebuild only when the visible tab set actually changed (pinned flags
-        // AND view mode are part of the key — either changing redraws). easeMain
-        // and easePin survive the block: the highlight below rides the same
-        // motion.
-        var easeMain = false
-        var easePin = false
+        // AND view mode are part of the key — either changing redraws).
         let key = (splitView ? "s\u{1f}" : "f\u{1f}")
             + pinVisible.map { "p\($0.index):\($0.tab.n):\($0.tab.audible ? 1 : 0):\($0.tab.title)" }.joined(separator: "\u{1e}")
             + "\u{1d}"
@@ -340,60 +312,40 @@ final class Overlay {
             let mainH = Self.height(for: mainVisible.count)
             let showPin = !pinVisible.isEmpty
             let showMain = !mainVisible.isEmpty
-            // live-update easing applies to exactly TWO cases, both "one
-            // pill's height changed while the layout is otherwise stable":
-            //   • easeMain — a regular tab closed (or was added): the main
-            //     pill's TOP edge stays put, its bottom edge carries the
-            //     height change. rows are laid out from the top, so anchoring
-            //     the top edge means every row above the closed one holds
-            //     STILL while the pack below glides up to meet it.
-            //   • easePin — a PINNED tab closed: the pin pill's BOTTOM edge
-            //     stays put (it's glued to the main pill below, which does
-            //     not move at all), its top edge drops, rows below the closed
-            //     one hold still and rows above ride the falling top edge.
-            // every other case — fresh open, a pill appearing/vanishing,
-            // re-centering, scroll-driven renders — snaps instantly; an
-            // eased move of the WHOLE overlay squishes it toward the middle
-            // and reads as a glitch.
+            // LIVE UPDATES SNAP THE CONTAINER: the glass readjusts instantly
+            // and every row takes its final frame at once — EXCEPT the one
+            // row that was added or removed, which carries the only motion
+            // (see buildRows). the main pill's TOP edge stays put so rows
+            // above the change can't shift, and the pin pill stays glued to
+            // the main pill's top edge. when scrollable the pill's height
+            // doesn't even change — nothing container-side moves at all.
             let wasPin = pinPill.panel.isVisible
             let wasMain = mainPill.panel.isVisible
-            let pinStable = !showPin || abs(pinPill.panel.frame.height - pinH) <= 0.5
-            let mainStable = showMain && wasMain
-                && abs(mainPill.panel.frame.height - mainH) <= 0.5
-            easeMain = !center && wasMain && showMain && wasPin == showPin
-                && pinStable
-                && abs(mainPill.panel.frame.height - mainH) > 0.5
-            easePin = !center && wasPin && showPin
-                && mainStable
-                && abs(pinPill.panel.frame.height - pinH) > 0.5
+            // live add/remove with the pill set unchanged: anchors hold (main
+            // pill top frozen, pin pill glued to it) and the changed row gets
+            // the only tween. every case that re-centers — a pill appearing
+            // or vanishing, a fresh open — snaps everything: the ghost
+            // collapse math below assumes exactly these anchors.
+            let live = !center && wasMain && showMain && wasPin == showPin
 
             if let s = NSScreen.main {
                 let x = s.frame.midX - Overlay.W / 2
-                if easeMain {
-                    // top edge frozen: only the bottom rises
+                if live {
                     let mainTop = mainPill.panel.frame.maxY
-                    mainPill.setHeight(mainH, bottomY: mainTop - mainH, x: x, animate: true)
+                    mainPill.setHeight(mainH, bottomY: mainTop - mainH, x: x)
                     mainPill.panel.orderFrontRegardless()
                     if showPin {
                         // pin pill rides above the main pill's top edge —
                         // which didn't move, so this frame is a no-op
-                        pinPill.setHeight(pinH, bottomY: mainTop + Overlay.PILL_GAP, x: x, animate: false)
+                        pinPill.setHeight(pinH, bottomY: mainTop + Overlay.PILL_GAP, x: x)
                         pinPill.panel.orderFrontRegardless()
-                    } else {
-                        pinPill.dismiss()   // fade — last pinned tab closed
                     }
-                } else if easePin {
-                    // pinned-tab close: bottom edge frozen — the pin pill
-                    // shrinks upward, still glued to the untouched main pill
-                    pinPill.setHeight(pinH, bottomY: pinPill.panel.frame.origin.y,
-                                      x: x, animate: true)
-                    pinPill.panel.orderFrontRegardless()
                 } else {
                     // position the pair: union centered on the screen's mid-line
                     let total = pinH + (showPin && showMain ? Overlay.PILL_GAP : 0) + mainH
                     let bottom = s.frame.midY - total / 2
                     if showMain {
-                        mainPill.setHeight(mainH, bottomY: bottom, x: x, animate: false)
+                        mainPill.setHeight(mainH, bottomY: bottom, x: x)
                         mainPill.panel.orderFrontRegardless()
                     } else if wasMain {
                         mainPill.dismiss()   // fade — last row closed mid-session
@@ -401,7 +353,7 @@ final class Overlay {
                         mainPill.panel.orderOut(nil)
                     }
                     if showPin {
-                        pinPill.setHeight(pinH, bottomY: bottom + mainH + (showMain ? Overlay.PILL_GAP : 0), x: x, animate: false)
+                        pinPill.setHeight(pinH, bottomY: bottom + mainH + (showMain ? Overlay.PILL_GAP : 0), x: x)
                         pinPill.panel.orderFrontRegardless()
                     } else if wasPin {
                         pinPill.dismiss()   // fade — last pinned tab closed
@@ -416,9 +368,9 @@ final class Overlay {
             pinPill.empty = !showPin
             mainPill.empty = !showMain
             pinPill.buildRows(pinVisible.map { ($0.tab, $0.index) }, showPin: false,
-                              animate: easePin, topFixed: false)
+                              animate: live, topFixed: false)
             mainPill.buildRows(mainVisible.map { ($0.tab, $0.index) }, showPin: !splitView,
-                               animate: easeMain)
+                               animate: live)
 
             // the thumb rides ON TOP of the rows — add it after them so it
             // survives every rebuild as the topmost layer
@@ -429,14 +381,11 @@ final class Overlay {
         currentStart = start
         currentCount = mainVisible.count
 
-        // exactly one pill's highlight shows: the one holding sel. on an
-        // eased rebuild the highlight SNAPS onto its row's final frame —
-        // layers don't autoresize, so a tweened highlight could never be
-        // guaranteed lockstep with the window-driven rows. snapped, it rides
-        // the very same window animation as the row it sits on.
+        // exactly one pill's highlight shows: the one holding sel. rows have
+        // already snapped to their final frames, so the highlight can slide
+        // freely — nothing rides a window tween anymore.
         let inPin = pinPill.placeHighlight(index: sel, animate: !center)
-        let inMain = mainPill.placeHighlight(index: sel, animate: !center,
-                                             duration: (easeMain || easePin) ? 0 : 0.05)
+        let inMain = mainPill.placeHighlight(index: sel, animate: !center)
         if inPin { mainPill.highlight.isHidden = true }
         if inMain { pinPill.highlight.isHidden = true }
 
