@@ -50,6 +50,16 @@ final class App: NSObject {
     private var staleReplies = 0       // consecutive pre-close replies swallowed (give up after 4)
     private var movedYet = false
     private var watchdog: Timer?
+    // first paint waits for a FRESH list reply. a tab closed 10ms before the
+    // open isn't in the 200ms-polled cache yet — painting the cache means the
+    // dead tab flashes on screen and vanishes one roundtrip later. so begin()
+    // holds the paint until a request QUEUED BY THE OPEN replies (list replies
+    // cost a few ms — far below perception), falling back to the cache only
+    // if chrome is slow to answer.
+    private var awaitingFirstList = false
+    private var firstPaintSeq = 0      // list request seq at begin(); replies from earlier seqs may predate the close
+    private var firstPaintTimer: Timer?
+    private var listSeq = 0            // incremented per list request; captured by its completion
 
     // warm cache survives between opens → overlay renders instantly.
     // cacheSel = the tab chrome was last known to be on. cacheBundleId
@@ -101,10 +111,23 @@ final class App: NSObject {
         movedYet = false
         tabs = bid == cacheBundleId ? cache : []
         sel = cacheSel < tabs.count ? cacheSel : 0
-        overlay.render(tabs: tabs, sel: sel)
-        overlay.show()
         startWatchdog()
-        refreshList()   // one query on open; corrects sel if chrome moved since last time
+        // hold the paint: the first on-screen frame is the fresh reply's
+        // render (see completion), not this possibly-stale cache. a just-
+        // closed tab can then NEVER flash — the list query answers in a few
+        // ms, well under perception.
+        awaitingFirstList = true
+        refreshList()   // one query on open; paints the overlay when it replies
+        firstPaintSeq = listSeq
+        firstPaintTimer?.invalidate()
+        firstPaintTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: false) { [weak self] _ in
+            guard let self, self.open, self.awaitingFirstList else { return }
+            // chrome never answered in time → paint the cache now; the
+            // in-flight correction snaps the delta when it lands
+            self.awaitingFirstList = false
+            self.overlay.render(tabs: self.tabs, sel: self.sel)
+            self.overlay.show()
+        }
     }
 
     // each ctrl+tab press: highlight moves INSTANTLY (local), and chrome
@@ -242,6 +265,9 @@ final class App: NSObject {
     private func stopWatchdog() {
         watchdog?.invalidate()
         watchdog = nil
+        // a pending first paint must not fire after the session ended
+        awaitingFirstList = false
+        firstPaintTimer?.invalidate()
     }
 
     private func refreshList() {
@@ -252,6 +278,8 @@ final class App: NSObject {
         // added seconds ago wouldn't appear until the NEXT session.
         if listBusy { listPending = true; return }
         listBusy = true
+        listSeq += 1
+        let seq = listSeq   // lets the completion tell PRE-open replies from the fresh one
         Browser.list(bundleId: bid, queue: q) { [weak self] tabs, active, grounded in
             guard let self else { return }
             DispatchQueue.main.async {
@@ -344,6 +372,19 @@ final class App: NSObject {
                     }
                     if changed { self.persist() }   // skip disk writes when the poll found nothing new
                     if self.open {
+                        if self.awaitingFirstList && seq < self.firstPaintSeq {
+                            // a reply from a request queued before the open —
+                            // it may predate the tab the user just closed.
+                            // never first-paint from it: the follow-up refresh
+                            // (queued via listPending) or the fallback timer
+                            // owns the first frame.
+                            return   // defer still drains listPending
+                        }
+                        let firstPaint = self.awaitingFirstList
+                        if firstPaint {
+                            self.awaitingFirstList = false
+                            self.firstPaintTimer?.invalidate()
+                        }
                         // if the user already moved (possibly on the very
                         // first press), re-anchor the highlight to the same
                         // tab so a reordered/fresh list can't shift sel
@@ -367,7 +408,11 @@ final class App: NSObject {
                         } else if let anchor, let i = tabs.firstIndex(where: { $0.n == anchor }) {
                             self.sel = i
                         }
-                        self.overlay.render(tabs: self.tabs, sel: self.sel, center: false)
+                        self.overlay.render(tabs: self.tabs, sel: self.sel,
+                                            center: firstPaint)
+                        // the cache-first-paint path in begin() already called
+                        // show(); the fresh-reply first paint shows here
+                        if firstPaint { self.overlay.show() }
                     }
                 }
             }
