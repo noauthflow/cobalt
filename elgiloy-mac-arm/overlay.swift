@@ -63,8 +63,8 @@ final class Overlay {
             highlight.isHidden = true
         }
 
-        // the container NEVER animates: a live add/remove readjusts the glass
-        // instantly. the changed ROW carries the motion (see buildRows).
+        // NOTHING animates in a live update: the glass and every row take
+        // their final geometry in the same frame.
         func setHeight(_ h: CGFloat, bottomY: CGFloat, x: CGFloat) {
             var f = panel.frame
             f.size.height = h
@@ -74,82 +74,29 @@ final class Overlay {
             content.frame = NSRect(origin: .zero, size: f.size)
         }
 
-        // live exit mid-session (last pinned tab closed, …): fade the pill
-        // out instead of yanking it off screen. empty flips NOW so show()
-        // can't front a dying pill; the completion cleans up the rest.
+        // live exit mid-session (last pinned tab closed, …): gone immediately.
         func dismiss() {
             empty = true
-            NSAnimationContext.runAnimationGroup({ ctx in
-                ctx.duration = 0.15
-                ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-                panel.animator().alphaValue = 0
-            }, completionHandler: {
-                // a rebuild that re-populated this pill in the meantime wins
-                guard self.empty else { return }
-                self.panel.orderOut(nil)
-                self.panel.alphaValue = 1
-            })
+            panel.orderOut(nil)
+            panel.alphaValue = 1
         }
 
-        func buildRows(_ tabs: [(Browser.Tab, Int)], showPin: Bool, animate: Bool,
-                       topFixed: Bool = true) {
-            // remember which rows WERE visible, so a live rebuild can tween
-            // the one added/removed row instead of reflowing the list
-            let oldViews = Dictionary(rows.map { (Self.key($0.1), $0.0) },
-                                      uniquingKeysWith: { a, _ in a })
+        // full rebuild: every row snaps to its final frame and the glass to
+        // its final height in ONE frame. no tween exists anywhere — a close
+        // removes its row, an open adds one, nothing glides.
+        func buildRows(_ tabs: [(Browser.Tab, Int)], showPin: Bool) {
             let targetH = Overlay.height(for: max(tabs.count, 1))
-            // THE ADDED ROW IS THE ONLY ANIMATED SYSTEM. the glass and every
-            // other row snap straight to their final frames — a close must
-            // not drag the pack below the dead row through a glide, and an
-            // open must not push it. REMOVALS GET NO ANIMATION AT ALL: the
-            // dead row vanishes the same frame the glass snaps (a lingering
-            // ghost squish read as "the tab is still there" for a beat, and
-            // one that outlived the session resurfaced on the next open).
-            //   • added → unfolds open at its slot, anchored to the pill's
-            //     FIXED edge (main pill: grows downward from under the row
-            //     above; pin pill: grows upward from above the row below),
-            //     fading in as it fills.
-            // anything impure — scroll-window churn (a row leaves as another
-            // enters), reorders, title edits — snaps with no tween. the gate
-            // below: a tween only fires when NOTHING left the visible set.
-            let newKeys = Set(tabs.map { Self.key($0.0) })
-            let adding = animate && !oldViews.isEmpty
-                && oldViews.keys.allSatisfy { newKeys.contains($0) }
             content.subviews.forEach { $0.removeFromSuperview() }
             rows.removeAll()
             if content.layer?.sublayers?.contains(highlight) != true {
                 content.layer?.insertSublayer(highlight, at: 0)
             }
-            var seen = Set<String>()
             for (i, entry) in tabs.enumerated() {
-                let k = Self.key(entry.0)
-                seen.insert(k)
                 let final = rowFrame(i, height: targetH)
                 let row = RowView(frame: final, tab: entry.0, showPin: showPin)
-                if adding, oldViews[k] == nil {
-                    // newly added row: unfold open, anchored to the fixed
-                    // edge — zero height at its final top (main pill) or
-                    // final bottom (pin pill), expanding toward the other
-                    // edge. everything around it is already final.
-                    var start = final
-                    if topFixed { start.origin.y = final.maxY }
-                    start.size.height = 0
-                    row.frame = start
-                    row.alphaValue = 0
-                    content.addSubview(row)
-                    NSAnimationContext.runAnimationGroup { ctx in
-                        ctx.duration = 0.12
-                        ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                        row.animator().frame = final
-                        row.animator().alphaValue = 1
-                    }
-                } else {
-                    content.addSubview(row)
-                }
+                content.addSubview(row)
                 rows.append((row, entry.0, entry.1))
             }
-            // rows that left the visible set: nothing. they were removed
-            // from content with the sweep above — gone this frame.
         }
 
         // row identity across rebuilds — same keying the close-settling
@@ -335,10 +282,8 @@ final class Overlay {
             mainPill.rows.removeAll()
             pinPill.empty = !showPin
             mainPill.empty = !showMain
-            pinPill.buildRows(pinVisible.map { ($0.tab, $0.index) }, showPin: false,
-                              animate: live, topFixed: false)
-            mainPill.buildRows(mainVisible.map { ($0.tab, $0.index) }, showPin: !splitView,
-                               animate: live)
+            pinPill.buildRows(pinVisible.map { ($0.tab, $0.index) }, showPin: false)
+            mainPill.buildRows(mainVisible.map { ($0.tab, $0.index) }, showPin: !splitView)
 
             // the thumb rides ON TOP of the rows — add it after them so it
             // survives every rebuild as the topmost layer
@@ -349,11 +294,11 @@ final class Overlay {
         currentStart = start
         currentCount = mainVisible.count
 
-        // exactly one pill's highlight shows: the one holding sel. rows have
-        // already snapped to their final frames, so the highlight can slide
-        // freely — nothing rides a window tween anymore.
-        let inPin = pinPill.placeHighlight(index: sel, animate: !center)
-        let inMain = mainPill.placeHighlight(index: sel, animate: !center)
+        // exactly one pill's highlight shows: the one holding sel. it SNAPS
+        // here — a post-close reposition must not glide; the per-press
+        // app-switcher slide lives only in moveHighlight().
+        let inPin = pinPill.placeHighlight(index: sel, animate: false)
+        let inMain = mainPill.placeHighlight(index: sel, animate: false)
         if inPin { mainPill.highlight.isHidden = true }
         if inMain { pinPill.highlight.isHidden = true }
 
@@ -378,10 +323,7 @@ final class Overlay {
         let thumbH = max(24, trackH * CGFloat(count) / CGFloat(total))
         let frac = CGFloat(currentStart) / CGFloat(max(1, total - count))
         let y = Overlay.MARGIN + (trackH - thumbH) * (1 - frac)   // flipped: start=0 → top
-        CATransaction.begin()
-        CATransaction.setAnimationDuration(0.05)
         scrollbar.frame = NSRect(x: Overlay.W - 7, y: y, width: 5, height: thumbH)
-        CATransaction.commit()
     }
 
     // per-press fast path: slide the highlight layer. only when sel is fully

@@ -252,13 +252,13 @@ final class App: NSObject {
                 self.end()
                 return
             }
-            // 1s heartbeat: the per-press mirror path only tracks the active
-            // index (full list + AX scan every 50ms would lag the tap), so
-            // titles, audio flags and pin state go stale while a session is
-            // open. every 10th tick pulls a fresh list — cheap once a second,
-            // and closes get their confirm beat anyway.
+            // 200ms heartbeat: same cadence as the closed-state poll — the
+            // full list + AX scan is a few ms of apple-event time, cheap even
+            // mid-session (50ms would start to lag the tap). without it a tab
+            // closed by MOUSE or ctrl+w hangs on screen for up to a second
+            // before the overlay notices.
             ticks += 1
-            if ticks % 10 == 0 { self.refreshList() }
+            if ticks % 2 == 0 { self.refreshList() }
         }
     }
 
