@@ -97,33 +97,24 @@ final class Overlay {
             // the one added/removed row instead of reflowing the list
             let oldViews = Dictionary(rows.map { (Self.key($0.1), $0.0) },
                                       uniquingKeysWith: { a, _ in a })
-            let oldH = Overlay.height(for: max(rows.count, 1))
             let targetH = Overlay.height(for: max(tabs.count, 1))
-            // THE ADDED/REMOVED ROW IS THE ONLY ANIMATED SYSTEM. the glass
-            // and every other row snap straight to their final frames — a
-            // close must not drag the pack below the dead row through a
-            // 0.2s glide, and an open must not push it. the change is
-            // conveyed by the changed row alone:
+            // THE ADDED ROW IS THE ONLY ANIMATED SYSTEM. the glass and every
+            // other row snap straight to their final frames — a close must
+            // not drag the pack below the dead row through a glide, and an
+            // open must not push it. REMOVALS GET NO ANIMATION AT ALL: the
+            // dead row vanishes the same frame the glass snaps (a lingering
+            // ghost squish read as "the tab is still there" for a beat, and
+            // one that outlived the session resurfaced on the next open).
             //   • added → unfolds open at its slot, anchored to the pill's
             //     FIXED edge (main pill: grows downward from under the row
             //     above; pin pill: grows upward from above the row below),
             //     fading in as it fills.
-            //   • removed → squishes shut in its slot, anchored to the same
-            //     fixed edge, over the row that snapped into its place (it
-            //     sits ABOVE that row in z so the collapse reads as the row
-            //     closing, not a crossfade).
             // anything impure — scroll-window churn (a row leaves as another
-            // enters), reorders, title edits — snaps with no tween: a
-            // collapse there would fight the churn. purity gates below: a
-            // tween only fires when NOTHING else changed — one row in with
-            // none out, or one row out with none in.
+            // enters), reorders, title edits — snaps with no tween. the gate
+            // below: a tween only fires when NOTHING left the visible set.
             let newKeys = Set(tabs.map { Self.key($0.0) })
             let adding = animate && !oldViews.isEmpty
                 && oldViews.keys.allSatisfy { newKeys.contains($0) }
-            let removing = animate && !adding
-                && !newKeys.isEmpty
-                && newKeys.allSatisfy { oldViews[$0] != nil }
-                && oldViews.count > newKeys.count
             content.subviews.forEach { $0.removeFromSuperview() }
             rows.removeAll()
             if content.layer?.sublayers?.contains(highlight) != true {
@@ -157,31 +148,8 @@ final class Overlay {
                 }
                 rows.append((row, entry.0, entry.1))
             }
-            // rows that left the visible set: squish shut in their slot.
-            // the ghost restates its frame in the FINAL window's content
-            // coords first — a screen-fixed slot shifts by the height delta
-            // when the bottom edge moves (main pill, top frozen) and is
-            // unchanged when it doesn't (pin pill, bottom glued). z-order
-            // ABOVE: the collapsing ghost draws over the row that snapped
-            // into its slot, so the squish reads as the row closing. a
-            // rebuild during the tween sweeps it (the removeFromSuperview
-            // sweep above collects any leftovers).
-            if removing {
-                let dh = topFixed ? targetH - oldH : CGFloat(0)
-                for (k, ghost) in oldViews where !seen.contains(k) {
-                    var target = ghost.frame
-                    target.origin.y += dh
-                    if topFixed { target.origin.y = target.maxY }  // anchored: top
-                    target.size.height = 0
-                    content.addSubview(ghost, positioned: .above, relativeTo: nil)
-                    NSAnimationContext.runAnimationGroup({ ctx in
-                        ctx.duration = 0.12
-                        ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                        ghost.animator().frame = target
-                        ghost.animator().alphaValue = 0
-                    }, completionHandler: ghost.removeFromSuperview)
-                }
-            }
+            // rows that left the visible set: nothing. they were removed
+            // from content with the sweep above — gone this frame.
         }
 
         // row identity across rebuilds — same keying the close-settling
