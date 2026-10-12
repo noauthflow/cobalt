@@ -12,6 +12,7 @@ A collection of small, self-contained desktop utilities for macOS (plus one cros
 | [erythrite/](erythrite/) | custom videos as native aerials: animated lock screen wallpaper | macOS 26+ |
 | [elgiloy-mac-arm/](elgiloy-mac-arm/) | tab overlay daemon | macOS (Apple Silicon) |
 | [elgiloy-linux/](elgiloy-linux/) | tab overlay daemon, linux port | linux (in progress) |
+| [chronifer/](chronifer/) | live Downloads folder icon: current 24h time in red, every minute | macOS |
 | [stellite/](stellite/) | new tab page + shorts blocker Chrome extension + template theme | anywhere Chrome runs |
 | [talonite/](talonite/) | Raycast extension: timezones, proxy toggle, color picker, ruler, audio + bluetooth switching | macOS |
 
@@ -42,6 +43,14 @@ Builds with `swiftc`, signs, copies the binary to `~/.local/bin/cobalt-60`, regi
 
 - Requires: `swiftc`, the `cobalt-dev` signing identity (see below)
 - Permissions: Accessibility (rewrites mouse events system-wide) — on OS 27+ the Settings pane is renamed "Device Control and Data Access"
+
+### chronifer
+
+Named after the cobalt watch-case alloy. Builds with `swiftc`, ad-hoc signs, copies binary + `blackfolder.icns` to `~/.local/bin/chronifer`, registers persistent launchd daemon `dev.cobalt.chronifer` (fires exactly on each minute boundary).
+
+- Requires: `swiftc`
+- Permissions: none (plain AppKit drawing; no TCC)
+- `./install.sh uninstall` restores the default Downloads icon
 
 ### elgiloy-mac-arm
 
