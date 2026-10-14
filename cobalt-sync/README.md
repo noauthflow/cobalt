@@ -21,8 +21,7 @@ needs python 3.8+ (stdlib only, nothing to build). no special macOS permissions 
     cobalt seed IMAGE|COLOR [--strength N] [--force]
                                         set chrome's theme accent + NTP background
     cobalt avatar IMAGE [browser]  replace chromium profile avatar PNGs (192x192)
-    cobalt reload [--force]        re-apply last seed color + avatar after chrome updates
-    cobalt init [--force]          create a starter config
+    cobalt seed [hex] [--profile P] [--all]  set theme seed color (default: #C7B8E8)
 
 `--root /path/to/user-data-dir` targets any chromium fork not auto-detected.
 
