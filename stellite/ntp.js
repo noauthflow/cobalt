@@ -210,6 +210,8 @@ const scanFolder = async (dir) => {
       stopPolling();
       setFolderState('needs-perm');
       setFolderHead(dir.name, 'Permission needed to read this folder');
+      document.addEventListener('pointerdown', askPerm, true);
+      document.addEventListener('keydown', askPerm, true);
     }
     return;
   }
@@ -273,11 +275,25 @@ const pickFolder = async () => {
   await connectFolder(dir);
 };
 
-$('folderbtn').addEventListener('click', async () => {
+// permission expired (every browser relaunch resets it): Chrome's prompt only
+// needs a user gesture, so ask on the first click/keypress on the new tab
+// instead of making the user find the Reconnect button in the panel.
+let permAsked = false;
+const askPerm = async () => {
+  if (permAsked || !dirHandle) return;
+  permAsked = true;
+  document.removeEventListener('pointerdown', askPerm, true);
+  document.removeEventListener('keydown', askPerm, true);
+  const p = await dirHandle.requestPermission({ mode: 'read' }).catch(() => 'denied');
+  if (p === 'granted') return connectFolder(dirHandle);
+  permAsked = false; // denied — let the next gesture / button try again
+};
+
+$('folderbtn').addEventListener('click', () => {
   // saved folder the browser no longer trusts: ask, don't re-pick
   if (dirHandle && $('foldercard').classList.contains('needs-perm')) {
-    const p = await dirHandle.requestPermission({ mode: 'read' });
-    if (p === 'granted') return connectFolder(dirHandle);
+    askPerm();
+    return;
   }
   pickFolder();
 });
@@ -360,7 +376,8 @@ $('menutoggle').addEventListener('change', (e) => {
 
 // ---- folder init (after settings load) ----
 // restore the saved handle; with Chrome's persistent permissions it usually
-// reconnects silently, otherwise the panel offers a one-click Reconnect.
+// reconnects silently, otherwise any click/keypress on the new tab re-grants
+// the read permission (the panel button does the same).
 const initFolder = async () => {
   if (!window.showDirectoryPicker) {
     setFolderState('unsupported');
@@ -375,6 +392,8 @@ const initFolder = async () => {
   else {
     setFolderState('needs-perm');
     setFolderHead(dir.name, 'Reconnect to keep using this folder');
+    document.addEventListener('pointerdown', askPerm, true);
+    document.addEventListener('keydown', askPerm, true);
   }
 };
 

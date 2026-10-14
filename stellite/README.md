@@ -16,8 +16,10 @@ hand-rolled material design 3 tokens/components — no libraries, no build)
 - **icon color**: colour picker + hex field, favicon updates live,
   persists via chrome.storage. reset restores the default lavender.
 - **photos**: one local folder picked once (File System Access API — the
-  picker starts on the Desktop; the handle persists in IndexedDB, with a
-  one-click Reconnect in the panel if Chrome ever needs permission again).
+  picker starts on the Desktop; the handle persists in IndexedDB. Chrome
+  resets the read permission on every browser relaunch (reboot, update, quit);
+  the page then re-grants it on your first click or keypress on the new tab,
+  with a Reconnect button in the panel as fallback).
   the folder is rescanned every 2s (plus on tab focus), so images added or
   removed on disk show up live: each new tab shows a random photo from the
   folder, fading in over the grey (200ms delay, 500ms fade — tunable in the
