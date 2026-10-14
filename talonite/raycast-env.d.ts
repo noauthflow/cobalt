@@ -51,8 +51,6 @@ declare namespace Preferences {
   /** Position - center, left, right, top, bottom, top-left, top-right, bottom-left, bottom-right, or X,Y pixels */
   "pos": string
 }
-  /** Preferences accessible in the `cleanshot` command */
-  export type Cleanshot = ExtensionPreferences & {}
   /** Preferences accessible in the `resize3` command */
   export type Resize3 = ExtensionPreferences & {
   /** Size - Pixels (1280x800), percent (50%), or mixed (50%x100%) */
@@ -79,8 +77,6 @@ declare namespace Arguments {
   export type Resize = {}
   /** Arguments passed to the `resize2` command */
   export type Resize2 = {}
-  /** Arguments passed to the `cleanshot` command */
-  export type Cleanshot = {}
   /** Arguments passed to the `resize3` command */
   export type Resize3 = {}
 }
