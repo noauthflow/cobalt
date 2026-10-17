@@ -95,9 +95,13 @@ let tapCallback: CGEventTapCallBack = { _, type, event, _ in
 let CORNER_RADIUS: CGFloat = 14
 let CORNER_OVERLAP: CGFloat = 0
 
-var cornerWindows: [(window: NSWindow, display: CGDirectDisplayID)] = []
-// displays currently showing a fullscreen window — only their patches are up
-var fullscreenDisplays: Set<CGDirectDisplayID> = []
+var cornerWindows: [(window: NSWindow, display: CGDirectDisplayID, corner: Int)] = []
+// per-display corner mask — which patches are currently up. bits: 1 TL,
+// 2 TR, 4 BL, 8 BR. all four = true fullscreen; bottom two only = fullscreen
+// apart from the menu bar (the window falls short of the display by the
+// menu bar's height, so only its bottom corners are rounded cutouts — the
+// top corners sit under the menu bar, which already covers them)
+var cornerMasks: [CGDirectDisplayID: Int] = [:]
 // per-window desired visibility, parallel to cornerWindows. the heartbeat
 // reconciles the windows' ACTUAL state (ordered in? alpha?) against this,
 // so a missed notification or a racing orderOut can never wedge the filler
@@ -141,10 +145,10 @@ final class CornerView: NSView {
 }
 
 func makeCornerFillers() {
-    for (w, _) in cornerWindows { w.orderOut(nil) }
+    for (w, _, _) in cornerWindows { w.orderOut(nil) }
     cornerWindows.removeAll()
     cornerWantsShown.removeAll()
-    fullscreenDisplays = []
+    cornerMasks = [:]
     let s = CORNER_RADIUS + CORNER_OVERLAP
     for screen in NSScreen.screens {
         var corner = 0 // 0 TL, 1 TR, 2 BL, 3 BR — reset per screen
@@ -169,21 +173,22 @@ func makeCornerFillers() {
             w.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
             w.alphaValue = 0
             w.contentView = CornerView(corner: corner, frame: NSRect(origin: .zero, size: rect.size))
-            corner += 1
             let display = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID ?? 0
-            cornerWindows.append((w, display))
+            cornerWindows.append((w, display, corner))
+            corner += 1
             cornerWantsShown.append(false)
         }
     }
 }
 
 // show patches only on the displays that actually have a fullscreen window;
-// other monitors keep their wallpaper corners.
-func setCorners(_ fullscreen: Set<CGDirectDisplayID>, force: Bool = false) {
-    guard force || fullscreen != fullscreenDisplays else { return }
-    fullscreenDisplays = fullscreen
+// other monitors keep their wallpaper corners. the mask decides per corner —
+// menu-bar fullscreen lights up just the bottom two.
+func setCorners(_ masks: [CGDirectDisplayID: Int], force: Bool = false) {
+    guard force || masks != cornerMasks else { return }
+    cornerMasks = masks
     for (i, entry) in cornerWindows.enumerated() {
-        let shown = fullscreen.contains(entry.display)
+        let shown = (masks[entry.display] ?? 0) & (1 << entry.corner) != 0
         cornerWantsShown[i] = shown
         let w = entry.window
         if shown { w.orderFrontRegardless() }
@@ -200,7 +205,7 @@ func setCorners(_ fullscreen: Set<CGDirectDisplayID>, force: Bool = false) {
             // all of this runs on the main queue, so reading the global here
             // is atomic with respect to every other setCorners call.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak w] in
-                if let w, !fullscreenDisplays.contains(entry.display) { w.orderOut(nil) }
+                if let w, (cornerMasks[entry.display] ?? 0) & (1 << entry.corner) == 0 { w.orderOut(nil) }
             }
         }
     }
@@ -241,8 +246,8 @@ func reconcileCorners() {
 func startCornerHeartbeat() {
     DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
         if cornersOn {
-            let truth = fullscreenWindowDisplays()
-            if truth != fullscreenDisplays {
+            let truth = fullscreenCornerMasks()
+            if truth != cornerMasks {
                 setCorners(truth)
             } else {
                 reconcileCorners()
@@ -252,31 +257,47 @@ func startCornerHeartbeat() {
     }
 }
 
-// the set of displays covered by an onscreen layer-0 window (fullscreen apps)
-func fullscreenWindowDisplays() -> Set<CGDirectDisplayID> {
-    guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else { return [] }
-    let displays = NSScreen.screens.compactMap { screen -> (CGDirectDisplayID, CGRect)? in
-        guard let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID else { return nil }
-        return (id, CGDisplayBounds(id))
+// per-display corner mask for onscreen layer-0 windows (fullscreen apps).
+// bits: 1 TL, 2 TR, 4 BL, 8 BR. a window covering the whole display gets all
+// four; one covering everything EXCEPT the menu bar strip gets just the
+// bottom two — fullscreen-with-visible-menu-bar leaves the window exactly
+// menu-bar-height short of the display, and the old full-height check used
+// to miss it entirely, leaving the bottom cutouts showing wallpaper.
+func fullscreenCornerMasks() -> [CGDirectDisplayID: Int] {
+    guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else { return [:] }
+    let layer0 = list.filter { ($0[kCGWindowLayer as String] as? Int) == 0 }
+    func bounds(_ d: [String: Any]) -> CGRect {
+        guard let b = d[kCGWindowBounds as String] as? [String: NSNumber] else { return .null }
+        return CGRect(x: b["X"]?.doubleValue ?? 0, y: b["Y"]?.doubleValue ?? 0,
+                      width: b["Width"]?.doubleValue ?? 0, height: b["Height"]?.doubleValue ?? 0)
     }
-    var covered: Set<CGDirectDisplayID> = []
-    for (id, db) in displays {
-        let isCovered = list.contains { d in
-            guard (d[kCGWindowLayer as String] as? Int) == 0,
-                  let b = d[kCGWindowBounds as String] as? [String: NSNumber] else { return false }
-            let r = CGRect(x: b["X"]?.doubleValue ?? 0, y: b["Y"]?.doubleValue ?? 0,
-                           width: b["Width"]?.doubleValue ?? 0, height: b["Height"]?.doubleValue ?? 0)
-            return abs(r.minX - db.minX) <= 2 && abs(r.minY - db.minY) <= 2
-                && r.width >= db.width - 2 && r.height >= db.height - 2
+    var masks: [CGDirectDisplayID: Int] = [:]
+    for screen in NSScreen.screens {
+        guard let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID else { continue }
+        let db = CGDisplayBounds(id)
+        // menu bar height: what the window may fall short by and still count.
+        // (CG bounds use a top-left origin, so "short at the top" = larger minY)
+        let menuBarH = screen.frame.maxY - screen.visibleFrame.maxY
+        var mask = 0
+        for d in layer0 {
+            let r = bounds(d)
+            guard abs(r.minX - db.minX) <= 2, r.width >= db.width - 2 else { continue }
+            let bottomOk = abs(r.maxY - db.maxY) <= 2
+            if bottomOk, abs(r.minY - db.minY) <= 2, r.height >= db.height - 2 {
+                mask |= 0b1111 // true fullscreen — all four corners
+            } else if bottomOk, menuBarH > 0,
+                      r.height >= db.height - menuBarH - 2, r.height < db.height - 2 {
+                mask |= 0b1100 // fullscreen apart from the menu bar — bottom two only
+            }
         }
-        if isCovered { covered.insert(id) }
+        if mask != 0 { masks[id] = mask }
     }
-    return covered
+    return masks
 }
 
 func scheduleCornerUpdate() {
     cornerEval?.cancel()
-    let item = DispatchWorkItem { setCorners(fullscreenWindowDisplays()) }
+    let item = DispatchWorkItem { setCorners(fullscreenCornerMasks()) }
     cornerEval = item
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: item)
 }
@@ -454,7 +475,10 @@ func cmdStatus() {
             print("wall:     disabled — cursor boundary inactive")
         }
         if cornersOn {
-            print("corners:  on — black on fullscreen displays only (\(NSScreen.screens.count) displays watched, \(fullscreenWindowDisplays().count) currently fullscreen)")
+            let masks = fullscreenCornerMasks()
+            let full = masks.values.filter { $0 == 0b1111 }.count
+            let partial = masks.count - full
+            print("corners:  on — black on fullscreen displays only (\(NSScreen.screens.count) displays watched, \(full) fullscreen\(partial > 0 ? ", \(partial) fullscreen-minus-menu-bar (bottom corners)" : ""))")
         } else {
             print("corners:  disabled — fullscreen cutouts show wallpaper")
         }
