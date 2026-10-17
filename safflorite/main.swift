@@ -21,8 +21,9 @@ import Darwin
 
 let pillAlpha: CGFloat = 0.85   // overall see-through-ness of the pill
 let bottomMargin: CGFloat = 12  // gap between the pill and the top of the dock
-let hPad: CGFloat = 36          // pill padding around the text
-let vPad: CGFloat = 16
+let pillFontSize: CGFloat = 24  // small, Wisprflow-ish
+let hPad: CGFloat = 20          // pill padding around the text
+let vPad: CGFloat = 9
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var windows: [NSWindow] = []
@@ -45,10 +46,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // one pill per screen
         for screen in NSScreen.screens {
-            let fontSize = max(32, screen.frame.height * 0.05)
+            let fontSize = pillFontSize
 
             let label = NSTextField(labelWithString: "00:00:00")
-            label.font = .monospacedSystemFont(ofSize: fontSize, weight: .semibold)
+            label.font = .monospacedSystemFont(ofSize: fontSize, weight: .medium)
             label.alignment = .center
             label.textColor = .white
             label.translatesAutoresizingMaskIntoConstraints = false
@@ -66,6 +67,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             pill.wantsLayer = true
             pill.layer?.cornerRadius = pillH / 2
             pill.layer?.masksToBounds = true
+            // hairline edge so the capsule reads against both light and dark
+            pill.layer?.borderWidth = 1
+            pill.layer?.borderColor = NSColor.white.withAlphaComponent(0.14).cgColor
             pill.addSubview(label)
             NSLayoutConstraint.activate([
                 label.centerXAnchor.constraint(equalTo: pill.centerXAnchor),
