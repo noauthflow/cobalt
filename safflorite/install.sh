@@ -30,6 +30,7 @@ swiftc -O -o "$BIN_LOCAL" main.swift -framework AppKit
 codesign --force --sign - "$BIN_LOCAL"
 
 launchctl bootout "$GUI/$LABEL" 2>/dev/null || true
+sleep 1
 cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -41,7 +42,13 @@ cat > "$PLIST" <<EOF
   <key>StandardErrorPath</key><string>/tmp/$NAME.err</string>
 </dict></plist>
 EOF
-launchctl bootstrap "$GUI" "$PLIST"
+# launchd occasionally throws a transient error 5 right after a bootout; retry
+loaded=0
+for _ in 1 2 3; do
+  if launchctl bootstrap "$GUI" "$PLIST" 2>/dev/null; then loaded=1; break; fi
+  sleep 1
+done
+[[ $loaded -eq 1 ]] || { launchctl bootstrap "$GUI" "$PLIST"; }
 
 echo
 echo "installed: $BIN_LOCAL"

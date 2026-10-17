@@ -24,8 +24,8 @@ Named after the cobalt mineral safflorite.
 
 - `pillAlpha` — overall opacity of the pill (default `0.85`)
 - `bottomMargin` — gap above the dock (default `12`)
-- `pillFontSize` — clock text size (default `24`)
-- `hPad` / `vPad` — pill padding around the text (default `20` / `9`)
+- `pillFontSize` — clock text size (default `22`)
+- `hPad` / `vPad` — pill padding around the text (default `18` / `8`)
 
 ## Install
 

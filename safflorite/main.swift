@@ -19,11 +19,11 @@ import Darwin
 //      the way and (1) handles the release.
 // Every transition is logged to /tmp/safflorite.err so misbehaviour is visible.
 
-let pillAlpha: CGFloat = 0.85   // overall see-through-ness of the pill
+let pillAlpha: CGFloat = 1.0    // fully opaque
 let bottomMargin: CGFloat = 12  // gap between the pill and the top of the dock
-let pillFontSize: CGFloat = 24  // small, Wisprflow-ish
-let hPad: CGFloat = 20          // pill padding around the text
-let vPad: CGFloat = 9
+let pillFontSize: CGFloat = 22  // small, minimal
+let hPad: CGFloat = 12          // pill padding around the text
+let vPad: CGFloat = 8
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var windows: [NSWindow] = []
@@ -49,7 +49,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let fontSize = pillFontSize
 
             let label = NSTextField(labelWithString: "00:00:00")
-            label.font = .monospacedSystemFont(ofSize: fontSize, weight: .medium)
+                        label.font = .systemFont(ofSize: fontSize, weight: .medium)
             label.alignment = .center
             label.textColor = .white
             label.translatesAutoresizingMaskIntoConstraints = false
@@ -59,17 +59,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let pillW = ceil(textSize.width) + hPad * 2
             let pillH = ceil(textSize.height) + vPad * 2
 
-            let pill = NSVisualEffectView(frame: NSRect(origin: .zero,
-                                                        size: NSSize(width: pillW, height: pillH)))
-            pill.material = .hudWindow
-            pill.blendingMode = .behindWindow
-            pill.state = .active
+            // solid black capsule, no vibrancy
+            let pill = NSView(frame: NSRect(origin: .zero,
+                                            size: NSSize(width: pillW, height: pillH)))
             pill.wantsLayer = true
+            pill.layer?.backgroundColor = NSColor.black.cgColor
             pill.layer?.cornerRadius = pillH / 2
             pill.layer?.masksToBounds = true
-            // hairline edge so the capsule reads against both light and dark
-            pill.layer?.borderWidth = 1
-            pill.layer?.borderColor = NSColor.white.withAlphaComponent(0.14).cgColor
+            // subtle grey edge so the capsule reads against both light and dark
+            pill.layer?.borderWidth = 1.5
+            pill.layer?.borderColor = NSColor.white.withAlphaComponent(0.25).cgColor
             pill.addSubview(label)
             NSLayoutConstraint.activate([
                 label.centerXAnchor.constraint(equalTo: pill.centerXAnchor),
