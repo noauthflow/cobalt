@@ -13,6 +13,7 @@ A collection of small, self-contained desktop utilities for macOS (plus one cros
 | [elgiloy-mac-arm/](elgiloy-mac-arm/) | tab overlay daemon | macOS (Apple Silicon) |
 | [elgiloy-linux/](elgiloy-linux/) | tab overlay daemon, linux port | linux (in progress) |
 | [chronifer/](chronifer/) | live Downloads folder icon: current 24h time in red, every minute | macOS |
+| [safflorite/](safflorite/) | hold ⌘⇧Space: translucent 24h clock pill at the bottom of every screen | macOS |
 | [stellite/](stellite/) | new tab page + shorts blocker Chrome extension + template theme | anywhere Chrome runs |
 | [talonite/](talonite/) | Raycast extension: timezones, proxy toggle, color picker, ruler, audio + bluetooth switching | macOS |
 
@@ -66,6 +67,13 @@ Builds with `swiftc`, signs, copies the binary to `~/.local/bin/cerulean`. No la
 - Requires: `swiftc`
 - Permissions: none (private SkyLight APIs, no TCC involvement)
 - `./install.sh uninstall` removes the binary (warns if a display is currently disabled)
+
+### safflorite
+
+Builds with `swiftc`, ad-hoc signs, copies the binary to `~/.local/bin/safflorite`, registers launchd agent `dev.cobalt.safflorite`. Hold ⌘⇧Space to show a vibrancy pill at the bottom of every screen with a 24h `HH:mm:ss` clock; release to hide (fades in/out).
+
+- Requires: `swiftc`
+- Permissions: none (Carbon registered hotkey + `CGEventSourceKeyState` release polling — no TCC)
 
 ### stellite
 
