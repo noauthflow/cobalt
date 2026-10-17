@@ -20,10 +20,11 @@ import Darwin
 // Every transition is logged to /tmp/safflorite.err so misbehaviour is visible.
 
 let pillAlpha: CGFloat = 1.0    // fully opaque
-let bottomMargin: CGFloat = 12  // gap between the pill and the top of the dock
+let bottomMargin: CGFloat = 20  // gap between the pill and the top of the dock
 let pillFontSize: CGFloat = 22  // small, minimal
 let hPad: CGFloat = 12          // pill padding around the text
 let vPad: CGFloat = 8
+let textKern: CGFloat = 1.0     // letter spacing between the clock glyphs
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var windows: [NSWindow] = []
@@ -48,8 +49,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for screen in NSScreen.screens {
             let fontSize = pillFontSize
 
-            let label = NSTextField(labelWithString: "00:00:00")
-                        label.font = .systemFont(ofSize: fontSize, weight: .medium)
+            let label = NSTextField(labelWithString: "")
+            // SF Pro (system) with tabular digits: stable width, no tick jitter
+            let clockFont = NSFont.monospacedDigitSystemFont(ofSize: fontSize, weight: .medium)
+            label.font = clockFont
+            label.attributedStringValue = clockString("00:00:00", font: clockFont, color: .white)
             label.alignment = .center
             label.textColor = .white
             label.translatesAutoresizingMaskIntoConstraints = false
@@ -107,10 +111,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         registerHotkey()
     }
 
+    func clockString(_ text: String, font: NSFont, color: NSColor) -> NSAttributedString {
+        NSAttributedString(string: text, attributes: [
+            .font: font,
+            .foregroundColor: color,
+            .kern: textKern,
+        ])
+    }
+
     func update() {
-        guard showing else { return }
-        let now = formatter.string(from: Date())
-        for label in labels { label.stringValue = now }
+        guard showing, let font = labels.first?.font else { return }
+        let text = clockString(formatter.string(from: Date()), font: font, color: .white)
+        for label in labels { label.attributedStringValue = text }
     }
 
     func showPill() {
