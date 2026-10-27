@@ -13,6 +13,7 @@ A collection of small, self-contained desktop utilities for macOS (plus one cros
 | [elgiloy-mac-arm/](elgiloy-mac-arm/) | tab overlay daemon | macOS (Apple Silicon) |
 | [elgiloy-linux/](elgiloy-linux/) | tab overlay daemon, linux port | linux (in progress) |
 | [chronifer/](chronifer/) | live Downloads folder icon: current 24h time in red, every minute | macOS |
+| [mp35n/](mp35n/) | Chrome cookie keyring: `v11` key served only to a hash-pinned Chrome binary | linux |
 | [stellite/](stellite/) | new tab page + shorts blocker Chrome extension + template theme | anywhere Chrome runs |
 | [talonite/](talonite/) | Raycast extension: timezones, proxy toggle, color picker, ruler, audio + bluetooth switching | macOS |
 
@@ -66,6 +67,14 @@ Builds with `swiftc`, signs, copies the binary to `~/.local/bin/cerulean`. No la
 - Requires: `swiftc`
 - Permissions: none (private SkyLight APIs, no TCC involvement)
 - `./install.sh uninstall` removes the binary (warns if a display is currently disabled)
+
+### mp35n
+
+Symlinks the CLI to `~/.local/bin/mp35n` (alias `35`), and installs a systemd user unit plus a D-Bus activation file for `org.freedesktop.secrets`.
+
+- Requires: Python 3.8+, `dbus-python`, `PyGObject`, `cryptography`, systemd user session
+- Permissions: none (user systemd + session D-Bus only)
+- Unlock before launching Chrome; `35 lock` wipes the in-memory key. `./install.sh uninstall` keeps the vault.
 
 ### stellite
 

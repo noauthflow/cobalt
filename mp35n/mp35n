@@ -1,0 +1,864 @@
+#!/usr/bin/env python3
+"""
+mp35n - a tiny master-password keyring for Chrome's cookie encryption.
+
+Chrome (Linux) asks org.freedesktop.secrets for the "Chrome Safe Storage"
+secret and derives its cookie key from it with PBKDF2(secret, "saltysalt").
+This daemon serves that secret ONLY to a verified Chrome binary, and only
+while the vault is unlocked.
+
+Commands:
+    mp35n            show status
+    mp35n unlock     prompt for the master password and unlock
+    mp35n lock       forget the key immediately (no password needed)
+    mp35n status     show state
+    mp35n init       create the vault + pin the Chrome binary
+    mp35n trust      re-pin Chrome after an update
+    mp35n daemon     internal: run the daemon
+
+Install/uninstall is handled by ./install.sh in this folder.
+"""
+
+import base64
+import hashlib
+import hmac
+import json
+import os
+import socket
+import stat
+import struct
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+APP = "mp35n"
+CONFIG_DIR = Path(os.environ.get("MP35N_CONFIG_DIR", str(Path.home() / ".config" / "mp35n")))
+VAULT_PATH = CONFIG_DIR / "vault.json"
+PIN_PATH = CONFIG_DIR / "config.json"
+SOCK_PATH = CONFIG_DIR / "control.sock"
+
+SERVICE_NAME = "org.freedesktop.secrets"
+SERVICE_PATH = "/org/freedesktop/secrets"
+COLLECTION_PATH = "/org/freedesktop/secrets/collection/default"
+ITEM_PATH = "/org/freedesktop/secrets/collection/default/1"
+SESSION_PATH = "/org/freedesktop/secrets/session/1"
+
+IF_SERVICE = "org.freedesktop.Secret.Service"
+IF_COLLECTION = "org.freedesktop.Secret.Collection"
+IF_ITEM = "org.freedesktop.Secret.Item"
+IF_SESSION = "org.freedesktop.Secret.Session"
+IF_PROPS = "org.freedesktop.DBus.Properties"
+
+VAULT_AAD = b"mp35n-vault-v1"
+SCRYPT_N = 2 ** 15
+SCRYPT_R = 8
+SCRYPT_P = 1
+SCRYPT_MAXMEM = 128 * 1024 * 1024
+SECRET_LEN = 32
+
+STDIN_PASSWORD = False
+
+
+# --------------------------------------------------------------------------
+# small helpers
+# --------------------------------------------------------------------------
+
+def die(msg, code=1):
+    print(f"{APP}: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def ensure_dir():
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(CONFIG_DIR, 0o700)
+
+
+def write_private(path: Path, data: bytes):
+    tmp = path.with_name(path.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, data)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(tmp, path)
+    os.chmod(path, 0o600)
+
+
+def sha256_file(path, limit=None):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        remaining = limit
+        while True:
+            chunk = f.read(1 << 20)
+            if not chunk:
+                break
+            h.update(chunk)
+            if remaining is not None:
+                remaining -= len(chunk)
+                if remaining <= 0:
+                    break
+    return h.hexdigest()
+
+
+def find_chrome():
+    candidates = [
+        "/opt/google/chrome/chrome",
+        "/usr/lib/chromium/chromium",
+        "/usr/lib/chromium-browser/chromium-browser",
+        "/usr/bin/google-chrome-stable",
+        "/usr/bin/google-chrome",
+        "/usr/bin/chromium",
+    ]
+    for c in candidates:
+        if os.path.isfile(c):
+            return os.path.realpath(c)
+    return None
+
+
+def b64e(b):
+    return base64.b64encode(b).decode("ascii")
+
+
+def b64d(s):
+    return base64.b64decode(s.encode("ascii"))
+
+
+def scrypt_key(password: str, salt: bytes, n, r, p) -> bytes:
+    return hashlib.scrypt(
+        password.encode("utf-8"),
+        salt=salt,
+        n=n, r=r, p=p,
+        dklen=32,
+        maxmem=SCRYPT_MAXMEM,
+    )
+
+
+# --------------------------------------------------------------------------
+# vault
+# --------------------------------------------------------------------------
+
+def vault_encrypt(password: str, secret: bytes) -> dict:
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    salt = os.urandom(16)
+    key = scrypt_key(password, salt, SCRYPT_N, SCRYPT_R, SCRYPT_P)
+    nonce = os.urandom(12)
+    ct = AESGCM(key).encrypt(nonce, secret, VAULT_AAD)
+    return {
+        "version": 1,
+        "kdf": {"name": "scrypt", "n": SCRYPT_N, "r": SCRYPT_R, "p": SCRYPT_P,
+                "salt": b64e(salt)},
+        "cipher": {"name": "aes-256-gcm", "nonce": b64e(nonce), "ct": b64e(ct)},
+        "created": int(time.time()),
+    }
+
+
+def vault_decrypt(password: str) -> bytes:
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    d = json.loads(VAULT_PATH.read_text())
+    kdf = d["kdf"]
+    key = scrypt_key(password, b64d(kdf["salt"]), kdf["n"], kdf["r"], kdf["p"])
+    c = d["cipher"]
+    # Raises InvalidTag on a wrong password.
+    return AESGCM(key).decrypt(b64d(c["nonce"]), b64d(c["ct"]), VAULT_AAD)
+
+
+def load_pin() -> dict:
+    return json.loads(PIN_PATH.read_text())
+
+
+# --------------------------------------------------------------------------
+# chrome caller verification
+# --------------------------------------------------------------------------
+
+class Verifier:
+    def __init__(self):
+        self._bus = None
+        self._pid_cache = {}
+        self._hash_cache = {}
+        self._pin = None
+        self._pin_mtime = None
+
+    def _pin_now(self):
+        try:
+            mtime = PIN_PATH.stat().st_mtime_ns
+        except OSError:
+            return None
+        if mtime != self._pin_mtime:
+            try:
+                self._pin = load_pin()
+                self._pin_mtime = mtime
+            except Exception:
+                self._pin = None
+                self._pin_mtime = mtime
+        return self._pin
+
+    def _connection(self):
+        if self._bus is None:
+            import dbus
+            self._bus = dbus.bus.BusConnection(os.environ["DBUS_SESSION_BUS_ADDRESS"])
+        return self._bus
+
+    def _pid_for_sender(self, sender):
+        pid = self._pid_cache.get(sender)
+        if pid is not None:
+            return pid
+        try:
+            reply = self._connection().call_blocking(
+                "org.freedesktop.DBus", "/org/freedesktop/DBus",
+                "org.freedesktop.DBus", "GetConnectionUnixProcessID",
+                "s", (sender,))
+            try:
+                pid = int(reply[0])
+            except TypeError:
+                pid = int(reply)
+        except Exception as e:
+            self._debug(f"GetConnectionUnixProcessID({sender}) failed: {e!r}")
+            return None
+        self._pid_cache[sender] = pid
+        return pid
+
+    def _debug(self, msg):
+        if os.environ.get("MP35N_DEBUG"):
+            print(f"mp35n[verify]: {msg}", file=sys.stderr, flush=True)
+
+    def is_chrome(self, sender, log=None):
+        def no(reason):
+            self._debug(f"DENY sender={sender}: {reason}")
+            return False
+        if not sender:
+            return no("no sender")
+        pin = self._pin_now()
+        if not pin or not pin.get("chrome_sha256"):
+            return no("no pin")
+        pid = self._pid_for_sender(sender)
+        if pid is None or pid <= 1:
+            return no(f"no pid ({pid})")
+        exe_link = f"/proc/{pid}/exe"
+        try:
+            exe = os.path.realpath(exe_link)
+            st = os.stat(exe_link)
+        except OSError as e:
+            return no(f"stat {exe_link}: {e}")
+        if exe != pin.get("chrome_path"):
+            return no(f"exe {exe!r} != pinned {pin.get('chrome_path')!r} (pid {pid})")
+        # The binary must be root-owned and not world-writable.
+        if st.st_uid != 0 or (st.st_mode & stat.S_IWOTH):
+            return no(f"bad ownership uid={st.st_uid} mode={st.st_mode:o}")
+        cache_key = (pid, st.st_ino, st.st_mtime_ns, st.st_size)
+        digest = self._hash_cache.get(cache_key)
+        if digest is None:
+            try:
+                digest = sha256_file(exe_link)
+            except OSError as e:
+                return no(f"hash read: {e}")
+            self._hash_cache = {cache_key: digest}  # keep cache tiny
+        ok = hmac.compare_digest(digest, pin["chrome_sha256"])
+        return True if ok else no(f"hash mismatch pid={pid} got={digest[:16]}")
+
+
+# --------------------------------------------------------------------------
+# daemon state
+# --------------------------------------------------------------------------
+
+class State:
+    def __init__(self):
+        self.secret = None          # bytearray while unlocked
+        self.denied = 0
+        self.last_denied = None
+        self.fail_count = 0
+        self.fail_until = 0.0
+        self.name_owned = False
+        self.started = time.time()
+        self.srv = None
+
+    @property
+    def locked(self):
+        return self.secret is None
+
+    def wipe(self):
+        if self.secret is not None:
+            for i in range(len(self.secret)):
+                self.secret[i] = 0
+        self.secret = None
+
+    def handle_control(self, req):
+        cmd = req.get("cmd")
+        if cmd == "ping":
+            return {"ok": True}
+        if cmd == "status":
+            pin = None
+            try:
+                pin = load_pin()
+            except Exception:
+                pass
+            return {
+                "ok": True,
+                "locked": self.locked,
+                "name_owned": self.name_owned,
+                "denied": self.denied,
+                "last_denied": self.last_denied,
+                "uptime": int(time.time() - self.started),
+                "chrome_path": (pin or {}).get("chrome_path"),
+                "chrome_sha256": (pin or {}).get("chrome_sha256"),
+                "vault_exists": VAULT_PATH.exists(),
+            }
+        if cmd == "unlock":
+            if not VAULT_PATH.exists():
+                return {"ok": False, "error": "vault not initialized; run 'mp35n init'"}
+            now = time.time()
+            if now < self.fail_until:
+                return {"ok": False, "error": "too many attempts; wait a moment"}
+            password = req.get("password", "")
+            try:
+                secret = vault_decrypt(password)
+            except Exception:
+                self.fail_count += 1
+                # No delay for the first two typos; then back off.
+                delay = 0 if self.fail_count <= 2 else min(
+                    2 ** (self.fail_count - 2), 15)
+                self.fail_until = time.time() + delay
+                return {"ok": False, "error": "wrong master password"}
+            self.wipe()
+            self.secret = bytearray(secret)
+            self.fail_count = 0
+            self.fail_until = 0.0
+            return {"ok": True}
+        if cmd == "lock":
+            self.wipe()
+            return {"ok": True}
+        return {"ok": False, "error": f"unknown command {cmd!r}"}
+
+
+# --------------------------------------------------------------------------
+# dbus service objects
+# --------------------------------------------------------------------------
+
+def build_dbus_objects(bus, state, verifier):
+    import dbus
+    import dbus.service
+
+    def guard(sender, who):
+        if not verifier.is_chrome(sender):
+            state.denied += 1
+            state.last_denied = {"sender": str(sender), "at": int(time.time()), "where": who}
+            raise dbus.exceptions.DBusException(
+                "caller is not verified Chrome",
+                name="org.freedesktop.DBus.Error.AccessDenied")
+
+    def secret_bytes():
+        if state.secret is None:
+            raise dbus.exceptions.DBusException(
+                "keyring is locked", name="org.freedesktop.Secret.Error.IsLocked")
+        return dbus.ByteArray(bytes(state.secret))
+
+    class SecretService(dbus.service.Object):
+        @dbus.service.method(IF_SERVICE, in_signature="s", out_signature="o",
+                             sender_keyword="sender")
+        def ReadAlias(self, name, sender=None):
+            guard(sender, "ReadAlias")
+            return dbus.ObjectPath(COLLECTION_PATH)
+
+        @dbus.service.method(IF_SERVICE, in_signature="sv", out_signature="vo",
+                             sender_keyword="sender")
+        def OpenSession(self, algorithm, input, sender=None):
+            guard(sender, "OpenSession")
+            return (dbus.String(""), dbus.ObjectPath(SESSION_PATH))
+
+        @dbus.service.method(IF_SERVICE, in_signature="ao", out_signature="aoo",
+                             sender_keyword="sender")
+        def Unlock(self, objects, sender=None):
+            guard(sender, "Unlock")
+            return (objects, dbus.ObjectPath("/"))
+
+        @dbus.service.method(IF_SERVICE, in_signature="ao", out_signature="aoo",
+                             sender_keyword="sender")
+        def Lock(self, objects, sender=None):
+            guard(sender, "Lock")
+            return (objects, dbus.ObjectPath("/"))
+
+        @dbus.service.method(IF_SERVICE, in_signature="aoo",
+                             out_signature="a{o(oayays)}", sender_keyword="sender")
+        def GetSecrets(self, items, session, sender=None):
+            guard(sender, "GetSecrets")
+            value = secret_bytes()
+            out = {}
+            for item in items:
+                out[dbus.ObjectPath(str(item))] = (
+                    dbus.ObjectPath(str(session)),
+                    dbus.ByteArray(b""),
+                    value,
+                    dbus.String("text/plain"),
+                )
+            return out
+
+        @dbus.service.method(IF_SERVICE, in_signature="a{ss}", out_signature="ao",
+                             sender_keyword="sender")
+        def SearchItems(self, attributes, sender=None):
+            guard(sender, "SearchItems(service)")
+            return [dbus.ObjectPath(ITEM_PATH)]
+
+        @dbus.service.method(IF_SERVICE, in_signature="a{sv}s", out_signature="oo",
+                             sender_keyword="sender")
+        def CreateCollection(self, properties, alias, sender=None):
+            guard(sender, "CreateCollection")
+            return (dbus.ObjectPath(COLLECTION_PATH), dbus.ObjectPath("/"))
+
+    class Collection(dbus.service.Object):
+        @dbus.service.method(IF_COLLECTION, in_signature="a{ss}", out_signature="ao",
+                             sender_keyword="sender")
+        def SearchItems(self, attributes, sender=None):
+            guard(sender, "SearchItems")
+            return [dbus.ObjectPath(ITEM_PATH)]
+
+        @dbus.service.method(IF_COLLECTION, in_signature="a{sv}(oayays)b",
+                             out_signature="oo", sender_keyword="sender")
+        def CreateItem(self, properties, secret, replace, sender=None):
+            guard(sender, "CreateItem")
+            return (dbus.ObjectPath(ITEM_PATH), dbus.ObjectPath("/"))
+
+        @dbus.service.method(IF_COLLECTION, in_signature="o", out_signature="o",
+                             sender_keyword="sender")
+        def Delete(self, item, sender=None):
+            guard(sender, "Delete(collection)")
+            return dbus.ObjectPath("/")
+
+        @dbus.service.method(IF_PROPS, in_signature="ss", out_signature="v",
+                             sender_keyword="sender")
+        def Get(self, interface, prop, sender=None):
+            guard(sender, "Collection.Get")
+            if prop == "Label":
+                return dbus.String("Default Keyring")
+            if prop == "Items":
+                return dbus.Array([dbus.ObjectPath(ITEM_PATH)], signature="o")
+            if prop == "Locked":
+                return dbus.Boolean(False)
+            if prop == "Created":
+                return dbus.UInt64(0)
+            if prop == "Modified":
+                return dbus.UInt64(int(time.time()))
+            raise dbus.exceptions.DBusException(
+                f"no such property {prop}", name="org.freedesktop.DBus.Error.InvalidArgs")
+
+        @dbus.service.method(IF_PROPS, in_signature="s", out_signature="a{sv}",
+                             sender_keyword="sender")
+        def GetAll(self, interface, sender=None):
+            guard(sender, "Collection.GetAll")
+            return {
+                "Label": dbus.String("Default Keyring"),
+                "Items": dbus.Array([dbus.ObjectPath(ITEM_PATH)], signature="o"),
+                "Locked": dbus.Boolean(False),
+                "Created": dbus.UInt64(0),
+                "Modified": dbus.UInt64(int(time.time())),
+            }
+
+        @dbus.service.method(IF_PROPS, in_signature="ssv", out_signature="",
+                             sender_keyword="sender")
+        def Set(self, interface, prop, value, sender=None):
+            guard(sender, "Collection.Set")
+
+    class Item(dbus.service.Object):
+        @dbus.service.method(IF_ITEM, in_signature="o", out_signature="(oayays)",
+                             sender_keyword="sender")
+        def GetSecret(self, session, sender=None):
+            guard(sender, "GetSecret")
+            value = secret_bytes()
+            return (dbus.ObjectPath(str(session)), dbus.ByteArray(b""),
+                    value, dbus.String("text/plain"))
+
+        @dbus.service.method(IF_ITEM, in_signature="(oayays)", out_signature="",
+                             sender_keyword="sender")
+        def SetSecret(self, secret, sender=None):
+            guard(sender, "SetSecret")
+
+        @dbus.service.method(IF_ITEM, in_signature="", out_signature="o",
+                             sender_keyword="sender")
+        def Delete(self, sender=None):
+            guard(sender, "Delete(item)")
+            return dbus.ObjectPath("/")
+
+        @dbus.service.method(IF_PROPS, in_signature="ss", out_signature="v",
+                             sender_keyword="sender")
+        def Get(self, interface, prop, sender=None):
+            guard(sender, "Item.Get")
+            attrs = {
+                "application": "chrome",
+                "xdg:schema": "chrome_libsecret_os_crypt_password_v2",
+            }
+            if prop == "Label":
+                return dbus.String("Chrome Safe Storage")
+            if prop == "Attributes":
+                return dbus.Dictionary(attrs, signature="ss")
+            if prop == "Locked":
+                return dbus.Boolean(state.locked)
+            if prop == "Created":
+                return dbus.UInt64(0)
+            if prop == "Modified":
+                return dbus.UInt64(int(time.time()))
+            raise dbus.exceptions.DBusException(
+                f"no such property {prop}", name="org.freedesktop.DBus.Error.InvalidArgs")
+
+        @dbus.service.method(IF_PROPS, in_signature="s", out_signature="a{sv}",
+                             sender_keyword="sender")
+        def GetAll(self, interface, sender=None):
+            guard(sender, "Item.GetAll")
+            return {
+                "Label": dbus.String("Chrome Safe Storage"),
+                "Attributes": dbus.Dictionary(
+                    {"application": "chrome",
+                     "xdg:schema": "chrome_libsecret_os_crypt_password_v2"},
+                    signature="ss"),
+                "Locked": dbus.Boolean(state.locked),
+                "Created": dbus.UInt64(0),
+                "Modified": dbus.UInt64(int(time.time())),
+            }
+
+        @dbus.service.method(IF_PROPS, in_signature="ssv", out_signature="",
+                             sender_keyword="sender")
+        def Set(self, interface, prop, value, sender=None):
+            guard(sender, "Item.Set")
+
+    class Session(dbus.service.Object):
+        @dbus.service.method(IF_SESSION, in_signature="", out_signature="",
+                             sender_keyword="sender")
+        def Close(self, sender=None):
+            guard(sender, "Session.Close")
+
+    return (
+        SecretService(bus, SERVICE_PATH),
+        Collection(bus, COLLECTION_PATH),
+        Item(bus, ITEM_PATH),
+        Session(bus, SESSION_PATH),
+    )
+
+
+# --------------------------------------------------------------------------
+# daemon
+# --------------------------------------------------------------------------
+
+def cmd_daemon(args):
+    try:
+        import dbus
+        import dbus.service
+        import dbus.mainloop.glib
+        from gi.repository import GLib
+    except Exception as e:
+        die(f"daemon needs dbus-python and pygobject: {e}")
+
+    dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+
+    state = State()
+    verifier = Verifier()
+
+    try:
+        bus = dbus.SessionBus()
+        name = dbus.service.BusName(
+            SERVICE_NAME, bus=bus,
+            do_not_queue=True, replace_existing=True, allow_replacement=False)
+    except dbus.exceptions.NameExistsException:
+        # Another instance already serves the name; not an error.
+        return 0
+    except Exception as e:
+        die(f"cannot connect to the session bus: {e}")
+
+    state.name_owned = True
+    objects = build_dbus_objects(bus, state, verifier)
+
+    # --- control socket ---------------------------------------------------
+    ensure_dir()
+    try:
+        if SOCK_PATH.exists() or SOCK_PATH.is_socket():
+            SOCK_PATH.unlink()
+    except OSError:
+        pass
+
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(str(SOCK_PATH))
+    os.chmod(SOCK_PATH, 0o600)
+    srv.listen(16)
+    srv.setblocking(False)
+    state.srv = srv
+
+    def handle_client(conn):
+        try:
+            raw = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED,
+                                  struct.calcsize("3i"))
+            _pid, uid, _gid = struct.unpack("3i", raw)
+            if uid != os.getuid():
+                conn.sendall(b'{"ok":false,"error":"peer uid mismatch"}\n')
+                return
+            conn.settimeout(5.0)
+            data = b""
+            while not data.endswith(b"\n"):
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+                if len(data) > 1 << 20:
+                    break
+            try:
+                req = json.loads(data.decode("utf-8") or "{}")
+            except Exception:
+                req = {}
+            resp = state.handle_control(req)
+        except Exception as e:
+            resp = {"ok": False, "error": str(e)}
+        try:
+            conn.sendall((json.dumps(resp) + "\n").encode("utf-8"))
+        except Exception:
+            pass
+        finally:
+            conn.close()
+
+    def on_accept(fd, condition):
+        try:
+            conn, _ = srv.accept()
+        except BlockingIOError:
+            return True
+        except OSError:
+            return True
+        handle_client(conn)
+        return True
+
+    GLib.io_add_watch(srv.fileno(), GLib.IO_IN, on_accept)
+
+    loop = GLib.MainLoop()
+
+    def on_signal(signum, frame):
+        loop.quit()
+
+    import signal
+    signal.signal(signal.SIGTERM, on_signal)
+    signal.signal(signal.SIGINT, on_signal)
+
+    print(f"{APP}: daemon ready (name={SERVICE_NAME}, locked)", flush=True)
+    try:
+        loop.run()
+    finally:
+        state.wipe()
+        try:
+            SOCK_PATH.unlink()
+        except OSError:
+            pass
+    return 0
+
+
+# --------------------------------------------------------------------------
+# client side
+# --------------------------------------------------------------------------
+
+def daemon_call(req, timeout=10.0):
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        s.connect(str(SOCK_PATH))
+        s.sendall((json.dumps(req) + "\n").encode("utf-8"))
+        data = b""
+        while not data.endswith(b"\n"):
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+        s.close()
+        return json.loads(data.decode("utf-8") or "{}")
+    except (FileNotFoundError, ConnectionRefusedError):
+        return None
+    except Exception:
+        return None
+
+
+def try_start_daemon():
+    """Best-effort: start the systemd user unit and wait for the socket."""
+    if daemon_call({"cmd": "ping"}, timeout=0.5) is not None:
+        return True
+    try:
+        subprocess.run(["systemctl", "--user", "start", "mp35n.service"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       timeout=5)
+    except Exception:
+        pass
+    for _ in range(50):
+        if SOCK_PATH.exists() and daemon_call({"cmd": "ping"}, timeout=0.5) is not None:
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def require_daemon():
+    r = daemon_call({"cmd": "ping"})
+    if r is None:
+        try_start_daemon()
+        r = daemon_call({"cmd": "ping"})
+    if r is None:
+        die("daemon is not running (try: systemctl --user start mp35n)")
+    return r
+
+
+def cmd_status(args):
+    r = daemon_call({"cmd": "status"})
+    if r is None:
+        if try_start_daemon():
+            r = daemon_call({"cmd": "status"})
+    if r is None:
+        print(f"{APP}: daemon not running")
+        return 2
+    if not r.get("ok"):
+        print(f"{APP}: {r.get('error')}")
+        return 2
+    state = "UNLOCKED" if not r["locked"] else "locked"
+    print(f"{APP}: {state}")
+    if r.get("chrome_path"):
+        print(f"  chrome: {r['chrome_path']}")
+        print(f"  sha256: {r['chrome_sha256'][:16]}...")
+    else:
+        print("  chrome: not pinned (run 'mp35n init')")
+    print(f"  daemon: up {r['uptime']}s, dbus name={'yes' if r['name_owned'] else 'no'}")
+    if r.get("denied"):
+        ld = r.get("last_denied") or {}
+        print(f"  denied: {r['denied']} call(s), last {ld.get('where')} from {ld.get('sender')}")
+    return 0 if not r["locked"] else 1
+
+
+def cmd_unlock(args):
+    require_daemon()
+    if not VAULT_PATH.exists():
+        die("no vault yet; run 'mp35n init' first")
+    password = getpass_password("Master password: ")
+    if password is None:
+        return 1
+    r = daemon_call({"cmd": "unlock", "password": password})
+    if r is None:
+        die("daemon is not running")
+    if not r.get("ok"):
+        die(r.get("error", "unlock failed"))
+    print(f"{APP}: unlocked")
+    return 0
+
+
+def getpass_password(prompt):
+    if STDIN_PASSWORD:
+        line = sys.stdin.readline()
+        if not line:
+            return None
+        return line.rstrip("\n")
+    import getpass
+    try:
+        return getpass.getpass(prompt)
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return None
+
+
+def cmd_lock(args):
+    r = daemon_call({"cmd": "lock"})
+    if r is None:
+        if try_start_daemon():
+            r = daemon_call({"cmd": "lock"})
+    if r is None:
+        die("daemon is not running")
+    if not r.get("ok"):
+        die(r.get("error", "lock failed"))
+    print(f"{APP}: locked")
+    return 0
+
+
+def cmd_init(args):
+    ensure_dir()
+    if VAULT_PATH.exists() and "--force" not in args:
+        die("vault already exists (use --force to wipe it)")
+
+    chrome = find_chrome()
+    if not chrome:
+        die("could not find a Chrome/Chromium binary; pass one in config manually")
+    digest = sha256_file(chrome)
+
+    print(f"{APP}: Chrome binary")
+    print(f"  path:   {chrome}")
+    print(f"  sha256: {digest}")
+    ans = input("Pin this binary as the only allowed caller? [Y/n] ").strip().lower()
+    if ans not in ("", "y", "yes"):
+        die("aborted")
+
+    pw1 = getpass_password("New master password: ")
+    if not pw1:
+        die("empty password not allowed")
+    if len(pw1) < 8:
+        print(f"{APP}: warning: password shorter than 8 characters", file=sys.stderr)
+    pw2 = getpass_password("Repeat: ")
+    if pw1 != pw2:
+        die("passwords do not match")
+
+    secret = os.urandom(SECRET_LEN)
+    vault = vault_encrypt(pw1, secret)
+    write_private(VAULT_PATH, json.dumps(vault, indent=2).encode("utf-8") + b"\n")
+    write_private(PIN_PATH, json.dumps({
+        "chrome_path": chrome,
+        "chrome_sha256": digest,
+        "created": int(time.time()),
+    }, indent=2).encode("utf-8") + b"\n")
+
+    print(f"{APP}: vault created at {VAULT_PATH}")
+    print(f"{APP}: Chrome pinned")
+    print(f"{APP}: next: './install.sh' then '35 unlock'")
+    return 0
+
+
+def cmd_trust(args):
+    chrome = find_chrome()
+    if not chrome:
+        die("could not find a Chrome/Chromium binary")
+    digest = sha256_file(chrome)
+    old = {}
+    try:
+        old = load_pin()
+    except Exception:
+        pass
+    print(f"{APP}: Chrome binary: {chrome}")
+    print(f"  current pin: {old.get('chrome_sha256', '(none)')[:16]}...")
+    print(f"  new sha256:  {digest[:16]}...")
+    ans = input("Trust this binary now? [y/N] ").strip().lower()
+    if ans not in ("y", "yes"):
+        die("aborted")
+    ensure_dir()
+    write_private(PIN_PATH, json.dumps({
+        "chrome_path": chrome,
+        "chrome_sha256": digest,
+        "created": int(time.time()),
+    }, indent=2).encode("utf-8") + b"\n")
+    print(f"{APP}: re-pinned")
+    return 0
+
+
+USAGE = __doc__.strip()
+
+
+def main(argv):
+    global STDIN_PASSWORD
+    if "--password-stdin" in argv:
+        STDIN_PASSWORD = True
+        argv = [a for a in argv if a != "--password-stdin"]
+    if not argv:
+        return cmd_status([])
+
+    cmd, args = argv[0], argv[1:]
+    if cmd in ("-h", "--help", "help"):
+        print(USAGE)
+        return 0
+    table = {
+        "unlock": cmd_unlock,
+        "lock": cmd_lock,
+        "status": cmd_status,
+        "init": cmd_init,
+        "trust": cmd_trust,
+        "daemon": cmd_daemon,
+    }
+    fn = table.get(cmd)
+    if not fn:
+        print(USAGE)
+        return 2
+    return fn(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
