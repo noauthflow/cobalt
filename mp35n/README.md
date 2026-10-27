@@ -9,7 +9,7 @@ Chrome 156 asks `org.freedesktop.secrets` for "Chrome Safe Storage" and derives 
     ./install.sh            symlink cli + 35 alias, install systemd user unit + dbus activation, start
     ./install.sh uninstall  stop service, remove unit/dbus/symlinks (vault kept)
 
-needs python 3.8+, `dbus-python`, `PyGObject`, `cryptography`, and a systemd user session. no root.
+needs python 3.8+, `dbus-python`, `PyGObject` with GTK4 + libadwaita (`gir1.2-gtk-4.0`, `gir1.2-adw-1`), `cryptography`, and a systemd user session. no root.
 
 ## commands
 
@@ -19,6 +19,9 @@ needs python 3.8+, `dbus-python`, `PyGObject`, `cryptography`, and a systemd use
     35 status           locked / unlocked, pin, denied-call count
     35 init             create the vault + pin the Chrome binary
     35 trust            re-pin after a Chrome update
+    35 run ARGS         re-pin if needed, unlock, start Chrome, lock again
+                        (the normal launch path; also what the .desktop
+                        entry points to)
 
 unlock before Chrome starts. if Chrome launches while locked it cannot read v11 cookies and drops them, and it writes new ones as v10.
 
@@ -29,7 +32,7 @@ unlock before Chrome starts. if Chrome launches while locked it cannot read v11 
 
 the daemon runs as a systemd user unit, owns `org.freedesktop.secrets`, and checks every caller: bus-attested PID, `/proc/pid/exe` realpath == the pinned Chrome path, binary root-owned and not world-writable, sha256 == the pinned hash. anything else gets `AccessDenied`.
 
-`35` talks to the daemon over a private unix socket (`~/.config/mp35n/control.sock`, mode 600): status, unlock (password), lock. the D-Bus name is the Chrome-facing interface and is locked to the pinned binary.
+`35` talks to the daemon over a private unix socket (`~/.config/mp35n/control.sock`, mode 600): status, unlock (password), lock. the D-Bus name is the Chrome-facing interface and is locked to the pinned binary. without a TTY, the password prompt is a native GTK4 + libadwaita dialog; there are no zenity/rofi/askpass fallbacks. the dialog shows the fixed codeword `KANEKI` above the password field.
 
 ## files
 

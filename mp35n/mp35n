@@ -14,6 +14,9 @@ Commands:
     mp35n status     show state
     mp35n init       create the vault + pin the Chrome binary
     mp35n trust      re-pin Chrome after an update
+    mp35n run ARGS   re-pin if needed, unlock, launch Chrome, lock again
+                     (terminal or desktop; prompts with GTK4/libadwaita
+                     when there is no TTY)
     mp35n daemon     internal: run the daemon
 
 Install/uninstall is handled by ./install.sh in this folder.
@@ -29,6 +32,7 @@ import stat
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -65,7 +69,12 @@ STDIN_PASSWORD = False
 # --------------------------------------------------------------------------
 
 def die(msg, code=1):
-    print(f"{APP}: {msg}", file=sys.stderr)
+    if sys.stderr.isatty():
+        print(f"{APP}: {msg}", file=sys.stderr)
+    else:
+        # launched from a desktop file: stderr goes nowhere, so surface the
+        # failure as a desktop notification
+        notify(msg)
     sys.exit(code)
 
 
@@ -75,15 +84,30 @@ def ensure_dir():
 
 
 def write_private(path: Path, data: bytes):
-    tmp = path.with_name(path.name + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    """Write atomically with 0600, without following planted symlinks."""
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".",
+                               suffix=".tmp")
     try:
-        os.write(fd, data)
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    os.replace(tmp, path)
-    os.chmod(path, 0o600)
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    try:
+        dfd = os.open(str(path.parent), os.O_DIRECTORY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
+    except OSError:
+        pass
 
 
 def sha256_file(path, limit=None):
@@ -123,6 +147,11 @@ def b64e(b):
 
 def b64d(s):
     return base64.b64decode(s.encode("ascii"))
+
+
+def vault_phrase():
+    """The codeword shown in the unlock prompt."""
+    return "KANEKI"
 
 
 def scrypt_key(password: str, salt: bytes, n, r, p) -> bytes:
@@ -267,6 +296,7 @@ class State:
         self.secret = None          # bytearray while unlocked
         self.denied = 0
         self.last_denied = None
+        self.last_delivered = None  # {pid, at, where} after a verified GetSecret
         self.fail_count = 0
         self.fail_until = 0.0
         self.name_owned = False
@@ -299,6 +329,7 @@ class State:
                 "name_owned": self.name_owned,
                 "denied": self.denied,
                 "last_denied": self.last_denied,
+                "last_delivered": self.last_delivered,
                 "uptime": int(time.time() - self.started),
                 "chrome_path": (pin or {}).get("chrome_path"),
                 "chrome_sha256": (pin or {}).get("chrome_sha256"),
@@ -347,6 +378,12 @@ def build_dbus_objects(bus, state, verifier):
                 "caller is not verified Chrome",
                 name="org.freedesktop.DBus.Error.AccessDenied")
 
+    def note_delivery(sender, who):
+        # A verified caller just received the secret. Record it so `35 run`
+        # can confirm delivery before locking the vault again.
+        pid = verifier._pid_for_sender(sender)
+        state.last_delivered = {"pid": pid, "at": int(time.time()), "where": who}
+
     def secret_bytes():
         if state.secret is None:
             raise dbus.exceptions.DBusException(
@@ -383,6 +420,7 @@ def build_dbus_objects(bus, state, verifier):
         def GetSecrets(self, items, session, sender=None):
             guard(sender, "GetSecrets")
             value = secret_bytes()
+            note_delivery(sender, "GetSecrets")
             out = {}
             for item in items:
                 out[dbus.ObjectPath(str(item))] = (
@@ -464,6 +502,7 @@ def build_dbus_objects(bus, state, verifier):
         def GetSecret(self, session, sender=None):
             guard(sender, "GetSecret")
             value = secret_bytes()
+            note_delivery(sender, "Item.GetSecret")
             return (dbus.ObjectPath(str(session)), dbus.ByteArray(b""),
                     value, dbus.String("text/plain"))
 
@@ -724,16 +763,411 @@ def cmd_unlock(args):
     require_daemon()
     if not VAULT_PATH.exists():
         die("no vault yet; run 'mp35n init' first")
-    password = getpass_password("Master password: ")
-    if password is None:
-        return 1
-    r = daemon_call({"cmd": "unlock", "password": password})
-    if r is None:
-        die("daemon is not running")
-    if not r.get("ok"):
-        die(r.get("error", "unlock failed"))
+
+    def verify(password):
+        r = daemon_call({"cmd": "unlock", "password": password})
+        if r is None:
+            return False, "daemon is not running"
+        return bool(r.get("ok")), r.get("error", "unlock failed")
+
+    ok, why = prompt_unlock(verify)
+    if not ok:
+        die(why or "unlock failed")
     print(f"{APP}: unlocked")
     return 0
+
+
+# --------------------------------------------------------------------------
+# user interaction: terminal *and* GUI sessions
+# --------------------------------------------------------------------------
+
+def notify(msg):
+    """Show a message in whatever session we are in (stderr + desktop
+    notification). Harmless when no notification daemon is running."""
+    print(f"{APP}: {msg}", file=sys.stderr, flush=True)
+    try:
+        subprocess.run(["notify-send", "-a", APP, "mp35n", msg],
+                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, timeout=5)
+    except Exception:
+        pass
+
+
+def _gtk_ready():
+    """True when GTK4 + libadwaita can open a display."""
+    try:
+        import gi
+        gi.require_version("Gtk", "4.0")
+        gi.require_version("Adw", "1")
+        from gi.repository import Gtk, Adw  # noqa: F401
+        return bool(Gtk.init_check())
+    except Exception:
+        return False
+
+
+def _bind_escape(win, action):
+    import gi
+    gi.require_version("Gtk", "4.0")
+    from gi.repository import Gtk, Gdk
+
+    controller = Gtk.EventControllerKey()
+
+    def on_key(_controller, keyval, _keycode, _state):
+        if keyval == Gdk.KEY_Escape:
+            action()
+            return True
+        return False
+
+    controller.connect("key-pressed", on_key)
+    win.add_controller(controller)
+
+
+def _gtk_shell(title, body_widget, header_widget):
+    """Shared Adwaita window: content plus a bottom header bar."""
+    import gi
+    gi.require_version("Gtk", "4.0")
+    gi.require_version("Adw", "1")
+    from gi.repository import Gtk, Adw
+
+    settings = Gtk.Settings.get_default()
+    if settings is not None and settings.find_property("gtk-cursor-blink"):
+        settings.set_property("gtk-cursor-blink", False)
+
+    win = Adw.Window()
+    win.set_title(title)
+    win.set_modal(True)
+    win.set_resizable(False)
+    win.set_default_size(420, -1)
+
+    clamp = Adw.Clamp()
+    clamp.set_maximum_size(420)
+    clamp.set_child(body_widget)
+
+    toolbar = Adw.ToolbarView()
+    toolbar.add_bottom_bar(header_widget)
+    toolbar.set_content(clamp)
+    win.set_content(toolbar)
+    return win
+
+
+def _gtk_unlock(verify):
+    """Native GTK4/libadwaita unlock dialog. It stays open on a wrong
+    password, shows the daemon error inline, and runs the daemon call off
+    the UI thread. Returns (ok, error)."""
+    import threading
+    import gi
+    gi.require_version("Gtk", "4.0")
+    gi.require_version("Adw", "1")
+    from gi.repository import Gtk, Adw, GLib
+
+    result = {"ok": False, "error": None}
+    state = {"busy": False, "closed": False}
+    loop = GLib.MainLoop()
+
+    body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+    body.set_margin_top(24)
+    body.set_margin_bottom(24)
+    body.set_margin_start(24)
+    body.set_margin_end(24)
+
+    phrase_label = Gtk.Label(label=vault_phrase())
+    phrase_label.add_css_class("title-1")
+    phrase_label.set_halign(Gtk.Align.START)
+    phrase_label.set_selectable(False)
+    body.append(phrase_label)
+
+    hint = Gtk.Label(label="Check the phrase before typing your master password.")
+    hint.add_css_class("dim-label")
+    hint.set_halign(Gtk.Align.START)
+    hint.set_wrap(True)
+    hint.set_xalign(0)
+    body.append(hint)
+
+    entry = Gtk.PasswordEntry()
+    entry.set_show_peek_icon(False)
+    entry.set_property("placeholder-text", "Master password")
+    entry.set_hexpand(True)
+    body.append(entry)
+
+    error_revealer = Gtk.Revealer()
+    error_revealer.set_transition_type(Gtk.RevealerTransitionType.SLIDE_DOWN)
+    error_label = Gtk.Label()
+    error_label.set_halign(Gtk.Align.START)
+    error_label.set_wrap(True)
+    error_label.set_xalign(0)
+    error_revealer.set_child(error_label)
+    body.append(error_revealer)
+
+    status = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+    status.set_visible(False)
+    spinner = Gtk.Spinner()
+    status_label = Gtk.Label()
+    status_label.add_css_class("dim-label")
+    status.append(spinner)
+    status.append(status_label)
+    body.append(status)
+
+    header = Adw.HeaderBar()
+    header.set_show_start_title_buttons(False)
+    header.set_show_end_title_buttons(False)
+    header.set_title_widget(Gtk.Box())
+    cancel_btn = Gtk.Button(label="Cancel")
+    unlock_btn = Gtk.Button(label="Unlock")
+    unlock_btn.add_css_class("suggested-action")
+    header.pack_start(cancel_btn)
+    header.pack_end(unlock_btn)
+    win = _gtk_shell(APP, body, header)
+    win.set_default_widget(unlock_btn)
+
+    def clear_error(*_):
+        error_revealer.set_reveal_child(False)
+
+    def show_error(text):
+        error_label.set_markup(
+            "<span foreground='#e01b24'>"
+            + GLib.markup_escape_text(text)
+            + "</span>")
+        error_revealer.set_reveal_child(True)
+
+    entry.connect("changed", clear_error)
+
+    def finish(ok, why):
+        if state["closed"]:
+            return False
+        state["busy"] = False
+        spinner.stop()
+        status.set_visible(False)
+        status_label.set_text("")
+        unlock_btn.set_sensitive(True)
+        entry.set_sensitive(True)
+        if ok:
+            result["ok"] = True
+            state["closed"] = True
+            win.destroy()
+            loop.quit()
+        else:
+            show_error(why or "unlock failed")
+            entry.grab_focus()
+        return False
+
+    def submit(*_):
+        if state["busy"] or state["closed"]:
+            return
+        pw = entry.get_text()
+        if not pw:
+            show_error("Enter the master password.")
+            return
+        entry.set_text("")
+        clear_error()
+        state["busy"] = True
+        unlock_btn.set_sensitive(False)
+        entry.set_sensitive(False)
+        status.set_visible(True)
+        spinner.start()
+        status_label.set_text("Unlocking…")
+
+        def worker():
+            try:
+                ok, why = verify(pw)
+            except Exception as e:
+                ok, why = False, str(e)
+            GLib.idle_add(finish, ok, why)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def cancel(*_):
+        if state["closed"]:
+            return
+        state["closed"] = True
+        result["error"] = "cancelled"
+        win.destroy()
+        loop.quit()
+
+    def on_close(*_):
+        cancel()
+        return True
+
+    entry.connect("activate", submit)
+    cancel_btn.connect("clicked", cancel)
+    unlock_btn.connect("clicked", submit)
+    win.connect("close-request", on_close)
+    _bind_escape(win, cancel)
+    win.present()
+    entry.grab_focus()
+    loop.run()
+    return result["ok"], result["error"]
+
+
+def _gtk_confirm(message, default):
+    import gi
+    gi.require_version("Gtk", "4.0")
+    gi.require_version("Adw", "1")
+    from gi.repository import Adw, GLib
+
+    dlg = Adw.AlertDialog()
+    dlg.set_heading(APP)
+    dlg.set_body(message)
+    dlg.add_response("no", "No")
+    dlg.add_response("yes", "Yes")
+    dlg.set_default_response("yes" if default else "no")
+    dlg.set_close_response("no")
+
+    result = {"yes": False}
+    loop = GLib.MainLoop()
+
+    def done(source, res):
+        try:
+            response = source.choose_finish(res)
+        except Exception:
+            response = "no"
+        result["yes"] = response == "yes"
+        loop.quit()
+
+    dlg.choose(None, None, done)
+    loop.run()
+    return result["yes"]
+
+
+def _gtk_new_password():
+    """Create-vault password dialog. Returns the password or None."""
+    import gi
+    gi.require_version("Gtk", "4.0")
+    gi.require_version("Adw", "1")
+    from gi.repository import Gtk, Adw, GLib
+
+    result = {"pw": None}
+    loop = GLib.MainLoop()
+
+    body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+    body.set_margin_top(24)
+    body.set_margin_bottom(24)
+    body.set_margin_start(24)
+    body.set_margin_end(24)
+
+    title = Gtk.Label(label="Create cookie vault")
+    title.add_css_class("title-2")
+    title.set_halign(Gtk.Align.START)
+    body.append(title)
+
+    hint = Gtk.Label(label="This password unlocks the vault. There is no recovery.")
+    hint.add_css_class("dim-label")
+    hint.set_halign(Gtk.Align.START)
+    hint.set_wrap(True)
+    hint.set_xalign(0)
+    body.append(hint)
+
+    pw1 = Gtk.PasswordEntry()
+    pw1.set_show_peek_icon(False)
+    pw1.set_property("placeholder-text", "New master password")
+    body.append(pw1)
+
+    pw2 = Gtk.PasswordEntry()
+    pw2.set_show_peek_icon(False)
+    pw2.set_property("placeholder-text", "Repeat")
+    body.append(pw2)
+
+    error_revealer = Gtk.Revealer()
+    error_revealer.set_transition_type(Gtk.RevealerTransitionType.SLIDE_DOWN)
+    error_label = Gtk.Label()
+    error_label.set_halign(Gtk.Align.START)
+    error_label.set_wrap(True)
+    error_label.set_xalign(0)
+    error_revealer.set_child(error_label)
+    body.append(error_revealer)
+
+    header = Adw.HeaderBar()
+    header.set_show_start_title_buttons(False)
+    header.set_show_end_title_buttons(False)
+    header.set_title_widget(Gtk.Box())
+    cancel_btn = Gtk.Button(label="Cancel")
+    create_btn = Gtk.Button(label="Create vault")
+    create_btn.add_css_class("suggested-action")
+    header.pack_start(cancel_btn)
+    header.pack_end(create_btn)
+    win = _gtk_shell(APP, body, header)
+    win.set_default_widget(create_btn)
+
+    def show_error(text):
+        error_label.set_markup(
+            "<span foreground='#e01b24'>"
+            + GLib.markup_escape_text(text)
+            + "</span>")
+        error_revealer.set_reveal_child(True)
+
+    def submit(*_):
+        a = pw1.get_text()
+        b = pw2.get_text()
+        if not a:
+            show_error("Enter a master password.")
+            return
+        if a != b:
+            show_error("Passwords do not match.")
+            pw2.set_text("")
+            pw2.grab_focus()
+            return
+        pw1.set_text("")
+        pw2.set_text("")
+        result["pw"] = a
+        win.destroy()
+        loop.quit()
+
+    def cancel(*_):
+        win.destroy()
+        loop.quit()
+
+    def on_close(*_):
+        cancel()
+        return True
+
+    pw1.connect("changed", lambda *_: error_revealer.set_reveal_child(False))
+    pw2.connect("changed", lambda *_: error_revealer.set_reveal_child(False))
+    pw2.connect("activate", submit)
+    cancel_btn.connect("clicked", cancel)
+    create_btn.connect("clicked", submit)
+    win.connect("close-request", on_close)
+    _bind_escape(win, cancel)
+    win.present()
+    pw1.grab_focus()
+    loop.run()
+    return result["pw"]
+
+
+def ask_confirm(message, default=False):
+    """Yes/no question via the terminal or GTK; never via a shell helper."""
+    if sys.stdin.isatty() or STDIN_PASSWORD:
+        suffix = " [Y/n] " if default else " [y/N] "
+        try:
+            answer = input(message + suffix).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return False
+        if not answer:
+            return default
+        return answer in ("y", "yes")
+    if not _gtk_ready():
+        die("confirmation needs a terminal or a graphical display")
+    return _gtk_confirm(message, default)
+
+
+def prompt_new_password():
+    """Ask for a new master password twice. Returns (password, error)."""
+    if sys.stdin.isatty() or STDIN_PASSWORD:
+        pw1 = getpass_password("New master password: ")
+        if not pw1:
+            return None, "empty password not allowed"
+        pw2 = getpass_password("Repeat: ")
+        if pw1 != pw2:
+            return None, "passwords do not match"
+        return pw1, None
+    if not _gtk_ready():
+        return None, "no graphical display; run from a terminal"
+    try:
+        pw = _gtk_new_password()
+    except Exception as e:
+        return None, f"GTK prompt failed: {e}"
+    if pw is None:
+        return None, "cancelled"
+    return pw, None
 
 
 def getpass_password(prompt):
@@ -750,6 +1184,35 @@ def getpass_password(prompt):
         return None
 
 
+def prompt_unlock(verify):
+    """Ask for the master password via the terminal or native GTK.
+    verify(password) -> (ok, error). Returns (ok, error)."""
+    if sys.stdin.isatty() or STDIN_PASSWORD:
+        err = None
+        for attempt in range(3):
+            prompt = "Master password:"
+            if err:
+                prompt = f"{err} — try again ({attempt + 1}/3):"
+            password = getpass_password(prompt)
+            if password is None:
+                return False, "no password entered"
+            ok, why = verify(password)
+            if ok:
+                return True, None
+            err = why
+            if "too many attempts" in (err or ""):
+                return False, err
+            print(f"{APP}: {err} (attempt {attempt + 1}/3)", file=sys.stderr)
+        return False, err or "unlock failed"
+
+    if not _gtk_ready():
+        return False, "no graphical display; run from a terminal"
+    try:
+        return _gtk_unlock(verify)
+    except Exception as e:
+        return False, f"GTK prompt failed: {e}"
+
+
 def cmd_lock(args):
     r = daemon_call({"cmd": "lock"})
     if r is None:
@@ -760,6 +1223,83 @@ def cmd_lock(args):
     if not r.get("ok"):
         die(r.get("error", "lock failed"))
     print(f"{APP}: locked")
+    return 0
+
+
+def cmd_run(args):
+    """Re-pin if Chrome changed, unlock, launch Chrome, confirm the key was
+    delivered to the verified binary, then lock the vault again. Works from
+    a terminal or a .desktop entry."""
+    if not VAULT_PATH.exists():
+        chrome = find_chrome()
+        if not chrome:
+            die("no vault and no chrome binary found")
+        os.execvp(chrome, [chrome] + list(args))  # nothing to protect
+
+    require_daemon()
+    try:
+        pin = load_pin()
+    except Exception:
+        die("no pin; run '35 init' or '35 trust' first")
+    chrome = pin.get("chrome_path")
+    if not chrome or not os.path.isfile(chrome):
+        die(f"pinned chrome binary missing: {chrome!r}")
+    st = os.stat(chrome)
+    if st.st_uid != 0 or (st.st_mode & stat.S_IWOTH):
+        die("pinned chrome binary is not root-owned or is world-writable; refusing")
+
+    digest = sha256_file(chrome)
+    if digest != pin.get("chrome_sha256"):
+        # This launch IS the trust decision: hash the exact root-owned
+        # binary about to run. Must happen before the unlock so the secret
+        # is never spent on a launch that would be denied.
+        write_private(PIN_PATH, json.dumps({
+            "chrome_path": chrome,
+            "chrome_sha256": digest,
+            "created": int(time.time()),
+        }, indent=2).encode("utf-8") + b"\n")
+        notify(f"chrome binary changed; re-pinned {digest[:16]}...")
+
+    started = int(time.time())
+    st0 = daemon_call({"cmd": "status"}) or {}
+    if st0.get("locked"):
+        def verify(pw):
+            ur = daemon_call({"cmd": "unlock", "password": pw})
+            if ur is None:
+                return False, "daemon is not running"
+            return bool(ur.get("ok")), ur.get("error", "unlock failed")
+
+        ok, why = prompt_unlock(verify)
+        if not ok:
+            die(f"{why or 'unlock failed'}; not starting chrome")
+
+    proc = subprocess.Popen(
+        [chrome] + list(args),
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL, start_new_session=True)
+
+    delivered = False
+    deadline = time.time() + 20
+    while time.time() < deadline:
+        st2 = daemon_call({"cmd": "status"}) or {}
+        ld = st2.get("last_delivered")
+        if ld and ld.get("at", 0) >= started:
+            delivered = True
+            break
+        if proc.poll() is not None:
+            break  # existing instance took over, or a --version-style call
+        time.sleep(0.2)
+
+    daemon_call({"cmd": "lock"})
+    if delivered:
+        notify("key delivered to chrome; vault locked again")
+    elif proc.poll() is not None:
+        pass  # exited without asking for the key; already locked
+    else:
+        # Chrome is running but never asked for the key. Locking now would
+        # silently push it to v10 and destroy cookies, so stay unlocked.
+        notify("key NOT confirmed delivered - vault stays UNLOCKED. "
+               "run '35 lock' once chrome is up")
     return 0
 
 
@@ -776,18 +1316,14 @@ def cmd_init(args):
     print(f"{APP}: Chrome binary")
     print(f"  path:   {chrome}")
     print(f"  sha256: {digest}")
-    ans = input("Pin this binary as the only allowed caller? [Y/n] ").strip().lower()
-    if ans not in ("", "y", "yes"):
+    if not ask_confirm("Pin this binary as the only allowed caller?", default=True):
         die("aborted")
 
-    pw1 = getpass_password("New master password: ")
-    if not pw1:
-        die("empty password not allowed")
+    pw1, why = prompt_new_password()
+    if pw1 is None:
+        die(why or "no password entered")
     if len(pw1) < 8:
         print(f"{APP}: warning: password shorter than 8 characters", file=sys.stderr)
-    pw2 = getpass_password("Repeat: ")
-    if pw1 != pw2:
-        die("passwords do not match")
 
     secret = os.urandom(SECRET_LEN)
     vault = vault_encrypt(pw1, secret)
@@ -799,6 +1335,7 @@ def cmd_init(args):
     }, indent=2).encode("utf-8") + b"\n")
 
     print(f"{APP}: vault created at {VAULT_PATH}")
+    print(f"{APP}: codeword: {vault_phrase()}")
     print(f"{APP}: Chrome pinned")
     print(f"{APP}: next: './install.sh' then '35 unlock'")
     return 0
@@ -817,8 +1354,7 @@ def cmd_trust(args):
     print(f"{APP}: Chrome binary: {chrome}")
     print(f"  current pin: {old.get('chrome_sha256', '(none)')[:16]}...")
     print(f"  new sha256:  {digest[:16]}...")
-    ans = input("Trust this binary now? [y/N] ").strip().lower()
-    if ans not in ("y", "yes"):
+    if not ask_confirm("Trust this binary now?", default=False):
         die("aborted")
     ensure_dir()
     write_private(PIN_PATH, json.dumps({
@@ -848,6 +1384,7 @@ def main(argv):
     table = {
         "unlock": cmd_unlock,
         "lock": cmd_lock,
+        "run": cmd_run,
         "status": cmd_status,
         "init": cmd_init,
         "trust": cmd_trust,
