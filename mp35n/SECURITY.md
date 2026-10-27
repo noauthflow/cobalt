@@ -19,3 +19,26 @@ a running browser, and a browser started while locked drops all `v11`
 cookies. Bottom line: mp35n protects against other keyring clients and
 at-rest theft while locked. It is not a boundary against same-user code
 execution or root.
+
+## convenience
+
+Unlocking is a manual step, and the failure is silent and destructive: if
+Chrome starts while the vault is locked it cannot decrypt `v11` cookies, so
+it drops them and starts writing new ones as `v10`. The only recovery is to
+restore `google-chrome/Default/Cookies` from the git repo and relaunch with
+the vault unlocked — and that only works if the vault is the same one those
+cookies were encrypted with. Keeping the cookie snapshot in git current is
+also manual and annoying: you have to quit Chrome, copy/commit the DB, and
+remember that `Cookies` and `vault.json` are a pair.
+
+A launch guard would fix the silent-drop failure — e.g. a wrapper that
+checks `35 status` and refuses to start Chrome (or prompts to unlock) unless
+the vault is open. The trade-off is friction: it has to intercept whatever
+launches Chrome (desktop entry, keybind, `google-chrome` in a terminal) and
+a hardcoded wrapper is easy to bypass, or to find annoying on the day you
+just want a browser. Middle ground: set Chrome's startup to **New Tab**
+rather than restoring tabs (a restored tab can show a cached logged-out
+page even when the cookies are fine), and make `35 unlock` the first thing
+you run after login. A `35 run`-style guard is worth it only if the wrapper
+is the normal way Chrome is launched, not a thing you fight with `pkill`
+and a terminal.
