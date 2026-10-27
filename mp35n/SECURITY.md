@@ -42,3 +42,17 @@ page even when the cookies are fine), and make `35 unlock` the first thing
 you run after login. A `35 run`-style guard is worth it only if the wrapper
 is the normal way Chrome is launched, not a thing you fight with `pkill`
 and a terminal.
+
+The bigger reason for a real run command is not the locked-launch bug, it is
+the unlocked window: while the vault is open, any process can start the
+pinned Chrome with a copied profile and ask *Chrome* to decrypt. So the
+unlock should exist only for the few seconds Chrome needs to fetch the key.
+The right shape is a `35 run` that unlocks (prompting if needed), starts
+Chrome, waits until the daemon confirms the key was delivered to the
+verified Chrome PID, and locks immediately — then exits, leaving Chrome
+running with its cached key. That turns a session-long exposure into a
+sub-second one. It needs to be the normal launch path (desktop entry and
+keybind, not just a terminal), and it is still only a guard: calling the
+binary directly bypasses it. But it is the difference between "unlocked all
+day" and "unlocked for one second per browser launch", which is the part
+that actually matters against a generic Chrome-aware stealer.
