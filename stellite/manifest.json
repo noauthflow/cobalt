@@ -36,16 +36,9 @@
     "run_at": "document_start"
   }, {
     "matches": ["*://*.youtube.com/*"],
-    "js": ["ytads/net.js"],
-    "run_at": "document_start",
-    "world": "MAIN",
-    "all_frames": true
-  }, {
-    "matches": ["*://*.youtube.com/*"],
     "css": ["ytads/hide.css"],
     "js": ["ytads/ads.js"],
-    "run_at": "document_start",
-    "all_frames": true
+    "run_at": "document_start"
   }, {
     "matches": ["*://*/*"],
     "exclude_matches": ["*://*.youtube.com/*", "*://*.google.com/*"],
