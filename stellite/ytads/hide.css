@@ -14,8 +14,18 @@ ytd-compact-promoted-video-renderer,
 ytd-carousel-ad-renderer,
 ytd-search-pyv-renderer,
 ytd-companion-slot-renderer,
+ytd-action-companion-ad-renderer,
 ytd-rich-item-renderer:has(ytd-promoted-video-renderer),
 ytd-rich-item-renderer:has(ytd-display-ad-renderer),
 ytd-rich-item-renderer:has(ytd-ad-slot-renderer) {
+  display: none !important;
+}
+
+/* in-video overlay/display ads on the player — hide the containers
+   outright so no close-click is even needed (ads.js clicks are the
+   backstop for variants that render outside these) */
+.ytp-ad-overlay-container,
+.ytp-ad-text-overlay,
+.ytp-ad-image-overlay {
   display: none !important;
 }
