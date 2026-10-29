@@ -900,6 +900,19 @@ def cmd_seed(args):
                  "       examples: '#7C4DFF', '7C4DFF', 'c4d', '#7C4DFF80' (quote the # in shells)")
     signed = skcolor_signed(rgba)
 
+    # user_color2 is the secondary accent (icon colors); defaults to the primary.
+    sec_raw = getattr(args, "secondary", None)
+    sec_signed, sec_hex = signed, hexnorm
+    if sec_raw:
+        try:
+            sec_rgba, sec_hex, sec_alpha = hex_to_skcolor(sec_raw)
+        except ValueError as e:
+            sys.exit(f"error: --secondary: {e}\n"
+                     "       examples: '#B79CFF', 'B79CFF' (quote the # in shells)")
+        if sec_alpha != 0xFF:
+            print(f"  ⚠ --secondary alpha 0x{sec_alpha:02X} — non-opaque seeds are untested")
+        sec_signed = skcolor_signed(sec_rgba)
+
     root, profiles = resolve_target(args)
 
     lock = browser_running(root)
@@ -937,9 +950,12 @@ def cmd_seed(args):
         if not isinstance(prefs, dict):
             sys.exit(f"    error: {path} is not a JSON object — refusing to touch it")
 
-        theme = prefs.get("browser", {}).get("theme", {})
+        browser = prefs.get("browser")
+        if not isinstance(browser, dict):
+            browser = prefs["browser"] = {}
+        theme = browser.get("theme")
         if not isinstance(theme, dict):
-            theme = prefs.setdefault("browser", {}).setdefault("theme", {})
+            theme = browser["theme"] = {}   # MUST reattach: .get() default is an orphan dict
 
         # ── report current state, verbosely, before changing anything ──
         if "user_color2" in theme:
@@ -958,7 +974,7 @@ def cmd_seed(args):
 
         backup(path, args.dry)
 
-        theme["user_color2"] = signed
+        theme["user_color2"] = sec_signed
         theme["user_color"] = signed  # MAIN accent key — the old "inert legacy" claim was wrong (proven 2026-09-09)
         theme.pop("saved_local_theme", None)
         acc = prefs.get("account_values", {}).get("browser", {}).get("theme")
@@ -969,7 +985,8 @@ def cmd_seed(args):
             print("    account_values.browser.theme: not present — nothing to mirror")
 
         if args.dry:
-            print(f"    · would set user_color + user_color2 = {hexnorm} (signed {signed}) — dry run, not written")
+            print(f"    · would set user_color = {hexnorm} (signed {signed}), "
+                  f"user_color2 = {sec_hex} (signed {sec_signed}) — dry run, not written")
             continue
 
         indent = 2 if "\n" in raw.rstrip("\n") else None  # match the file's existing style
@@ -983,7 +1000,8 @@ def cmd_seed(args):
             if os.path.exists(tmp):
                 os.unlink(tmp)
             sys.exit(f"    error: cannot write {path} ({e})")
-        print(f"    ✓ user_color + user_color2 -> {hexnorm} (signed {signed}), saved_local_theme cleared")
+        print(f"    ✓ user_color -> {hexnorm} (signed {signed})")
+        print(f"    ✓ user_color2 -> {sec_hex} (signed {sec_signed}), saved_local_theme cleared")
         print(f"    ✓ wrote {path} ({os.path.getsize(path)} bytes), backup at {path}.cobalt-bak")
         wrote_any = True
 
@@ -1087,7 +1105,9 @@ def main(argv=None):
     p_pull.add_argument("-o", "--out", help="write here instead of the default config path")
 
     p_seed = sub.add_parser("seed",
-                            help="set the theme seed color (user_color2 + legacy user_color) in a Chromium profile")
+                            help="set the theme seed color(s) (user_color + secondary user_color2) in a Chromium profile")
+    p_seed.add_argument("--secondary", metavar="HEX",
+                        help="distinct secondary accent for user_color2 (default: same as the seed)")
     p_seed.add_argument("browser", nargs="?", default="chrome",
                         help="target browser (default: chrome)")
     p_seed.add_argument("hex_color", nargs="?",

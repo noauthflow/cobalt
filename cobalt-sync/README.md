@@ -18,12 +18,21 @@ needs python 3.8+ (stdlib only, nothing to build). no special macOS permissions 
                                         config -> browser (bar made to match exactly)
     cobalt pull [--browser B] [--profile P]
                                         browser -> config (exact nesting/order)
-    cobalt seed IMAGE|COLOR [--strength N] [--force]
-                                        set chrome's theme accent + NTP background
+    cobalt seed [hex] [--secondary hex] [--profile P] [--all] [--force] [--dry]
+                                        set chrome's theme accents: user_color (primary:
+                                        omnibox focus ring) and user_color2 (secondary:
+                                        icon colors). --secondary defaults to the same
+                                        color. default seed: #C7B8E8
     cobalt avatar IMAGE [browser]  replace chromium profile avatar PNGs (192x192)
-    cobalt seed [hex] [--profile P] [--all]  set theme seed color (default: #C7B8E8)
 
 `--root /path/to/user-data-dir` targets any chromium fork not auto-detected.
+
+colors: two accent slots live in the profile's `Preferences` under
+`browser.theme` — `user_color` (address-bar focus ring/highlight) and
+`user_color2` (some default icon colors). browsers must be fully quit first;
+`seed` backs the file up to `Preferences.cobalt-bak` and writes both keys
+(plus mirrors `user_color` into `account_values` when present). a custom theme
+resets them, so re-run `seed` after applying/changing a theme extension.
 
 ## config format (~/.config/cobalt.conf)
 
