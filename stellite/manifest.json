@@ -9,15 +9,7 @@
     "128": "icons/icon128.png"
   },
   "manifest_version": 3,
-  "permissions": ["storage", "declarativeNetRequest"],
-  "host_permissions": ["*://*/*"],
-  "declarative_net_request": {
-    "rule_resources": [{
-      "id": "popblock-rules",
-      "enabled": true,
-      "path": "popblock/rules.json"
-    }]
-  },
+  "permissions": ["storage"],
   "background": { "service_worker": "pin.js" },
   "commands": {
     "pin-tab": {
@@ -39,12 +31,5 @@
     "css": ["ytads/hide.css"],
     "js": ["ytads/ads.js"],
     "run_at": "document_start"
-  }, {
-    "matches": ["*://*/*"],
-    "exclude_matches": ["*://*.youtube.com/*", "*://*.google.com/*"],
-    "js": ["popblock/pop.js"],
-    "run_at": "document_start",
-    "all_frames": true,
-    "world": "MAIN"
   }]
 }

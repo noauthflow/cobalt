@@ -60,30 +60,6 @@ hand-rolled material design 3 tokens/components — no libraries, no build)
 - deletable as a unit: remove the ytads/ folder + its content_scripts
   entry in the manifest (see ytads/README.md).
 
-**popup / popunder killer** (`popblock/`, fully self-contained)
-- kills the "clicking play opens a new ad tab" thing on anime/streaming
-  sites. verified against anikoto.cz's actual popunder chain (nekostream →
-  llvpn.com tag.min.js, an exo/iclick-style PPU kit that also runs
-  anti-devtools console tricks). layers: declarativeNetRequest blocklist
-  for the known kit domains (rules.json — add new ad domains there),
-  iframe sandbox attrs get their `allow-popups` tokens stripped (the
-  popunder usually fires from a sandboxed player iframe that content
-  scripts can't enter), `window.open` is stubbed in every reachable realm
-  (toString spoofed to look native — the kit probes it), script
-  `form.submit()` to _blank or no-such-frame named targets is dropped (the
-  kit's main bypass), any tab that still spawns closes itself instantly
-  (the trick uBO Lite's prevent-popup uses — script can close
-  script-opened tabs, never user-opened ones), and synthetic
-  `a.target="_blank"; a.click()` popunders are blocked.
-- debugging: console.clear() neutralized, rolling log at `__popblock.log`,
-  and an on-page badge (bottom-right) reports armed/blocked counts so page
-  console games can't hide it from you. click the badge to dump the log.
-- holding ctrl/cmd while clicking lets exactly one popup through (oauth,
-  share buttons); youtube + google domains are excluded so their auth flows
-  are untouched. see popblock/README.md.
-- deletable as a unit: remove the popblock/ folder + its content_scripts
-  entry in the manifest.
-
 **tab pin shortcut** (`pin.js`)
 - chrome has no native keyboard shortcut for pinning tabs; this adds one.
 - toggles pin on the active tab. default Ctrl+Shift+P (Cmd+Shift+P on mac),
