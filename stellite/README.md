@@ -45,6 +45,21 @@ hand-rolled material design 3 tokens/components — no libraries, no build)
 - youtube renames element classes periodically; the redirect is the only
   part that cannot break.
 
+**youtube ad blocker** (`ytads/`, fully self-contained)
+- home/search feed ads: css hides the ad renderers (masthead banner, ad
+  slots, promoted videos, premium promos, end-screen companion), plus a
+  js sweep for anything badged "Sponsored"/"Promoted" that slips past a
+  renderer rename. reliable.
+- in-video ads: these are stitched into the stream — no simple extension
+  can remove them at the request level. instead ytads/ads.js watches the
+  player's ad state and (a) auto-clicks the skip button as soon as it
+  appears, (b) fast-forwards the ad stream to its end when there is no
+  skip button yet, (c) closes the overlay/display ads on top of the
+  video. works most of the time; youtube a/b-tests detection, so expect
+  the occasional ad that takes a few seconds instead of zero.
+- deletable as a unit: remove the ytads/ folder + its content_scripts
+  entry in the manifest (see ytads/README.md).
+
 **tab pin shortcut** (`pin.js`)
 - chrome has no native keyboard shortcut for pinning tabs; this adds one.
 - toggles pin on the active tab. default Ctrl+Shift+P (Cmd+Shift+P on mac),
