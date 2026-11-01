@@ -13,14 +13,18 @@ SecretPortalKeyProviderUseForEncryption feature is on; without it Chrome
 fetches the key, ignores it, and writes v10 cookies under the public
 "peanuts" key. `mp35n run` always passes that feature.
 
+The key is only written when the process holding the pipe's read end is
+exactly the Chrome process `mp35n run` just launched and authorized with
+the one-time token from the unlock, and that process is the root-owned
+Chrome binary with an allowed command line and a clean environment.
+
 Commands:
     mp35n            show status
-    mp35n unlock     prompt for the master password and unlock
+    mp35n unlock     unlock only (authorizes nothing; mostly for testing)
     mp35n lock       forget the key immediately (no password needed)
-    mp35n status     show state
-    mp35n init       create the vault + pin the Chrome binary
-    mp35n trust      re-pin Chrome after an update
-    mp35n run ARGS   re-pin if needed, unlock, launch Chrome, lock again
+    mp35n status     show state + cookie encryption per profile
+    mp35n init       create the vault
+    mp35n run ARGS   unlock, launch + authorize Chrome, deliver once, lock
                      (terminal or desktop; prompts with GTK4/libadwaita
                      when there is no TTY)
     mp35n daemon     internal: run the daemon
@@ -45,7 +49,6 @@ from pathlib import Path
 APP = "mp35n"
 CONFIG_DIR = Path(os.environ.get("MP35N_CONFIG_DIR", str(Path.home() / ".config" / "mp35n")))
 VAULT_PATH = CONFIG_DIR / "vault.json"
-PIN_PATH = CONFIG_DIR / "config.json"
 SOCK_PATH = CONFIG_DIR / "control.sock"
 
 SERVICE_NAME = "org.freedesktop.secrets"
@@ -59,10 +62,38 @@ IF_PROPS = "org.freedesktop.DBus.Properties"
 
 PORTAL_PATH = "/org/freedesktop/portal/desktop"
 IF_PORTAL_SECRET = "org.freedesktop.impl.portal.Secret"
-# The portal frontend must run as this systemd user unit. /proc/<pid>/exe
-# cannot be used: the daemon's sandbox puts it in its own user namespace
-# (implicit PrivateUsers=), and the kernel denies exe links across it.
+# The portal frontend: must own org.freedesktop.portal.Desktop, run as this
+# systemd user unit, and be one of these root-owned binaries.
 PORTAL_UNIT = "xdg-desktop-portal.service"
+PORTAL_BINARIES = ("/usr/libexec/xdg-desktop-portal",
+                   "/usr/lib/xdg-desktop-portal")
+
+# The only binaries that may receive the key. Root-owned paths baked into
+# this root-owned script; nothing user-writable decides what Chrome is.
+CHROME_BINARIES = ("/opt/google/chrome/chrome",)
+
+# Chrome flags `35 run` may pass. Everything else (--user-data-dir,
+# --remote-debugging-*, --load-extension, --*-cmd-prefix, --proxy-server,
+# ...) is refused: those let another process read decrypted cookies.
+ALLOWED_CHROME_FLAGS = {"--incognito", "--new-window", "--restore-last-session",
+                        "--start-maximized", "--enable-wayland-ime"}
+ALLOWED_CHROME_FLAG_PREFIXES = ("--profile-directory=", "--ozone-platform=",
+                                "--ozone-platform-hint=", "--app=",
+                                "--wayland-text-input-version=")
+
+# Environment variables that load foreign code into Chrome, move its
+# profile, or leak its TLS keys. Matched by prefix.
+CHROME_ENV_BLOCK = (
+    "LD_", "GLIBC_TUNABLES", "MALLOC_", "GCONV_PATH",
+    "GTK_MODULES", "GTK3_MODULES", "GTK_PATH", "GTK_IM_MODULE_FILE",
+    "GTK_EXE_PREFIX", "GTK_DATA_PREFIX", "GIO_EXTRA_MODULES",
+    "GIO_MODULE_DIR", "GDK_PIXBUF_MODULE", "QT_PLUGIN_PATH",
+    "QT_QPA_PLATFORM_PLUGIN_PATH", "NSS_", "SSLKEYLOGFILE",
+    "CHROME_CONFIG_HOME", "CHROME_USER_DATA_DIR", "LIBGL_DRIVERS_PATH",
+    "__EGL_VENDOR_LIBRARY", "VK_ICD_FILENAMES", "VK_DRIVER_FILES",
+    "VK_ADD_DRIVER_FILES", "VK_LAYER_PATH", "VK_ADD_LAYER_PATH",
+    "VK_INSTANCE_LAYERS",
+)
 CHROME_APP_IDS = {"com.google.chrome", "google-chrome",
                   "google-chrome-stable", "chrome"}
 
@@ -130,35 +161,186 @@ def write_private(path: Path, data: bytes):
         pass
 
 
-def sha256_file(path, limit=None):
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        remaining = limit
-        while True:
-            chunk = f.read(1 << 20)
-            if not chunk:
-                break
-            h.update(chunk)
-            if remaining is not None:
-                remaining -= len(chunk)
-                if remaining <= 0:
-                    break
-    return h.hexdigest()
-
-
 def find_chrome():
-    candidates = [
-        "/opt/google/chrome/chrome",
-        "/usr/lib/chromium/chromium",
-        "/usr/lib/chromium-browser/chromium-browser",
-        "/usr/bin/google-chrome-stable",
-        "/usr/bin/google-chrome",
-        "/usr/bin/chromium",
-    ]
-    for c in candidates:
+    for c in CHROME_BINARIES:
         if os.path.isfile(c):
-            return os.path.realpath(c)
+            return c
     return None
+
+
+def real_home():
+    import pwd
+    return pwd.getpwuid(os.getuid()).pw_dir
+
+
+def trusted_path(path):
+    """None if path and every parent are root-owned, not symlinks, and not
+    group/world-writable (so only root can swap the file). Else a reason."""
+    p = Path(path)
+    for q in [p] + list(p.parents):
+        try:
+            st = os.lstat(q)
+        except OSError as e:
+            return f"{q}: {e}"
+        if stat.S_ISLNK(st.st_mode):
+            return f"{q} is a symlink"
+        if st.st_uid != 0:
+            return f"{q} is not root-owned"
+        if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            return f"{q} is group/world-writable"
+    return None
+
+
+def chrome_argv_problems(argv, exe):
+    """None if argv is exe + allowed flags + plain URLs/paths."""
+    if not argv or argv[0] != exe:
+        return f"argv[0] {argv[:1]!r} is not {exe}"
+    for a in argv[1:]:
+        if not a.startswith("-"):
+            continue  # URL or file to open
+        if a == f"--enable-features={CHROME_FEATURE}":
+            continue
+        if a in ALLOWED_CHROME_FLAGS or a.startswith(ALLOWED_CHROME_FLAG_PREFIXES):
+            continue
+        return f"Chrome flag {a!r} is not allowed"
+    return None
+
+
+def chrome_env_problems(env):
+    """None if env cannot inject code into Chrome or move its profile."""
+    bad = sorted(k for k in env if k.startswith(CHROME_ENV_BLOCK))
+    if bad:
+        return f"dangerous environment variables: {', '.join(bad)}"
+    home = real_home()
+    if env.get("HOME") != home:
+        return f"HOME={env.get('HOME')!r} is not {home!r}"
+    xch = env.get("XDG_CONFIG_HOME")
+    if xch is not None and os.path.normpath(xch) != os.path.join(home, ".config"):
+        return f"XDG_CONFIG_HOME={xch!r} moves the Chrome profile"
+    return None
+
+
+def chrome_env(environ):
+    """Clean environment for launching Chrome: drop blocked variables and
+    a profile-moving XDG_CONFIG_HOME. Returns (env, removed_names)."""
+    home = real_home()
+    env, removed = {}, []
+    for k, v in environ.items():
+        if k.startswith(CHROME_ENV_BLOCK):
+            removed.append(k)
+            continue
+        if k == "XDG_CONFIG_HOME" and os.path.normpath(v) != os.path.join(home, ".config"):
+            removed.append(k)
+            continue
+        env[k] = v
+    env["HOME"] = home
+    return env, removed
+
+
+def read_proc_status(pid):
+    out = {}
+    with open(f"/proc/{pid}/status") as f:
+        for line in f:
+            k, _, v = line.partition(":")
+            out[k] = v.split()
+    return out
+
+
+def describe_pid(pid):
+    try:
+        return f"{pid}:{os.readlink(f'/proc/{pid}/exe')}"
+    except OSError:
+        try:
+            with open(f"/proc/{pid}/comm") as f:
+                return f"{pid}:({f.read().strip()})"
+        except OSError:
+            return f"{pid}:?"
+
+
+def verify_chrome_process(pid):
+    """None if pid is a clean, real Chrome browser process; else a reason.
+    Needs a daemon without a private user/mount namespace (see the unit)."""
+    base = f"/proc/{int(pid)}"
+    try:
+        exe = os.readlink(f"{base}/exe")
+        if exe not in CHROME_BINARIES:
+            return f"exe {exe!r} is not Chrome"
+        why = trusted_path(exe)
+        if why:
+            return why
+        run, disk = os.stat(f"{base}/exe"), os.stat(exe)
+        if (run.st_dev, run.st_ino) != (disk.st_dev, disk.st_ino):
+            return "running image is not the Chrome binary on disk"
+        for ns in ("mnt", "user", "pid"):
+            if os.readlink(f"{base}/ns/{ns}") != os.readlink(f"/proc/self/ns/{ns}"):
+                return f"Chrome runs in a different {ns} namespace"
+        if os.readlink(f"{base}/root") != "/":
+            return "Chrome is chrooted"
+        st = read_proc_status(pid)
+        if st.get("TracerPid", ["0"])[0] != "0":
+            return "Chrome is being traced"
+        if any(u != str(os.getuid()) for u in st.get("Uid", ["?"])):
+            return "Chrome uid mismatch"
+        with open(f"{base}/cmdline", "rb") as f:
+            argv = [a.decode("utf-8", "surrogateescape")
+                    for a in f.read().split(b"\0")[:-1]]
+        why = chrome_argv_problems(argv, exe)
+        if why:
+            return why
+        with open(f"{base}/environ", "rb") as f:
+            env = {}
+            for item in f.read().split(b"\0"):
+                k, sep, v = item.partition(b"=")
+                if sep:
+                    env[k.decode("utf-8", "surrogateescape")] = \
+                        v.decode("utf-8", "surrogateescape")
+        return chrome_env_problems(env)
+    except OSError as e:
+        return f"cannot inspect pid {pid}: {e}"
+
+
+def pipe_readers(fd):
+    """Every process (other than us) holding the read end of the anonymous
+    pipe whose write end is fd. Anyone holding it can read the key.
+    Returns (reader_pids, hidden_pids): hidden = same-uid processes whose
+    fd table we cannot inspect (non-dumpable)."""
+    st = os.fstat(fd)
+    target = f"pipe:[{st.st_ino}]"
+    if not stat.S_ISFIFO(st.st_mode) or os.readlink(f"/proc/self/fd/{fd}") != target:
+        raise ValueError("portal fd is not an anonymous pipe")
+    me, uid = os.getpid(), str(os.getuid())
+    readers, hidden = set(), []
+    for name in os.listdir("/proc"):
+        if not name.isdigit() or int(name) == me:
+            continue
+        pid = int(name)
+        try:
+            fds = os.listdir(f"/proc/{pid}/fd")
+        except FileNotFoundError:
+            continue
+        except PermissionError:
+            try:
+                if read_proc_status(pid).get("Uid", [""])[0] == uid:
+                    hidden.append(pid)
+            except OSError:
+                pass
+            continue
+        for n in fds:
+            try:
+                if os.readlink(f"/proc/{pid}/fd/{n}") != target:
+                    continue
+            except OSError:
+                continue
+            try:
+                with open(f"/proc/{pid}/fdinfo/{n}") as f:
+                    flags = next(int(l.split()[1], 8) for l in f
+                                 if l.startswith("flags:"))
+            except (OSError, StopIteration, ValueError):
+                readers.add(pid)  # unknown mode: assume it can read
+                continue
+            if flags & os.O_ACCMODE != os.O_WRONLY:
+                readers.add(pid)
+    return readers, hidden
 
 
 def chrome_args(args):
@@ -255,10 +437,6 @@ def vault_decrypt(password: str) -> bytes:
     return AESGCM(key).decrypt(b64d(c["nonce"]), b64d(c["ct"]), VAULT_AAD)
 
 
-def load_pin() -> dict:
-    return json.loads(PIN_PATH.read_text())
-
-
 # --------------------------------------------------------------------------
 # chrome caller verification
 # --------------------------------------------------------------------------
@@ -267,23 +445,6 @@ class Verifier:
     def __init__(self):
         self._bus = None
         self._pid_cache = {}
-        self._hash_cache = {}
-        self._pin = None
-        self._pin_mtime = None
-
-    def _pin_now(self):
-        try:
-            mtime = PIN_PATH.stat().st_mtime_ns
-        except OSError:
-            return None
-        if mtime != self._pin_mtime:
-            try:
-                self._pin = load_pin()
-                self._pin_mtime = mtime
-            except Exception:
-                self._pin = None
-                self._pin_mtime = mtime
-        return self._pin
 
     def _connection(self):
         if self._bus is None:
@@ -320,33 +481,11 @@ class Verifier:
             return False
         if not sender:
             return no("no sender")
-        pin = self._pin_now()
-        if not pin or not pin.get("chrome_sha256"):
-            return no("no pin")
         pid = self._pid_for_sender(sender)
         if pid is None or pid <= 1:
             return no(f"no pid ({pid})")
-        exe_link = f"/proc/{pid}/exe"
-        try:
-            exe = os.path.realpath(exe_link)
-            st = os.stat(exe_link)
-        except OSError as e:
-            return no(f"stat {exe_link}: {e}")
-        if exe != pin.get("chrome_path"):
-            return no(f"exe {exe!r} != pinned {pin.get('chrome_path')!r} (pid {pid})")
-        # The binary must be root-owned and not world-writable.
-        if st.st_uid != 0 or (st.st_mode & stat.S_IWOTH):
-            return no(f"bad ownership uid={st.st_uid} mode={st.st_mode:o}")
-        cache_key = (pid, st.st_ino, st.st_mtime_ns, st.st_size)
-        digest = self._hash_cache.get(cache_key)
-        if digest is None:
-            try:
-                digest = sha256_file(exe_link)
-            except OSError as e:
-                return no(f"hash read: {e}")
-            self._hash_cache = {cache_key: digest}  # keep cache tiny
-        ok = hmac.compare_digest(digest, pin["chrome_sha256"])
-        return True if ok else no(f"hash mismatch pid={pid} got={digest[:16]}")
+        why = verify_chrome_process(pid)
+        return True if why is None else no(why)
 
 
 # --------------------------------------------------------------------------
@@ -364,6 +503,10 @@ class State:
         self.name_owned = False
         self.started = time.time()
         self.srv = None
+        # One launch authorization per unlock: {"token": str, "pid": int|None}.
+        # The token goes only to the client that typed the password; it
+        # binds that unlock to the one Chrome process `35 run` started.
+        self.grant = None
 
     @property
     def locked(self):
@@ -374,17 +517,38 @@ class State:
             for i in range(len(self.secret)):
                 self.secret[i] = 0
         self.secret = None
+        self.grant = None
+
+    def check_request(self, raw_fd):
+        """(None, True) if the key may be written into raw_fd; else
+        (reason, ours). ours=True means the request came from the authorized
+        Chrome (it holds the read end), so Chrome itself was refused;
+        ours=False means some other process asked and was turned away."""
+        g = self.grant
+        readers, hidden = pipe_readers(raw_fd)
+        who = ", ".join(describe_pid(p) for p in sorted(readers)) or "nobody"
+        if not g or not g.get("pid"):
+            return (f"no Chrome launch authorized (start Chrome with '35 run'); "
+                    f"requester [{who}]"), False
+        pid = g["pid"]
+        if pid not in readers:
+            return f"request from [{who}], not from authorized Chrome pid {pid}", False
+        if readers != {pid}:
+            return (f"Chrome's pipe is ALSO open in [{who}]: another process "
+                    f"is trying to read the key"), True
+        why = verify_chrome_process(pid)
+        if why:
+            return f"authorized Chrome pid {pid} failed verification: {why}", True
+        if hidden:
+            print(f"{APP}: note: uninspectable same-uid processes: "
+                  + ", ".join(describe_pid(p) for p in hidden), flush=True)
+        return None, True
 
     def handle_control(self, req):
         cmd = req.get("cmd")
         if cmd == "ping":
             return {"ok": True}
         if cmd == "status":
-            pin = None
-            try:
-                pin = load_pin()
-            except Exception:
-                pass
             return {
                 "ok": True,
                 "locked": self.locked,
@@ -393,8 +557,8 @@ class State:
                 "last_denied": self.last_denied,
                 "last_portal": self.last_portal,
                 "uptime": int(time.time() - self.started),
-                "chrome_path": (pin or {}).get("chrome_path"),
-                "chrome_sha256": (pin or {}).get("chrome_sha256"),
+                "chrome_path": find_chrome(),
+                "authorized_pid": (self.grant or {}).get("pid"),
                 "vault_exists": VAULT_PATH.exists(),
             }
         if cmd == "unlock":
@@ -417,6 +581,25 @@ class State:
             self.secret = bytearray(secret)
             self.fail_count = 0
             self.fail_until = 0.0
+            import secrets
+            self.grant = {"token": secrets.token_hex(32), "pid": None}
+            return {"ok": True, "token": self.grant["token"]}
+        if cmd == "authorize":
+            g = self.grant
+            token = str(req.get("token", "")).encode()
+            if not g or not hmac.compare_digest(token, g["token"].encode()):
+                return {"ok": False, "error": "bad or expired launch token"}
+            if g.get("pid"):
+                return {"ok": False, "error": "a launch is already authorized"}
+            try:
+                pid = int(req.get("pid"))
+            except (TypeError, ValueError):
+                return {"ok": False, "error": "bad pid"}
+            why = verify_chrome_process(pid)
+            if why:
+                return {"ok": False, "error": why}
+            g["pid"] = pid
+            print(f"{APP}: authorized Chrome pid {pid}", flush=True)
             return {"ok": True}
         if cmd == "lock":
             self.wipe()
@@ -435,7 +618,7 @@ def build_dbus_objects(bus, state, verifier):
     def guard(sender, who):
         if not verifier.is_chrome(sender):
             state.denied += 1
-            state.last_denied = {"sender": str(sender), "at": int(time.time()), "where": who}
+            state.last_denied = {"sender": str(sender), "at": time.time(), "where": who}
             raise dbus.exceptions.DBusException(
                 "caller is not verified Chrome",
                 name="org.freedesktop.DBus.Error.AccessDenied")
@@ -445,7 +628,7 @@ def build_dbus_objects(bus, state, verifier):
         # Chrome to v10 cookies.
         print(f"{APP}: portal call refused: {msg}", flush=True)
         state.denied += 1
-        state.last_denied = {"sender": "portal", "at": int(time.time()),
+        state.last_denied = {"sender": "portal", "at": time.time(),
                              "where": f"RetrieveSecret: {msg}"}
         raise dbus.exceptions.DBusException(
             msg, name="org.freedesktop.DBus.Error.AccessDenied")
@@ -480,6 +663,15 @@ def build_dbus_objects(bus, state, verifier):
             deny_portal(f"cannot read portal cgroup: {e}")
         if not any(cg.endswith("/" + PORTAL_UNIT) for cg in cgroups):
             deny_portal(f"portal not in {PORTAL_UNIT}: {cgroups!r}")
+        try:
+            exe = os.readlink(f"/proc/{pid}/exe")
+        except OSError as e:
+            deny_portal(f"cannot read portal exe: {e}")
+        if exe not in PORTAL_BINARIES:
+            deny_portal(f"unexpected portal binary {exe!r}")
+        why = trusted_path(exe)
+        if why:
+            deny_portal(f"untrusted portal binary: {why}")
 
     class SecretService(dbus.service.Object):
         @dbus.service.method(IF_SERVICE, in_signature="s", out_signature="o",
@@ -636,19 +828,34 @@ def build_dbus_objects(bus, state, verifier):
             if app.lower() not in CHROME_APP_IDS:
                 print(f"{APP}: portal deny app_id={app!r}", flush=True)
                 state.denied += 1
-                state.last_denied = {"sender": "portal", "at": int(time.time()),
+                state.last_denied = {"sender": "portal", "at": time.time(),
                                      "where": f"RetrieveSecret: app_id {app!r}"}
                 return portal_result(2)
             if state.secret is None:
                 print(f"{APP}: portal request while locked", flush=True)
                 state.denied += 1
-                state.last_denied = {"sender": "portal", "at": int(time.time()),
+                state.last_denied = {"sender": "portal", "at": time.time(),
                                      "where": "RetrieveSecret: vault locked"}
                 return portal_result(2)
 
             raw = None
+            pid = None
             try:
                 raw = fd.take() if hasattr(fd, "take") else int(fd)
+                try:
+                    why, ours = state.check_request(raw)
+                except Exception as e:
+                    why, ours = f"verification error: {e}", True
+                if why:
+                    print(f"{APP}: portal call refused: {why}", flush=True)
+                    state.denied += 1
+                    state.last_denied = {"sender": "portal", "at": time.time(),
+                                         "where": f"RetrieveSecret: {why}",
+                                         "ours": ours}
+                    if ours:
+                        state.wipe()  # Chrome itself was refused: lock
+                    return portal_result(2)
+                pid = state.grant["pid"]
                 secret = bytes(state.secret)
                 off = 0
                 while off < len(secret):
@@ -666,8 +873,10 @@ def build_dbus_objects(bus, state, verifier):
                     except OSError:
                         pass
 
-            state.last_portal = {"app_id": app, "at": int(time.time())}
-            print(f"{APP}: portal secret delivered app_id={app!r}", flush=True)
+            state.last_portal = {"app_id": app, "pid": pid, "at": time.time()}
+            state.wipe()  # one key per unlock: lock immediately
+            print(f"{APP}: portal secret delivered to verified Chrome pid {pid} "
+                  f"(app_id={app!r}); vault locked", flush=True)
             return portal_result(0)
 
         @dbus.service.method(IF_PROPS, in_signature="ss", out_signature="v",
@@ -869,15 +1078,16 @@ def cmd_status(args):
         return 2
     state = "UNLOCKED" if not r["locked"] else "locked"
     print(f"{APP}: {state}")
-    if r.get("chrome_path"):
-        print(f"  chrome: {r['chrome_path']}")
-        print(f"  sha256: {r['chrome_sha256'][:16]}...")
-    else:
-        print("  chrome: not pinned (run 'mp35n init')")
+    chrome = r.get("chrome_path")
+    trust = trusted_path(chrome) if chrome else "not installed"
+    print(f"  chrome: {chrome or '-'} ({'root-owned path OK' if not trust else trust})")
+    if r.get("authorized_pid"):
+        print(f"  authorized: Chrome pid {r['authorized_pid']}")
     print(f"  daemon: up {r['uptime']}s, dbus name={'yes' if r['name_owned'] else 'no'}")
     if r.get("last_portal"):
         lp = r["last_portal"]
-        print(f"  portal: delivered to {lp.get('app_id')!r} at {lp.get('at')}")
+        when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(lp.get("at", 0)))
+        print(f"  portal: delivered to Chrome pid {lp.get('pid')} at {when}")
     if r.get("denied"):
         ld = r.get("last_denied") or {}
         print(f"  denied: {r['denied']} call(s), last {ld.get('where')} from {ld.get('sender')}")
@@ -905,7 +1115,8 @@ def cmd_unlock(args):
     ok, why = prompt_unlock(verify)
     if not ok:
         die(why or "unlock failed")
-    print(f"{APP}: unlocked")
+    print(f"{APP}: unlocked (no Chrome is authorized; only '35 run' can "
+          "authorize a launch, so this delivers the key to nobody)")
     return 0
 
 
@@ -1358,79 +1569,105 @@ def cmd_lock(args):
     return 0
 
 
+def chrome_running():
+    """PID of the Chrome browser that owns the default profile, if alive."""
+    for root in CHROME_PROFILE_ROOTS[:1]:
+        try:
+            target = os.readlink(root / "SingletonLock")  # "<host>-<pid>"
+            pid = int(target.rsplit("-", 1)[1])
+            if os.readlink(f"/proc/{pid}/exe") in CHROME_BINARIES:
+                return pid
+        except (OSError, ValueError, IndexError):
+            pass
+    return None
+
+
 def cmd_run(args):
-    """Re-pin if Chrome changed, unlock, launch Chrome, confirm the key was
-    delivered to the verified binary, then lock the vault again. Works from
-    a terminal or a .desktop entry."""
+    """Unlock, launch Chrome with a clean argv/env, authorize exactly that
+    process, wait for the key delivery (the daemon locks itself after it),
+    then make sure the vault is locked. Works from a terminal or a .desktop
+    entry."""
+    chrome = find_chrome()
+    if not chrome:
+        die("no Chrome binary found at " + ", ".join(CHROME_BINARIES))
+    why = trusted_path(chrome)
+    if why:
+        die(f"refusing to launch Chrome: {why}")
+    argv = [chrome] + chrome_args(args)
+    why = chrome_argv_problems(argv, chrome)
+    if why:
+        die(f"{why}; not starting chrome")
+    env, removed = chrome_env(os.environ)
+    if removed:
+        notify("removed from Chrome's environment: " + ", ".join(sorted(removed)))
+
     if not VAULT_PATH.exists():
-        chrome = find_chrome()
-        if not chrome:
-            die("no vault and no chrome binary found")
-        os.execvp(chrome, [chrome] + list(args))  # nothing to protect
+        os.execve(chrome, argv, env)  # nothing to protect
+
+    if chrome_running():
+        # The running browser already has its key; this process only hands
+        # the URL/window request to it and exits. No unlock needed.
+        os.execve(chrome, argv, env)
 
     require_daemon()
-    try:
-        pin = load_pin()
-    except Exception:
-        die("no pin; run '35 init' or '35 trust' first")
-    chrome = pin.get("chrome_path")
-    if not chrome or not os.path.isfile(chrome):
-        die(f"pinned chrome binary missing: {chrome!r}")
-    st = os.stat(chrome)
-    if st.st_uid != 0 or (st.st_mode & stat.S_IWOTH):
-        die("pinned chrome binary is not root-owned or is world-writable; refusing")
+    # Always start from a fresh unlock: the launch token is only returned
+    # to the client that supplied the password.
+    daemon_call({"cmd": "lock"})
+    token = {}
 
-    digest = sha256_file(chrome)
-    if digest != pin.get("chrome_sha256"):
-        # This launch IS the trust decision: hash the exact root-owned
-        # binary about to run. Must happen before the unlock so the secret
-        # is never spent on a launch that would be denied.
-        write_private(PIN_PATH, json.dumps({
-            "chrome_path": chrome,
-            "chrome_sha256": digest,
-            "created": int(time.time()),
-        }, indent=2).encode("utf-8") + b"\n")
-        notify(f"chrome binary changed; re-pinned {digest[:16]}...")
+    def verify(pw):
+        ur = daemon_call({"cmd": "unlock", "password": pw})
+        if ur is None:
+            return False, "daemon is not running"
+        if ur.get("ok"):
+            token["t"] = ur.get("token")
+        return bool(ur.get("ok")), ur.get("error", "unlock failed")
 
-    started = int(time.time())
-    st0 = daemon_call({"cmd": "status"}) or {}
-    if st0.get("locked"):
-        def verify(pw):
-            ur = daemon_call({"cmd": "unlock", "password": pw})
-            if ur is None:
-                return False, "daemon is not running"
-            return bool(ur.get("ok")), ur.get("error", "unlock failed")
+    ok, why = prompt_unlock(verify)
+    if not ok or not token.get("t"):
+        die(f"{why or 'unlock failed'}; not starting chrome")
 
-        ok, why = prompt_unlock(verify)
-        if not ok:
-            die(f"{why or 'unlock failed'}; not starting chrome")
-
+    started = time.time()
     proc = subprocess.Popen(
-        [chrome] + chrome_args(args),
+        argv, env=env, close_fds=True,
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL, start_new_session=True)
+    ar = daemon_call({"cmd": "authorize", "token": token["t"], "pid": proc.pid})
+    if not ar or not ar.get("ok"):
+        # Kill it before it asks for the key and falls back to v10.
+        proc.kill()
+        daemon_call({"cmd": "lock"})
+        die(f"Chrome failed verification: {(ar or {}).get('error', 'daemon gone')}; "
+            "stopped it, vault locked")
 
     delivered = False
     refused = None
+    seen_foreign = None
     deadline = time.time() + 20
     while time.time() < deadline:
         st2 = daemon_call({"cmd": "status"}) or {}
         lp = st2.get("last_portal")
-        if lp and lp.get("at", 0) >= started:
+        if lp and lp.get("at", 0) >= started and lp.get("pid") == proc.pid:
             delivered = True
             break
         ld = st2.get("last_denied") or {}
         if (ld.get("at", 0) >= started
                 and str(ld.get("where", "")).startswith("RetrieveSecret")):
-            refused = ld.get("where")
-            break
+            if ld.get("ours"):
+                refused = ld.get("where")
+                break
+            if ld.get("at") != (seen_foreign or {}).get("at"):
+                # Someone else asked during our window. They got nothing;
+                # keep waiting for Chrome, but tell the user.
+                seen_foreign = ld
+                notify(f"BLOCKED a key request that was not Chrome: {ld.get('where')}")
         if proc.poll() is not None:
             break  # existing instance took over, or a --version-style call
         time.sleep(0.2)
 
     if delivered:
         daemon_call({"cmd": "lock"})
-        notify("key delivered to chrome via portal; vault locked again")
+        notify("key delivered to verified Chrome; vault locked again")
     elif refused:
         daemon_call({"cmd": "lock"})
         notify(f"PORTAL REFUSED ({refused}). Chrome is writing UNPROTECTED v10 "
@@ -1452,14 +1689,8 @@ def cmd_init(args):
 
     chrome = find_chrome()
     if not chrome:
-        die("could not find a Chrome/Chromium binary; pass one in config manually")
-    digest = sha256_file(chrome)
-
-    print(f"{APP}: Chrome binary")
-    print(f"  path:   {chrome}")
-    print(f"  sha256: {digest}")
-    if not ask_confirm("Pin this binary as the only allowed caller?", default=True):
-        die("aborted")
+        print(f"{APP}: warning: no Chrome at {', '.join(CHROME_BINARIES)}",
+              file=sys.stderr)
 
     pw1, why = prompt_new_password()
     if pw1 is None:
@@ -1470,41 +1701,16 @@ def cmd_init(args):
     secret = os.urandom(SECRET_LEN)
     vault = vault_encrypt(pw1, secret)
     write_private(VAULT_PATH, json.dumps(vault, indent=2).encode("utf-8") + b"\n")
-    write_private(PIN_PATH, json.dumps({
-        "chrome_path": chrome,
-        "chrome_sha256": digest,
-        "created": int(time.time()),
-    }, indent=2).encode("utf-8") + b"\n")
 
     print(f"{APP}: vault created at {VAULT_PATH}")
     print(f"{APP}: codeword: {vault_phrase()}")
-    print(f"{APP}: Chrome pinned")
-    print(f"{APP}: next: './install.sh' then '35 unlock'")
+    print(f"{APP}: next: '35 run' to start Chrome")
     return 0
 
 
 def cmd_trust(args):
-    chrome = find_chrome()
-    if not chrome:
-        die("could not find a Chrome/Chromium binary")
-    digest = sha256_file(chrome)
-    old = {}
-    try:
-        old = load_pin()
-    except Exception:
-        pass
-    print(f"{APP}: Chrome binary: {chrome}")
-    print(f"  current pin: {old.get('chrome_sha256', '(none)')[:16]}...")
-    print(f"  new sha256:  {digest[:16]}...")
-    if not ask_confirm("Trust this binary now?", default=False):
-        die("aborted")
-    ensure_dir()
-    write_private(PIN_PATH, json.dumps({
-        "chrome_path": chrome,
-        "chrome_sha256": digest,
-        "created": int(time.time()),
-    }, indent=2).encode("utf-8") + b"\n")
-    print(f"{APP}: re-pinned")
+    print(f"{APP}: 'trust' is gone: Chrome is verified as the root-owned "
+          f"{', '.join(CHROME_BINARIES)} on every request; nothing to re-pin.")
     return 0
 
 

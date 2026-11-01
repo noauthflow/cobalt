@@ -51,12 +51,14 @@ user-level.
        Restart=on-failure
        RestartSec=2
 
-   The unit is sandboxed: `UMask=0077`, `NoNewPrivileges=yes`,
-   `PrivateTmp=yes`, `PrivateDevices=yes`, `ProtectSystem=strict`,
-   `ProtectHome=read-only`, `ReadWritePaths=-%h/.config/mp35n`,
-   `ProtectKernelTunables=yes`, `ProtectKernelModules=yes`,
-   `ProtectControlGroups=yes`, `RestrictAddressFamilies=AF_UNIX`,
-   `RestrictSUIDSGID=yes`, `LockPersonality=yes`.
+   The unit is hardened without namespaces: `UMask=0077`,
+   `NoNewPrivileges=yes`, `RestrictNamespaces=yes`,
+   `SystemCallFilter=@system-service ~@privileged`,
+   `SystemCallArchitectures=native`, `RestrictAddressFamilies=AF_UNIX`,
+   `RestrictSUIDSGID=yes`, `RestrictRealtime=yes`, `LockPersonality=yes`,
+   `LimitCORE=0`. No `PrivateTmp`/`ProtectSystem`/`ProtectHome`/... : in a
+   user unit those imply a private user namespace, and the daemon could no
+   longer inspect Chrome or the portal through `/proc` (see SECURITY.md).
 
    It uses the absolute Python interpreter with `-I` (isolated mode) and a
    fixed `PATH`, so a `python3` or module in `~/.local/bin` / user site is
@@ -153,13 +155,12 @@ user-level.
 ## after install
 
     ./install.sh
-    35 init          # create the vault, pin Chrome
-    35 unlock        # or: 35 run
+    35 init          # create the vault
     35 run           # normal Chrome launch
 
 `35 init` prompts for a master password, generates a random 32-byte secret,
-writes `vault.json`, and pins the Chrome binary. `35 run` re-pins if needed,
-unlocks, launches Chrome, waits for the portal delivery, and locks again.
+and writes `vault.json`. `35 run` unlocks, launches and authorizes Chrome,
+waits for the portal delivery, and the vault locks itself after it.
 
 Check it:
 

@@ -1,146 +1,115 @@
 # mp35n security notes
 
-mp35n is a user-level vault for Chrome's cookie key. It protects the key at
-rest and keeps it away from ordinary D-Bus traffic. It is not a boundary
-against code running as you, root, or a kernel that lets another process
-read your memory.
+mp35n keeps Chrome's cookie key in a master-password vault and hands it to
+exactly one verified Chrome process per unlock. It protects the key at rest
+and against other processes asking for it. It is not a boundary against
+code that can capture your master password or that runs as root.
 
-## what it protects
+## how the key reaches Chrome
 
-- The 32-byte key is encrypted at rest under your master password
-  (`scrypt` + AES-256-GCM). Stealing `vault.json` alone does not reveal it.
-- Other users cannot read the vault or the daemon's memory.
-- Non-Chrome clients cannot get the key through mp35n's bus interfaces.
-  The portal backend verifies that the caller owns
-  `org.freedesktop.portal.Desktop`, that it runs in the
-  `xdg-desktop-portal.service` cgroup, and that the portal passed a Chrome app ID
-  (`com.google.Chrome`, `google-chrome`, `google-chrome-stable`, or
-  `chrome`).
-- The legacy `org.freedesktop.secrets` interface is present but
-  `OpenSession` always fails and `GetSecret`/`GetSecrets` are gone. No D-Bus
-  method returns the key.
-- The portal path writes the key into Chrome's file descriptor, so the
-  secret is not in a D-Bus message body. A bus monitor sees the
-  `RetrieveSecret` call, the app ID, and a FIFO fd; it does not see
-  plaintext or ciphertext.
+    35 run ──password──► daemon: unlock, return one-time launch token
+    35 run ──spawn──► Chrome pid X  (clean argv + env)
+    35 run ──authorize(token, X)──► daemon: verify X, remember X
+    Chrome: pipe() → (r, w); RetrieveSecret(w) ──D-Bus──► portal ──► daemon
+    daemon: who holds r?  must be exactly {X}; X still verified
+    daemon: write(w, key); lock
+    Chrome: read(r) → key → AES-256-GCM → v12 cookies
 
-## what it does not protect
+The D-Bus messages carry only a file-descriptor index; the descriptor
+itself travels as `SCM_RIGHTS` ancillary data on the bus socket, and the
+32 key bytes go through the kernel pipe buffer. A bus monitor sees the call,
+the app ID, and at most a copy of the *write* end. It never sees the key.
 
-Same-user code can beat a user-level keyring. In particular:
+## what is verified before the key is written
 
-- **The pin is user-writable and auto-repinned.** `~/.config/mp35n/config.json`
-  can be repointed at another root-owned binary; `35 run` will silently
-  re-pin it and launch it. It only checks that the path is root-owned and
-  not world-writable; it does not require the path to match the previous
-  pin. `35 trust` asks, but does not check ownership either. The daemon's
-  legacy D-Bus methods then trust that binary.
-- **The binary is root-owned; the control around it is not.** The installed
-  `/usr/local/lib/mp35n/mp35n` cannot be edited by you, but the daemon still
-  runs as you. `~/.local/bin/35`, the systemd user unit, the D-Bus
-  activation file, and the control socket are user-writable. Malware can
-  rewrite them, kill the process, run its own client/daemon, or capture the
-  master password at unlock. The unit uses an absolute Python interpreter
-  with `-I` and a fixed `PATH` so a user-site module or fake `python3` is
-  not picked up, but the unit itself is user-writable.
-- **The control socket trusts the uid.** `~/.config/mp35n/control.sock` is
-  mode 600, but it only checks `SO_PEERCRED` uid. Any process as you can
-  lock the vault, spam unlock attempts, or read status.
-- **The portal config is user-writable.** `portals.conf` decides which
-  backend handles `org.freedesktop.impl.portal.Secret`. `install.sh`
-  rewrites that line to `mp35n;`, but the file stays user-writable. Malware
-  can point it at another backend, remove mp35n, or cause a downgrade. That
-  does not decrypt old `v12` cookies without the old key, but new cookies
-  could be written under a key the attacker knows.
-- **`install.sh` is user-writable and uses sudo** for the binary and the
-  portal descriptor. If it or `mp35n.portal` is modified before you run it,
-  you install the modified file as root. Run the install from a trusted
-  checkout.
-- **The installed portal descriptor and binary are root-owned; the source
-  is not.** The `/usr/share` `.portal` file and `/usr/local/lib/mp35n/mp35n`
-  are the trusted copies; the repo copies are what `install.sh` installs.
-- **Memory and at-rest copies.** The daemon holds the key in Python
-  memory while unlocked. Core dumps, swap/hibernation, and Chrome's cached
-  key are outside the vault. `ptrace_scope=2` and encrypted swap help, but
-  are not part of mp35n.
-- **A fake Chrome while unlocked.** Anything running as you can launch the
-  real Chrome binary with a copied profile and ask for the key. The portal
-  app ID is the only gate; `35 run` narrows the window but cannot stop a
-  direct launch.
-- **A direct launch bypasses the wrapper.** The desktop entry points at
-  `35 run`, but a terminal, `pkill`/relaunch, or Chrome's own restart can
-  bypass it. A locked launch makes Chrome fall back to `v10`.
-- **Chrome caches the key for its lifetime.** Locking the vault does not
-  revoke it from a running browser.
-- **`v10` cookies are public.** They are readable with the `"peanuts"`
-  key. mp35n only helps when Chrome is writing `v12`, which requires the
-  `SecretPortalKeyProviderUseForEncryption` feature. `35 run` passes it;
-  any other launch path writes `v10`. Existing `v10` cookies stay `v10`
-  until the site rewrites them — log out/in or clear them.
-- **The portal app ID is self-asserted.** Un-sandboxed Chrome registers
-  `com.google.Chrome` itself via `org.freedesktop.host.portal.Registry`.
-  Any process running as you can do the same and receive the key while
-  the vault is unlocked. The Chrome hash pin does not apply to the portal
-  path.
-- **Offline guessing.** `scrypt` is `N=2^15, r=8, p=1` (about 80 ms and
-  32 MiB per guess here). A weak or dictionary master password is
-  crackable from `vault.json`. There is no key stretching beyond that and
-  no password-change command; reinit generates a new secret and loses the
-  old cookies.
-- **Root.** Root can read the daemon's memory, ptrace it, keylog the
-  password, replace the binary, or edit any of the above. Root wins.
+- **The caller is the portal**: owns `org.freedesktop.portal.Desktop`, runs
+  in `xdg-desktop-portal.service`, executable is root-owned
+  `/usr/libexec/xdg-desktop-portal`.
+- **The app ID is a Chrome ID**: weak by itself (un-sandboxed apps
+  self-register it via `org.freedesktop.host.portal.Registry`), so it is
+  not relied on.
+- **A launch was authorized**: only the client that typed the password gets
+  the launch token, and only that token can authorize one PID.
+- **The pipe belongs to that PID**: every process on the system that holds
+  the read end of the pipe is found via `/proc/*/fd` + `fdinfo`. It must be
+  exactly the authorized Chrome. Spoofed requests (malware's own pipe) and
+  snoopers (malware that opened Chrome's pipe through `/proc/X/fd/N`) are
+  refused.
+- **The PID is real, clean Chrome**:
+  - `/proc/X/exe` is `/opt/google/chrome/chrome`, and that path and all its
+    parents are root-owned, not symlinks, not group/world-writable. The
+    running inode matches the file on disk. No user-writable pin: the path
+    is baked into the root-owned mp35n.
+  - Same mount, user and pid namespace as the daemon; not chrooted.
+  - `TracerPid` 0; all uids are yours.
+  - Command line: only allowed flags (`--incognito`, `--new-window`,
+    `--profile-directory=`, `--ozone-platform=`, ...) plus URLs. Refused:
+    `--user-data-dir`, `--remote-debugging-*`, `--load-extension`,
+    `--*-cmd-prefix`, `--proxy-server`, `--headless`, and anything unknown.
+  - Environment: no `LD_*`, `GTK_MODULES`, `GIO_*` module paths, `QT_*`
+    plugin paths, `NSS_*`, `SSLKEYLOGFILE`, Vulkan/EGL loader overrides,
+    `CHROME_CONFIG_HOME`; `HOME`/`XDG_CONFIG_HOME` point at your real profile.
+    `35 run` scrubs these before launching.
+- **One key per unlock**: after one delivery the daemon wipes the key.
 
-## portal-specific notes
+If Chrome itself is refused, Chrome falls back to `v10` for new cookies and
+drops `v12` cookies it cannot decrypt; `35 run` notifies you. A foreign
+request during the window is refused and reported, and Chrome still gets
+its key.
 
-The daemon cannot check `/proc/<pid>/exe` of other processes: its systemd
-sandbox implies a private user namespace in a user unit, and the kernel
-denies exe links across it (`EACCES`). The portal caller is therefore
-checked by bus name + cgroup, which a same-user process could imitate. The
-legacy Chrome hash pin hits the same wall and denies everything; harmless,
-because the legacy interface never returns the key.
+## the daemon sandbox
 
-The portal frontend is the identity authority. It passes an app ID to the
-backend; mp35n accepts only Chrome IDs. For an un-sandboxed Chrome the
-portal reported `com.google.Chrome`. This is host-side metadata, not a
-cryptographic proof of the binary: for a sandboxed app the portal's app ID
-comes from the sandbox and is strong; for un-sandboxed Chrome it is weaker
-than the old Chrome hash pin. If the app ID changes after a Chrome update,
-the backend returns failure and Chrome falls back to `v10`; check
-`journalctl --user -u mp35n` for `portal deny app_id=...`.
+The unit uses only hardening that needs no namespace: `NoNewPrivileges`,
+`RestrictNamespaces`, `SystemCallFilter=@system-service ~@privileged`,
+`RestrictAddressFamilies=AF_UNIX`, `LockPersonality`, `RestrictRealtime`,
+`RestrictSUIDSGID`, `LimitCORE=0`, `UMask=0077`.
 
-`35 status` shows the last portal delivery time, not proof that the current
-Chrome launch succeeded. The reliable signals are:
+`PrivateTmp`, `ProtectSystem`, `ProtectHome`, `PrivateDevices`,
+`ProtectKernel*` and `ProtectControlGroups` are deliberately absent: in a
+*user* unit each implies a private user namespace, and from inside it the
+kernel denies `/proc/<pid>/exe`, `fd/`, `environ` of other processes
+(`EACCES`). With them the daemon cannot verify anything. That is the bug
+that once made every portal request fail ("cannot stat portal binary").
 
-    journalctl --user -u mp35n -n 20 --no-pager
-    journalctl --user -u xdg-desktop-portal -n 20 --no-pager
-    35 status
+## what it does not protect against
 
-Look for `portal secret delivered app_id='com.google.Chrome'`. If you see
-`portal request while locked` or `portal deny app_id=...`, Chrome did not
-get the key from mp35n.
-
-The portal fd is a FIFO write end. A D-Bus monitor sees the fd number and
-inode, not the secret. A same-user process with ptrace or `/proc/<pid>/fd`
-access is a different boundary; `kernel.yama.ptrace_scope=2` blocks
-non-root ptrace and is recommended.
-
-## the run guard
-
-`35 run` re-pins Chrome if the binary hash changed, unlocks if needed,
-launches Chrome, waits up to 20 seconds for a portal delivery, then locks.
-The re-pin happens before the unlock so a post-update launch does not waste
-an unlock. If delivery is not confirmed and Chrome is still running, the
-vault stays unlocked and says so; locking would silently push Chrome to
-`v10`. That trade-off is deliberate.
-
-The guard only works if it is the normal launch path. The desktop entry
-override points at it; terminal launches and direct binary launches do not.
-The desktop override is a copy of the upstream file with the `Exec=` paths
-rewritten; if upstream changes its `Exec=` form, the copy may not match and
-the wrapper can be bypassed.
+- **Capturing your master password.** `~/.local/bin/35` (symlink), the
+  `.desktop` override, `~/.config/environment.d`, shell rc files and the
+  systemd user unit are all user-writable. Malware running as you can put
+  a fake prompt in front of you (the `KANEKI` codeword is public and
+  proves nothing) or preload code into the `35` client, then decrypt
+  `vault.json` itself. Watch for unexpected password prompts.
+- **Tampering with the profile.** Malware can edit
+  `~/.config/google-chrome/Default` (e.g. install an extension with the
+  `cookies` permission). Chrome then reads your cookies for it, legitimately.
+  Root-owned Chrome policy (`/etc/opt/chrome/policies/managed/`, e.g.
+  `ExtensionInstallBlocklist: ["*"]` + an allowlist) closes most of this.
+- **A hidden snooper winning a race.** `/proc/X/fd/N` can be opened by any
+  same-uid process; `ptrace_scope=2` does not prevent it (it only restricts
+  ptrace attach and `/proc/X/mem`). mp35n sees such snoopers and refuses,
+  except for processes that made themselves non-dumpable (their fd tables
+  are unreadable). On a normal system the only such processes are setuid
+  helpers (`(sd-pam)`, `fusermount3`); they are logged on every delivery.
+  Such a snooper would also have to open Chrome's pipe in the milliseconds
+  between creation and delivery and out-read Chrome.
+- **Chrome's memory.** Chrome holds the key while it runs.
+  `ptrace_scope=2` stops non-root processes from reading it; root can.
+- **Direct launches.** `google-chrome` or `/opt/google/chrome/chrome`
+  without `35 run` gets no key (no authorization) and writes `v10`. Chrome's
+  own restart (update relaunch, `chrome://restart`) is a new, unauthorized
+  process and drops `v12` cookies. Quit and use `35 run` instead.
+- **Offline guessing.** `vault.json` is scrypt `N=2^15, r=8, p=1` +
+  AES-256-GCM. A weak master password is crackable from a copy of the file;
+  do not commit it anywhere.
+- **The control socket** trusts your uid: any process as you can lock the
+  vault or read status (a nuisance, not a leak; it cannot authorize without
+  the token).
+- **Root wins.**
 
 ## bottom line
 
-mp35n is at-rest protection, plus a short unlocked window, plus an fd-based
-delivery that keeps the key off the bus. It is not a sandbox. If you need a
-real boundary, run Chrome under a different uid, a VM, or a sandbox with its
-own portal identity.
+A process that merely runs as you cannot get the key: it is not the
+authorized Chrome, it cannot fake being it, it cannot launch a debuggable or
+injected Chrome that passes, and it cannot quietly read Chrome's pipe. What
+remains is the human step: protect the password prompt, and keep
+`vault.json` and the cookie DB out of git.

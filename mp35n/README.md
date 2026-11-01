@@ -35,19 +35,18 @@ portal descriptor.
 ## commands
 
     35                  status
-    35 unlock           ask for the master password, hold the key in memory
-    35 lock             wipe it
-    35 status           locked / unlocked, pin, last portal delivery, denied calls
-    35 init             create the vault + pin the Chrome binary
-    35 trust            re-pin after a Chrome update
-    35 run ARGS         re-pin if needed, unlock, start Chrome, lock again
-                        (the normal launch path; also what the .desktop entry
-                        and the `35` alias point at)
+    35 lock             wipe the key
+    35 status           locked / unlocked, last delivery, refusals, cookie prefixes
+    35 init             create the vault
+    35 run ARGS         unlock, start + authorize Chrome, deliver once, lock
+                        (the only launch path that gets the key; also what
+                        the .desktop entry points at)
+    35 unlock           unlock without authorizing anything (testing only)
 
-Unlock before Chrome starts. If Chrome starts while locked, the portal
-backend returns a failure and Chrome falls back to `v10`; existing `v12`
-cookies are lost. `35 run` is the normal path because it unlocks first and
-locks as soon as the portal delivery is confirmed.
+Only a Chrome started by `35 run` receives the key. Any other launch
+(`google-chrome`, Chrome's own restart) is refused, falls back to `v10`,
+and drops `v12` cookies it cannot decrypt. If Chrome is already running,
+`35 run` just hands the URL to it without asking for the password.
 
 The vault is a matched pair with the cookie DB: restoring `Cookies` from git
 only works with the same `vault.json`.
@@ -57,12 +56,13 @@ only works with the same `vault.json`.
     password --scrypt--> KEK --AES-256-GCM--> 32-byte secret   (~/.config/mp35n/vault.json)
     secret --portal fd--> Chrome (needs SecretPortalKeyProviderUseForEncryption) --> AES-256-GCM --> v12 cookies
 
-The daemon runs as a systemd user unit and writes the secret into the file
-descriptor the portal hands it. It verifies that the caller is the real
-`xdg-desktop-portal` process (name owner + `xdg-desktop-portal.service` cgroup) and that the
-portal passed a Chrome app ID. The legacy D-Bus name still verifies callers
-against the pinned Chrome binary, but its session methods refuse and it
-returns no secret.
+The daemon runs as a systemd user unit and writes the secret into the pipe
+the portal hands it, but only if the read end of that pipe is held by
+exactly the Chrome process `35 run` launched and authorized with the
+one-time token from the unlock, and that process is the root-owned
+`/opt/google/chrome/chrome` with an allowed command line and a clean
+environment. See [SECURITY.md](SECURITY.md) for every check. The legacy
+`org.freedesktop.secrets` name never returns the secret.
 
 `35` talks to the daemon over a private unix socket
 (`~/.config/mp35n/control.sock`, mode 600): status, unlock (password), lock.
@@ -73,7 +73,6 @@ are no zenity/rofi/askpass fallbacks. The dialog shows the fixed codeword
 ## files
 
     ~/.config/mp35n/vault.json    scrypt salt/nonce + AES-GCM secret (0600)
-    ~/.config/mp35n/config.json   pinned Chrome path + sha256
     /usr/local/lib/mp35n/mp35n    root-owned installed binary
     ~/.local/bin/mp35n, 35        symlinks to the installed binary
     ~/.config/systemd/user/mp35n.service

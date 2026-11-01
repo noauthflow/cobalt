@@ -57,19 +57,22 @@ ExecStart=$PYTHON -I $LIB daemon
 Environment=PATH=/usr/bin:/bin
 Restart=on-failure
 RestartSec=2
+# No PrivateTmp/ProtectSystem/ProtectHome/PrivateDevices/ProtectKernel*/
+# ProtectControlGroups: in a *user* unit each of those implies a private
+# user namespace, and from inside it the kernel denies /proc/<pid>/exe,
+# fd/, environ of Chrome and the portal -- which the daemon must inspect
+# before handing out the key. Only seccomp/no-namespace hardening here.
 UMask=0077
 NoNewPrivileges=yes
-PrivateTmp=yes
-PrivateDevices=yes
-ProtectSystem=strict
-ProtectHome=read-only
-ReadWritePaths=-%h/.config/mp35n
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
 RestrictAddressFamilies=AF_UNIX
 RestrictSUIDSGID=yes
 LockPersonality=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+LimitCORE=0
 
 [Install]
 WantedBy=default.target
