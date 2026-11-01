@@ -1,12 +1,17 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -I
 """
 mp35n - a tiny master-password keyring for Chrome's cookie encryption.
 
 Chrome (Linux) gets a per-app secret from the desktop portal and derives its
-cookie key from it with PBKDF2(secret, "saltysalt"). mp35n implements the
-portal's Secret backend, so the key is written straight into Chrome's pipe and
-never crosses D-Bus. The legacy org.freedesktop.secrets interface remains only
-to refuse sessions; it never returns the secret.
+cookie key from it. mp35n implements the portal's Secret backend, so the key
+is written straight into Chrome's pipe and never crosses D-Bus. The legacy
+org.freedesktop.secrets interface remains only to refuse sessions; it never
+returns the secret.
+
+Chrome only *encrypts* with the portal key (cookie prefix v12) when the
+SecretPortalKeyProviderUseForEncryption feature is on; without it Chrome
+fetches the key, ignores it, and writes v10 cookies under the public
+"peanuts" key. `mp35n run` always passes that feature.
 
 Commands:
     mp35n            show status
@@ -54,10 +59,20 @@ IF_PROPS = "org.freedesktop.DBus.Properties"
 
 PORTAL_PATH = "/org/freedesktop/portal/desktop"
 IF_PORTAL_SECRET = "org.freedesktop.impl.portal.Secret"
-PORTAL_BINARIES = ("/usr/libexec/xdg-desktop-portal",
-                   "/usr/lib/xdg-desktop-portal")
+# The portal frontend must run as this systemd user unit. /proc/<pid>/exe
+# cannot be used: the daemon's sandbox puts it in its own user namespace
+# (implicit PrivateUsers=), and the kernel denies exe links across it.
+PORTAL_UNIT = "xdg-desktop-portal.service"
 CHROME_APP_IDS = {"com.google.chrome", "google-chrome",
                   "google-chrome-stable", "chrome"}
+
+# Without this feature Chrome 156 loads the portal key but never encrypts
+# with it: new cookies fall back to v10 ("peanuts", i.e. no protection).
+CHROME_FEATURE = "SecretPortalKeyProviderUseForEncryption"
+CHROME_PROFILE_ROOTS = (
+    Path.home() / ".config" / "google-chrome",
+    Path.home() / ".config" / "chromium",
+)
 
 VAULT_AAD = b"mp35n-vault-v1"
 SCRYPT_N = 2 ** 15
@@ -144,6 +159,48 @@ def find_chrome():
         if os.path.isfile(c):
             return os.path.realpath(c)
     return None
+
+
+def chrome_args(args):
+    """Return Chrome argv with CHROME_FEATURE enabled. Chrome only honours
+    the last --enable-features, so merge into an existing one."""
+    out, merged = [], False
+    for a in args:
+        if a.startswith("--enable-features="):
+            feats = [f for f in a.split("=", 1)[1].split(",") if f]
+            if CHROME_FEATURE not in feats:
+                feats.append(CHROME_FEATURE)
+            a = "--enable-features=" + ",".join(feats)
+            merged = True
+        out.append(a)
+    if not merged:
+        out.insert(0, f"--enable-features={CHROME_FEATURE}")
+    return out
+
+
+def cookie_report():
+    """Count cookie encryption prefixes per profile.
+    v10 = public 'peanuts' key (unprotected), v11 = legacy keyring,
+    v12 = portal key from mp35n (protected)."""
+    import sqlite3
+    report = []
+    for root in CHROME_PROFILE_ROOTS:
+        if not root.is_dir():
+            continue
+        for db in sorted(root.glob("*/Cookies")):
+            counts = {}
+            try:
+                con = sqlite3.connect(f"file:{db}?mode=ro&immutable=1", uri=True)
+                try:
+                    for (v,) in con.execute("select encrypted_value from cookies"):
+                        tag = bytes(v[:3]).decode("ascii", "replace") if v else "plain"
+                        counts[tag] = counts.get(tag, 0) + 1
+                finally:
+                    con.close()
+            except Exception as e:
+                counts = {"error": str(e)}
+            report.append((str(db.relative_to(Path.home())), counts))
+    return report
 
 
 def b64e(b):
@@ -384,6 +441,12 @@ def build_dbus_objects(bus, state, verifier):
                 name="org.freedesktop.DBus.Error.AccessDenied")
 
     def deny_portal(msg):
+        # Make portal refusals loud: a refused RetrieveSecret silently pushes
+        # Chrome to v10 cookies.
+        print(f"{APP}: portal call refused: {msg}", flush=True)
+        state.denied += 1
+        state.last_denied = {"sender": "portal", "at": int(time.time()),
+                             "where": f"RetrieveSecret: {msg}"}
         raise dbus.exceptions.DBusException(
             msg, name="org.freedesktop.DBus.Error.AccessDenied")
 
@@ -392,8 +455,8 @@ def build_dbus_objects(bus, state, verifier):
 
     def guard_portal(sender):
         # The portal frontend is the only thing allowed to call the Secret
-        # backend interface. Verify both that it owns the portal name and
-        # that the process is the root-owned portal binary.
+        # backend interface. Verify that it owns the portal name and that
+        # the process lives in the xdg-desktop-portal.service cgroup.
         if not sender:
             deny_portal("no sender")
         try:
@@ -410,16 +473,13 @@ def build_dbus_objects(bus, state, verifier):
         pid = verifier._pid_for_sender(sender)
         if pid is None:
             deny_portal("cannot resolve portal pid")
-        exe_link = f"/proc/{pid}/exe"
         try:
-            exe = os.path.realpath(exe_link)
-            st = os.stat(exe_link)
-        except OSError:
-            deny_portal("cannot stat portal binary")
-        if exe not in PORTAL_BINARIES:
-            deny_portal(f"unexpected portal binary {exe!r}")
-        if st.st_uid != 0 or (st.st_mode & (stat.S_IWOTH | stat.S_IWGRP)):
-            deny_portal("bad portal binary ownership")
+            with open(f"/proc/{pid}/cgroup") as f:
+                cgroups = [line.rstrip("\n").split(":", 2)[-1] for line in f]
+        except OSError as e:
+            deny_portal(f"cannot read portal cgroup: {e}")
+        if not any(cg.endswith("/" + PORTAL_UNIT) for cg in cgroups):
+            deny_portal(f"portal not in {PORTAL_UNIT}: {cgroups!r}")
 
     class SecretService(dbus.service.Object):
         @dbus.service.method(IF_SERVICE, in_signature="s", out_signature="o",
@@ -575,9 +635,15 @@ def build_dbus_objects(bus, state, verifier):
             app = str(app_id)
             if app.lower() not in CHROME_APP_IDS:
                 print(f"{APP}: portal deny app_id={app!r}", flush=True)
+                state.denied += 1
+                state.last_denied = {"sender": "portal", "at": int(time.time()),
+                                     "where": f"RetrieveSecret: app_id {app!r}"}
                 return portal_result(2)
             if state.secret is None:
                 print(f"{APP}: portal request while locked", flush=True)
+                state.denied += 1
+                state.last_denied = {"sender": "portal", "at": int(time.time()),
+                                     "where": "RetrieveSecret: vault locked"}
                 return portal_result(2)
 
             raw = None
@@ -815,6 +881,13 @@ def cmd_status(args):
     if r.get("denied"):
         ld = r.get("last_denied") or {}
         print(f"  denied: {r['denied']} call(s), last {ld.get('where')} from {ld.get('sender')}")
+    for db, counts in cookie_report():
+        desc = ", ".join(f"{k}={n}" for k, n in sorted(counts.items())) or "empty"
+        print(f"  cookies: ~/{db}: {desc}")
+        if counts.get("v10") or counts.get("plain"):
+            print("    WARNING: v10/plain cookies are readable with the public"
+                  " 'peanuts' key. Launch Chrome via '35 run', then log out/in"
+                  " (or clear cookies) so they are rewritten as v12.")
     return 0 if not r["locked"] else 1
 
 
@@ -1333,11 +1406,12 @@ def cmd_run(args):
             die(f"{why or 'unlock failed'}; not starting chrome")
 
     proc = subprocess.Popen(
-        [chrome] + list(args),
+        [chrome] + chrome_args(args),
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL, start_new_session=True)
 
     delivered = False
+    refused = None
     deadline = time.time() + 20
     while time.time() < deadline:
         st2 = daemon_call({"cmd": "status"}) or {}
@@ -1345,15 +1419,24 @@ def cmd_run(args):
         if lp and lp.get("at", 0) >= started:
             delivered = True
             break
+        ld = st2.get("last_denied") or {}
+        if (ld.get("at", 0) >= started
+                and str(ld.get("where", "")).startswith("RetrieveSecret")):
+            refused = ld.get("where")
+            break
         if proc.poll() is not None:
             break  # existing instance took over, or a --version-style call
         time.sleep(0.2)
 
-    daemon_call({"cmd": "lock"})
     if delivered:
+        daemon_call({"cmd": "lock"})
         notify("key delivered to chrome via portal; vault locked again")
+    elif refused:
+        daemon_call({"cmd": "lock"})
+        notify(f"PORTAL REFUSED ({refused}). Chrome is writing UNPROTECTED v10 "
+               "cookies. Quit Chrome and check 'journalctl --user -u mp35n'.")
     elif proc.poll() is not None:
-        pass  # exited without asking for the key; already locked
+        daemon_call({"cmd": "lock"})  # exited without asking for the key
     else:
         # Chrome is running but never asked for the key. Locking now would
         # silently push it to v10 and destroy cookies, so stay unlocked.

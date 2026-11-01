@@ -5,13 +5,19 @@ has to hold under load. here: Chrome's cookie key, held in a master-password
 vault and handed to Chrome through the desktop portal's pipe.
 
 Chrome 156 gets a per-app secret from `org.freedesktop.portal.Secret` and
-derives its cookie key from it with PBKDF2(secret, `"saltysalt"`). mp35n
+derives its cookie key from it. mp35n
 implements the portal's Secret backend, verifies the caller and app ID, and
 writes the 32-byte secret straight into Chrome's file descriptor while the
 vault is unlocked. The secret never crosses D-Bus. The old
 `org.freedesktop.secrets` interface is still present, but only to refuse
-sessions; it never returns the secret. New cookies land as `v11`; the old
-public `v10` `"peanuts"` key cannot read them.
+sessions; it never returns the secret.
+
+**Chrome only encrypts with the portal key when it is launched with
+`--enable-features=SecretPortalKeyProviderUseForEncryption`.** Without it,
+Chrome fetches the key, ignores it, and writes `v10` cookies that anyone can
+decrypt with the public `"peanuts"` key. `35 run` always adds the flag. With
+it, new cookies land as `v12` and cannot be read without the vault secret.
+`35 status` counts cookie prefixes per profile and warns about `v10`.
 
 See [INSTALL.md](INSTALL.md) for exactly what `install.sh` creates, and
 [SECURITY.md](SECURITY.md) for the threat model.
@@ -39,7 +45,7 @@ portal descriptor.
                         and the `35` alias point at)
 
 Unlock before Chrome starts. If Chrome starts while locked, the portal
-backend returns a failure and Chrome falls back to `v10`; existing `v11`
+backend returns a failure and Chrome falls back to `v10`; existing `v12`
 cookies are lost. `35 run` is the normal path because it unlocks first and
 locks as soon as the portal delivery is confirmed.
 
@@ -49,11 +55,11 @@ only works with the same `vault.json`.
 ## how it works
 
     password --scrypt--> KEK --AES-256-GCM--> 32-byte secret   (~/.config/mp35n/vault.json)
-    secret --portal fd--> Chrome --PBKDF2-SHA1(secret,"saltysalt",1)--> AES-128 key --> v11 cookies
+    secret --portal fd--> Chrome (needs SecretPortalKeyProviderUseForEncryption) --> AES-256-GCM --> v12 cookies
 
 The daemon runs as a systemd user unit and writes the secret into the file
 descriptor the portal hands it. It verifies that the caller is the real
-`xdg-desktop-portal` process (name owner + `/proc/pid/exe`) and that the
+`xdg-desktop-portal` process (name owner + `xdg-desktop-portal.service` cgroup) and that the
 portal passed a Chrome app ID. The legacy D-Bus name still verifies callers
 against the pinned Chrome binary, but its session methods refuse and it
 returns no secret.
@@ -84,4 +90,5 @@ non-Chrome clients. It is not a boundary against code running as you, root,
 or a kernel that allows same-user ptrace. The vault is only as good as
 scrypt + your master password. `v10` cookies remain readable with the public
 `"peanuts"` key, Chrome caches the key for its lifetime, and a launch while
-locked destroys `v11` cookies. See [SECURITY.md](SECURITY.md).
+locked destroys `v12` cookies. Launching Chrome without `35 run` (no feature
+flag) silently writes new cookies as `v10`. See [SECURITY.md](SECURITY.md).

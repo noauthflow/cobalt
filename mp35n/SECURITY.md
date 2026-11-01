@@ -12,8 +12,8 @@ read your memory.
 - Other users cannot read the vault or the daemon's memory.
 - Non-Chrome clients cannot get the key through mp35n's bus interfaces.
   The portal backend verifies that the caller owns
-  `org.freedesktop.portal.Desktop`, that its executable is the root-owned
-  `xdg-desktop-portal`, and that the portal passed a Chrome app ID
+  `org.freedesktop.portal.Desktop`, that it runs in the
+  `xdg-desktop-portal.service` cgroup, and that the portal passed a Chrome app ID
   (`com.google.Chrome`, `google-chrome`, `google-chrome-stable`, or
   `chrome`).
 - The legacy `org.freedesktop.secrets` interface is present but
@@ -49,7 +49,7 @@ Same-user code can beat a user-level keyring. In particular:
   backend handles `org.freedesktop.impl.portal.Secret`. `install.sh`
   rewrites that line to `mp35n;`, but the file stays user-writable. Malware
   can point it at another backend, remove mp35n, or cause a downgrade. That
-  does not decrypt old `v11` cookies without the old key, but new cookies
+  does not decrypt old `v12` cookies without the old key, but new cookies
   could be written under a key the attacker knows.
 - **`install.sh` is user-writable and uses sudo** for the binary and the
   portal descriptor. If it or `mp35n.portal` is modified before you run it,
@@ -72,7 +72,15 @@ Same-user code can beat a user-level keyring. In particular:
 - **Chrome caches the key for its lifetime.** Locking the vault does not
   revoke it from a running browser.
 - **`v10` cookies are public.** They are readable with the `"peanuts"`
-  key. mp35n only helps when Chrome is writing `v11`.
+  key. mp35n only helps when Chrome is writing `v12`, which requires the
+  `SecretPortalKeyProviderUseForEncryption` feature. `35 run` passes it;
+  any other launch path writes `v10`. Existing `v10` cookies stay `v10`
+  until the site rewrites them — log out/in or clear them.
+- **The portal app ID is self-asserted.** Un-sandboxed Chrome registers
+  `com.google.Chrome` itself via `org.freedesktop.host.portal.Registry`.
+  Any process running as you can do the same and receive the key while
+  the vault is unlocked. The Chrome hash pin does not apply to the portal
+  path.
 - **Offline guessing.** `scrypt` is `N=2^15, r=8, p=1` (about 80 ms and
   32 MiB per guess here). A weak or dictionary master password is
   crackable from `vault.json`. There is no key stretching beyond that and
@@ -82,6 +90,13 @@ Same-user code can beat a user-level keyring. In particular:
   password, replace the binary, or edit any of the above. Root wins.
 
 ## portal-specific notes
+
+The daemon cannot check `/proc/<pid>/exe` of other processes: its systemd
+sandbox implies a private user namespace in a user unit, and the kernel
+denies exe links across it (`EACCES`). The portal caller is therefore
+checked by bus name + cgroup, which a same-user process could imitate. The
+legacy Chrome hash pin hits the same wall and denies everything; harmless,
+because the legacy interface never returns the key.
 
 The portal frontend is the identity authority. It passes an app ID to the
 backend; mp35n accepts only Chrome IDs. For an un-sandboxed Chrome the
