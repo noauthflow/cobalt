@@ -28,28 +28,36 @@ read your memory.
 
 Same-user code can beat a user-level keyring. In particular:
 
-- **The pin is user-writable.** `~/.config/mp35n/config.json` can be
-  repointed at another root-owned binary; `35 run` will silently re-pin it
-  and launch it. The daemon's legacy D-Bus methods then trust that binary.
-- **The client and unit are user-writable.** `~/.local/bin/35`, this source
-  tree, the systemd user unit, and the D-Bus activation file can be
-  rewritten. Malware can capture the master password at unlock or replace
-  the control socket.
+- **The pin is user-writable and auto-repinned.** `~/.config/mp35n/config.json`
+  can be repointed at another root-owned binary; `35 run` will silently
+  re-pin it and launch it. It only checks that the path is root-owned and
+  not world-writable; it does not require the path to match the previous
+  pin. `35 trust` asks, but does not check ownership either. The daemon's
+  legacy D-Bus methods then trust that binary.
+- **The binary is root-owned; the control around it is not.** The installed
+  `/usr/local/lib/mp35n/mp35n` cannot be edited by you, but the daemon still
+  runs as you. `~/.local/bin/35`, the systemd user unit, the D-Bus
+  activation file, and the control socket are user-writable. Malware can
+  rewrite them, kill the process, run its own client/daemon, or capture the
+  master password at unlock. The unit uses an absolute Python interpreter
+  with `-I` and a fixed `PATH` so a user-site module or fake `python3` is
+  not picked up, but the unit itself is user-writable.
 - **The control socket trusts the uid.** `~/.config/mp35n/control.sock` is
   mode 600, but it only checks `SO_PEERCRED` uid. Any process as you can
   lock the vault, spam unlock attempts, or read status.
 - **The portal config is user-writable.** `portals.conf` decides which
-  backend handles `org.freedesktop.impl.portal.Secret`. Malware can point it
-  at another backend, remove mp35n, or cause a downgrade. That does not
-  decrypt old `v11` cookies without the old key, but new cookies could be
-  written under a key the attacker knows.
-- **`install.sh` is user-writable and uses sudo** for the portal
-  descriptor. If it or `mp35n.portal` is modified before you run it, you
-  install the modified file as root. Run the install from a trusted
+  backend handles `org.freedesktop.impl.portal.Secret`. `install.sh`
+  rewrites that line to `mp35n;`, but the file stays user-writable. Malware
+  can point it at another backend, remove mp35n, or cause a downgrade. That
+  does not decrypt old `v11` cookies without the old key, but new cookies
+  could be written under a key the attacker knows.
+- **`install.sh` is user-writable and uses sudo** for the binary and the
+  portal descriptor. If it or `mp35n.portal` is modified before you run it,
+  you install the modified file as root. Run the install from a trusted
   checkout.
-- **The installed portal descriptor is root-owned, but the source is not.**
-  The `.portal` file in `/usr/share` is the trusted copy; the repo copy is
-  what `install.sh` installs.
+- **The installed portal descriptor and binary are root-owned; the source
+  is not.** The `/usr/share` `.portal` file and `/usr/local/lib/mp35n/mp35n`
+  are the trusted copies; the repo copies are what `install.sh` installs.
 - **Memory and at-rest copies.** The daemon holds the key in Python
   memory while unlocked. Core dumps, swap/hibernation, and Chrome's cached
   key are outside the vault. `ptrace_scope=2` and encrypted swap help, but
@@ -77,7 +85,10 @@ Same-user code can beat a user-level keyring. In particular:
 
 The portal frontend is the identity authority. It passes an app ID to the
 backend; mp35n accepts only Chrome IDs. For an un-sandboxed Chrome the
-portal reported `com.google.Chrome`. If a Chrome update changes the app ID,
+portal reported `com.google.Chrome`. This is host-side metadata, not a
+cryptographic proof of the binary: for a sandboxed app the portal's app ID
+comes from the sandbox and is strong; for un-sandboxed Chrome it is weaker
+than the old Chrome hash pin. If the app ID changes after a Chrome update,
 the backend returns failure and Chrome falls back to `v10`; check
 `journalctl --user -u mp35n` for `portal deny app_id=...`.
 

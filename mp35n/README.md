@@ -18,13 +18,13 @@ See [INSTALL.md](INSTALL.md) for exactly what `install.sh` creates, and
 
 ## install
 
-    ./install.sh            user install + portal descriptor (sudo) + start
-    ./install.sh uninstall  stop service, remove unit/dbus/symlinks/portal descriptor
+    ./install.sh            root-owned binary + user install + portal descriptor (sudo) + start
+    ./install.sh uninstall  stop service, remove binary/unit/dbus/symlinks/portal descriptor
 
 Needs python 3.8+, `dbus-python`, `PyGObject` with GTK4 + libadwaita
 (`gir1.2-gtk-4.0`, `gir1.2-adw-1`), `cryptography`, `xdg-desktop-portal`, and
-a systemd user session. Most of the install is user-level; the portal
-descriptor under `/usr/share` uses sudo.
+a systemd user session. sudo is used for the root-owned binary and the
+portal descriptor.
 
 ## commands
 
@@ -68,7 +68,8 @@ are no zenity/rofi/askpass fallbacks. The dialog shows the fixed codeword
 
     ~/.config/mp35n/vault.json    scrypt salt/nonce + AES-GCM secret (0600)
     ~/.config/mp35n/config.json   pinned Chrome path + sha256
-    ~/.local/bin/mp35n, 35        symlinks into this folder
+    /usr/local/lib/mp35n/mp35n    root-owned installed binary
+    ~/.local/bin/mp35n, 35        symlinks to the installed binary
     ~/.config/systemd/user/mp35n.service
     ~/.local/share/dbus-1/services/org.freedesktop.secrets.service
     ~/.local/share/applications/google-chrome.desktop   -> 35 run

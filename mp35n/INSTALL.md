@@ -11,7 +11,7 @@ desktop integration, and the xdg-desktop-portal Secret backend.
 - `cryptography`
 - a systemd user session
 - `xdg-desktop-portal`
-- sudo for the portal descriptor
+- sudo for the binary and portal descriptor
 
 `install.sh` checks the Python dependencies and exits if one is missing.
 
@@ -21,8 +21,9 @@ desktop integration, and the xdg-desktop-portal Secret backend.
     ./install.sh
     ./install.sh uninstall    # optional
 
-Most of the install is user-level. The one root step is copying
-`mp35n.portal` into `/usr/share/xdg-desktop-portal/portals/`.
+Root steps: copy the binary to `/usr/local/lib/mp35n/` and copy
+`mp35n.portal` into `/usr/share/xdg-desktop-portal/portals/`. The rest is
+user-level.
 
 ## what `install.sh` does
 
@@ -33,17 +34,20 @@ Most of the install is user-level. The one root step is copying
    directory, the D-Bus activation directory, and `~/.config/mp35n`
    (mode 700).
 
-3. **Links the CLI.** It makes the repo's `mp35n` executable and creates:
+3. **Installs the binary and links the CLI.** It copies the repo's `mp35n`
+   to `/usr/local/lib/mp35n/mp35n` (root:root, 0755) and creates:
 
-       ~/.local/bin/mp35n  -> <repo>/mp35n
-       ~/.local/bin/35     -> <repo>/mp35n
+       ~/.local/bin/mp35n  -> /usr/local/lib/mp35n/mp35n
+       ~/.local/bin/35     -> /usr/local/lib/mp35n/mp35n
 
-   The repo stays the source of truth. Moving the repo breaks the symlinks.
+   The installed copy is what runs. It is root-owned so the user cannot
+   edit the daemon or client on disk. Update it by rerunning `install.sh`.
 
 4. **Writes the systemd user unit** at
    `~/.config/systemd/user/mp35n.service`. It runs:
 
-       ExecStart=<repo>/mp35n daemon
+       ExecStart=/usr/bin/python3 -I /usr/local/lib/mp35n/mp35n daemon
+       Environment=PATH=/usr/bin:/bin
        Restart=on-failure
        RestartSec=2
 
@@ -54,12 +58,16 @@ Most of the install is user-level. The one root step is copying
    `ProtectControlGroups=yes`, `RestrictAddressFamilies=AF_UNIX`,
    `RestrictSUIDSGID=yes`, `LockPersonality=yes`.
 
+   It uses the absolute Python interpreter with `-I` (isolated mode) and a
+   fixed `PATH`, so a `python3` or module in `~/.local/bin` / user site is
+   not picked up by the daemon.
+
 5. **Writes the D-Bus activation file** at
    `~/.local/share/dbus-1/services/org.freedesktop.secrets.service`:
 
        [D-BUS Service]
        Name=org.freedesktop.secrets
-       Exec=<repo>/mp35n daemon
+       Exec=/usr/bin/python3 -I /usr/local/lib/mp35n/mp35n daemon
 
    This lets the session bus start the daemon on demand. The daemon still
    owns the name `org.freedesktop.secrets`, which is also the bus name the
@@ -114,9 +122,10 @@ Most of the install is user-level. The one root step is copying
        [preferred]
        org.freedesktop.impl.portal.Secret=mp35n;
 
-   If it exists and does not contain that line, `install.sh` prints a
-   warning and leaves the file alone. It does not overwrite `default=...`,
-   `Access=...`, or `Notification=...` entries.
+   If it already has an `org.freedesktop.impl.portal.Secret=` line,
+   `install.sh` rewrites that line to `mp35n;`. If it has no such line, it
+   prints a warning and leaves the file alone. It does not overwrite
+   `default=...`, `Access=...`, or `Notification=...` entries.
 
 9. **Restarts `xdg-desktop-portal`.** The portal rereads the descriptor and
    `portals.conf`. Without this, Chrome can still get the old/no backend.
@@ -129,8 +138,9 @@ Most of the install is user-level. The one root step is copying
 
 ## files created or changed
 
-    ~/.local/bin/mp35n                          symlink to the repo
-    ~/.local/bin/35                             symlink to the repo
+    /usr/local/lib/mp35n/mp35n                  root-owned installed binary
+    ~/.local/bin/mp35n                          symlink to the installed binary
+    ~/.local/bin/35                             symlink to the installed binary
     ~/.config/systemd/user/mp35n.service        user unit
     ~/.local/share/dbus-1/services/org.freedesktop.secrets.service
     ~/.local/share/applications/google-chrome.desktop   Chrome -> 35 run
@@ -171,7 +181,8 @@ when Chrome asked.
 This:
 
 - stops and disables `mp35n.service`
-- removes the unit, D-Bus activation file, `mp35n` and `35` symlinks
+- removes the installed binary, unit, D-Bus activation file, `mp35n` and
+  `35` symlinks
 - removes the user-level `google-chrome.desktop` override
 - removes `/usr/share/.../mp35n.portal` with sudo
 - restarts `xdg-desktop-portal`
@@ -183,16 +194,17 @@ uninstall, point it at another backend or remove the line.
 
 ## notes
 
-- `install.sh` is idempotent: rerun it after moving the repo, after changing
-  `mp35n.portal`, or after a Chrome package update that changes the desktop
-  file.
+- `install.sh` is idempotent: rerun it after changing the code, after
+  changing `mp35n.portal`, or after a Chrome package update that changes
+  the desktop file.
 - The portal descriptor is installed from the repo copy. If the repo copy
   is modified before `install.sh` runs, that modified file is installed as
   root. Run it from a trusted checkout.
 - The desktop override is a copy of the upstream file at install time. It
   does not update itself when Chrome's package updates the system file;
   rerun `install.sh` to refresh it.
-- The unit and D-Bus activation file embed the absolute repo path. Moving
-  the repo requires rerunning `install.sh`.
+- The unit and D-Bus activation file embed the interpreter and
+  `/usr/local/lib/mp35n/mp35n`. Moving the repo does not break the installed
+  copy; rerun `install.sh` to update it from the repo.
 - `35 run` is the normal launch path. A terminal `google-chrome`, a direct
   `/opt/google/chrome/chrome`, or Chrome's own relaunch can bypass it.
