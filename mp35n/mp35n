@@ -2,10 +2,11 @@
 """
 mp35n - a tiny master-password keyring for Chrome's cookie encryption.
 
-Chrome (Linux) asks org.freedesktop.secrets for the "Chrome Safe Storage"
-secret and derives its cookie key from it with PBKDF2(secret, "saltysalt").
-This daemon serves that secret ONLY to a verified Chrome binary, and only
-while the vault is unlocked.
+Chrome (Linux) gets a per-app secret from the desktop portal and derives its
+cookie key from it with PBKDF2(secret, "saltysalt"). mp35n implements the
+portal's Secret backend, so the key is written straight into Chrome's pipe and
+never crosses D-Bus. The legacy org.freedesktop.secrets interface remains only
+to refuse sessions; it never returns the secret.
 
 Commands:
     mp35n            show status
@@ -46,13 +47,17 @@ SERVICE_NAME = "org.freedesktop.secrets"
 SERVICE_PATH = "/org/freedesktop/secrets"
 COLLECTION_PATH = "/org/freedesktop/secrets/collection/default"
 ITEM_PATH = "/org/freedesktop/secrets/collection/default/1"
-SESSION_PATH = "/org/freedesktop/secrets/session/1"
-
 IF_SERVICE = "org.freedesktop.Secret.Service"
 IF_COLLECTION = "org.freedesktop.Secret.Collection"
 IF_ITEM = "org.freedesktop.Secret.Item"
-IF_SESSION = "org.freedesktop.Secret.Session"
 IF_PROPS = "org.freedesktop.DBus.Properties"
+
+PORTAL_PATH = "/org/freedesktop/portal/desktop"
+IF_PORTAL_SECRET = "org.freedesktop.impl.portal.Secret"
+PORTAL_BINARIES = ("/usr/libexec/xdg-desktop-portal",
+                   "/usr/lib/xdg-desktop-portal")
+CHROME_APP_IDS = {"com.google.chrome", "google-chrome",
+                  "google-chrome-stable", "chrome"}
 
 VAULT_AAD = b"mp35n-vault-v1"
 SCRYPT_N = 2 ** 15
@@ -296,7 +301,7 @@ class State:
         self.secret = None          # bytearray while unlocked
         self.denied = 0
         self.last_denied = None
-        self.last_delivered = None  # {pid, at, where} after a verified GetSecret
+        self.last_portal = None     # {app_id, at} after a portal delivery
         self.fail_count = 0
         self.fail_until = 0.0
         self.name_owned = False
@@ -329,7 +334,7 @@ class State:
                 "name_owned": self.name_owned,
                 "denied": self.denied,
                 "last_denied": self.last_denied,
-                "last_delivered": self.last_delivered,
+                "last_portal": self.last_portal,
                 "uptime": int(time.time() - self.started),
                 "chrome_path": (pin or {}).get("chrome_path"),
                 "chrome_sha256": (pin or {}).get("chrome_sha256"),
@@ -378,17 +383,43 @@ def build_dbus_objects(bus, state, verifier):
                 "caller is not verified Chrome",
                 name="org.freedesktop.DBus.Error.AccessDenied")
 
-    def note_delivery(sender, who):
-        # A verified caller just received the secret. Record it so `35 run`
-        # can confirm delivery before locking the vault again.
-        pid = verifier._pid_for_sender(sender)
-        state.last_delivered = {"pid": pid, "at": int(time.time()), "where": who}
+    def deny_portal(msg):
+        raise dbus.exceptions.DBusException(
+            msg, name="org.freedesktop.DBus.Error.AccessDenied")
 
-    def secret_bytes():
-        if state.secret is None:
-            raise dbus.exceptions.DBusException(
-                "keyring is locked", name="org.freedesktop.Secret.Error.IsLocked")
-        return dbus.ByteArray(bytes(state.secret))
+    def portal_result(code):
+        return (dbus.UInt32(code), dbus.Dictionary({}, signature="sv"))
+
+    def guard_portal(sender):
+        # The portal frontend is the only thing allowed to call the Secret
+        # backend interface. Verify both that it owns the portal name and
+        # that the process is the root-owned portal binary.
+        if not sender:
+            deny_portal("no sender")
+        try:
+            owner = verifier._connection().call_blocking(
+                "org.freedesktop.DBus", "/org/freedesktop/DBus",
+                "org.freedesktop.DBus", "GetNameOwner", "s",
+                ("org.freedesktop.portal.Desktop",))
+            owner = str(owner)
+        except Exception:
+            deny_portal("portal is not running")
+        if owner != str(sender):
+            deny_portal("caller is not the portal")
+
+        pid = verifier._pid_for_sender(sender)
+        if pid is None:
+            deny_portal("cannot resolve portal pid")
+        exe_link = f"/proc/{pid}/exe"
+        try:
+            exe = os.path.realpath(exe_link)
+            st = os.stat(exe_link)
+        except OSError:
+            deny_portal("cannot stat portal binary")
+        if exe not in PORTAL_BINARIES:
+            deny_portal(f"unexpected portal binary {exe!r}")
+        if st.st_uid != 0 or (st.st_mode & (stat.S_IWOTH | stat.S_IWGRP)):
+            deny_portal("bad portal binary ownership")
 
     class SecretService(dbus.service.Object):
         @dbus.service.method(IF_SERVICE, in_signature="s", out_signature="o",
@@ -399,9 +430,12 @@ def build_dbus_objects(bus, state, verifier):
 
         @dbus.service.method(IF_SERVICE, in_signature="sv", out_signature="vo",
                              sender_keyword="sender")
-        def OpenSession(self, algorithm, input, sender=None):
+        def OpenSession(self, _algorithm, _input, sender=None):
             guard(sender, "OpenSession")
-            return (dbus.String(""), dbus.ObjectPath(SESSION_PATH))
+            print(f"{APP}: refusing secret-service session", flush=True)
+            raise dbus.exceptions.DBusException(
+                "use the desktop portal",
+                name="org.freedesktop.DBus.Error.NotSupported")
 
         @dbus.service.method(IF_SERVICE, in_signature="ao", out_signature="aoo",
                              sender_keyword="sender")
@@ -415,27 +449,11 @@ def build_dbus_objects(bus, state, verifier):
             guard(sender, "Lock")
             return (objects, dbus.ObjectPath("/"))
 
-        @dbus.service.method(IF_SERVICE, in_signature="aoo",
-                             out_signature="a{o(oayays)}", sender_keyword="sender")
-        def GetSecrets(self, items, session, sender=None):
-            guard(sender, "GetSecrets")
-            value = secret_bytes()
-            note_delivery(sender, "GetSecrets")
-            out = {}
-            for item in items:
-                out[dbus.ObjectPath(str(item))] = (
-                    dbus.ObjectPath(str(session)),
-                    dbus.ByteArray(b""),
-                    value,
-                    dbus.String("text/plain"),
-                )
-            return out
-
-        @dbus.service.method(IF_SERVICE, in_signature="a{ss}", out_signature="ao",
+        @dbus.service.method(IF_SERVICE, in_signature="a{ss}", out_signature="aoo",
                              sender_keyword="sender")
         def SearchItems(self, attributes, sender=None):
             guard(sender, "SearchItems(service)")
-            return [dbus.ObjectPath(ITEM_PATH)]
+            return ([dbus.ObjectPath(ITEM_PATH)], [])
 
         @dbus.service.method(IF_SERVICE, in_signature="a{sv}s", out_signature="oo",
                              sender_keyword="sender")
@@ -444,11 +462,11 @@ def build_dbus_objects(bus, state, verifier):
             return (dbus.ObjectPath(COLLECTION_PATH), dbus.ObjectPath("/"))
 
     class Collection(dbus.service.Object):
-        @dbus.service.method(IF_COLLECTION, in_signature="a{ss}", out_signature="ao",
+        @dbus.service.method(IF_COLLECTION, in_signature="a{ss}", out_signature="aoo",
                              sender_keyword="sender")
         def SearchItems(self, attributes, sender=None):
             guard(sender, "SearchItems")
-            return [dbus.ObjectPath(ITEM_PATH)]
+            return ([dbus.ObjectPath(ITEM_PATH)], [])
 
         @dbus.service.method(IF_COLLECTION, in_signature="a{sv}(oayays)b",
                              out_signature="oo", sender_keyword="sender")
@@ -497,18 +515,9 @@ def build_dbus_objects(bus, state, verifier):
             guard(sender, "Collection.Set")
 
     class Item(dbus.service.Object):
-        @dbus.service.method(IF_ITEM, in_signature="o", out_signature="(oayays)",
-                             sender_keyword="sender")
-        def GetSecret(self, session, sender=None):
-            guard(sender, "GetSecret")
-            value = secret_bytes()
-            note_delivery(sender, "Item.GetSecret")
-            return (dbus.ObjectPath(str(session)), dbus.ByteArray(b""),
-                    value, dbus.String("text/plain"))
-
         @dbus.service.method(IF_ITEM, in_signature="(oayays)", out_signature="",
                              sender_keyword="sender")
-        def SetSecret(self, secret, sender=None):
+        def SetSecret(self, _secret, sender=None):
             guard(sender, "SetSecret")
 
         @dbus.service.method(IF_ITEM, in_signature="", out_signature="o",
@@ -558,17 +567,64 @@ def build_dbus_objects(bus, state, verifier):
         def Set(self, interface, prop, value, sender=None):
             guard(sender, "Item.Set")
 
-    class Session(dbus.service.Object):
-        @dbus.service.method(IF_SESSION, in_signature="", out_signature="",
+    class PortalSecret(dbus.service.Object):
+        @dbus.service.method(IF_PORTAL_SECRET, in_signature="osha{sv}",
+                             out_signature="ua{sv}", sender_keyword="sender")
+        def RetrieveSecret(self, _handle, app_id, fd, _options, sender=None):
+            guard_portal(sender)
+            app = str(app_id)
+            if app.lower() not in CHROME_APP_IDS:
+                print(f"{APP}: portal deny app_id={app!r}", flush=True)
+                return portal_result(2)
+            if state.secret is None:
+                print(f"{APP}: portal request while locked", flush=True)
+                return portal_result(2)
+
+            raw = None
+            try:
+                raw = fd.take() if hasattr(fd, "take") else int(fd)
+                secret = bytes(state.secret)
+                off = 0
+                while off < len(secret):
+                    n = os.write(raw, secret[off:])
+                    if n <= 0:
+                        raise OSError("short write")
+                    off += n
+            except Exception as e:
+                print(f"{APP}: portal write failed: {e}", flush=True)
+                return portal_result(2)
+            finally:
+                if raw is not None:
+                    try:
+                        os.close(raw)
+                    except OSError:
+                        pass
+
+            state.last_portal = {"app_id": app, "at": int(time.time())}
+            print(f"{APP}: portal secret delivered app_id={app!r}", flush=True)
+            return portal_result(0)
+
+        @dbus.service.method(IF_PROPS, in_signature="ss", out_signature="v",
                              sender_keyword="sender")
-        def Close(self, sender=None):
-            guard(sender, "Session.Close")
+        def Get(self, interface, prop, sender=None):
+            guard_portal(sender)
+            if prop == "version":
+                return dbus.UInt32(1)
+            raise dbus.exceptions.DBusException(
+                f"no such property {prop}",
+                name="org.freedesktop.DBus.Error.InvalidArgs")
+
+        @dbus.service.method(IF_PROPS, in_signature="s", out_signature="a{sv}",
+                             sender_keyword="sender")
+        def GetAll(self, interface, sender=None):
+            guard_portal(sender)
+            return {"version": dbus.UInt32(1)}
 
     return (
         SecretService(bus, SERVICE_PATH),
         Collection(bus, COLLECTION_PATH),
         Item(bus, ITEM_PATH),
-        Session(bus, SESSION_PATH),
+        PortalSecret(bus, PORTAL_PATH),
     )
 
 
@@ -753,6 +809,9 @@ def cmd_status(args):
     else:
         print("  chrome: not pinned (run 'mp35n init')")
     print(f"  daemon: up {r['uptime']}s, dbus name={'yes' if r['name_owned'] else 'no'}")
+    if r.get("last_portal"):
+        lp = r["last_portal"]
+        print(f"  portal: delivered to {lp.get('app_id')!r} at {lp.get('at')}")
     if r.get("denied"):
         ld = r.get("last_denied") or {}
         print(f"  denied: {r['denied']} call(s), last {ld.get('where')} from {ld.get('sender')}")
@@ -1282,8 +1341,8 @@ def cmd_run(args):
     deadline = time.time() + 20
     while time.time() < deadline:
         st2 = daemon_call({"cmd": "status"}) or {}
-        ld = st2.get("last_delivered")
-        if ld and ld.get("at", 0) >= started:
+        lp = st2.get("last_portal")
+        if lp and lp.get("at", 0) >= started:
             delivered = True
             break
         if proc.poll() is not None:
@@ -1292,7 +1351,7 @@ def cmd_run(args):
 
     daemon_call({"cmd": "lock"})
     if delivered:
-        notify("key delivered to chrome; vault locked again")
+        notify("key delivered to chrome via portal; vault locked again")
     elif proc.poll() is not None:
         pass  # exited without asking for the key; already locked
     else:

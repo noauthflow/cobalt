@@ -1,7 +1,7 @@
 #!/bin/bash
 # mp35n — install the Chrome cookie keyring CLI + systemd user unit
-#   ./install.sh            install symlinks + unit + dbus activation, start
-#   ./install.sh uninstall  stop/disable service, remove unit + symlinks
+#   ./install.sh            install symlinks + unit + dbus activation + portal descriptor, start
+#   ./install.sh uninstall  stop/disable service, remove unit + symlinks + portal descriptor
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -12,13 +12,17 @@ UNIT="$HOME/.config/systemd/user/$NAME.service"
 DBUS="$HOME/.local/share/dbus-1/services/org.freedesktop.secrets.service"
 DESKTOP="$HOME/.local/share/applications/google-chrome.desktop"
 OLD_DESKTOP="$HOME/.local/share/applications/mp35n-chrome.desktop"
+PORTAL_DEST="/usr/share/xdg-desktop-portal/portals/mp35n.portal"
+PORTAL_CONF="$HOME/.config/xdg-desktop-portal/portals.conf"
 
 if [[ "${1:-}" == "uninstall" ]]; then
   systemctl --user disable --now "$NAME.service" 2>/dev/null || true
   rm -f "$UNIT" "$DBUS" "$ALIAS" "$BIN" "$DESKTOP" "$OLD_DESKTOP"
+  sudo rm -f "$PORTAL_DEST"
+  systemctl --user restart xdg-desktop-portal.service 2>/dev/null || true
   systemctl --user daemon-reload 2>/dev/null || true
   update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
-  echo "uninstalled: unit, dbus activation, $ALIAS, $BIN, $DESKTOP removed"
+  echo "uninstalled: unit, dbus activation, $ALIAS, $BIN, $DESKTOP, portal descriptor removed"
   echo "note: vault kept in ~/.config/mp35n/ — delete it manually to wipe the key"
   exit 0
 fi
@@ -94,6 +98,15 @@ EOF
 fi
 update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
 
+sudo install -D -m 0644 -o root -g root "$PWD/mp35n.portal" "$PORTAL_DEST"
+mkdir -p "$(dirname "$PORTAL_CONF")"
+if [[ ! -f "$PORTAL_CONF" ]]; then
+  printf '[preferred]\norg.freedesktop.impl.portal.Secret=mp35n;\n' > "$PORTAL_CONF"
+elif ! grep -q '^org\.freedesktop\.impl\.portal\.Secret=mp35n;' "$PORTAL_CONF"; then
+  echo "warning: set 'org.freedesktop.impl.portal.Secret=mp35n;' in $PORTAL_CONF"
+fi
+systemctl --user restart xdg-desktop-portal.service 2>/dev/null || true
+
 systemctl --user daemon-reload
 systemctl --user enable --now "$NAME.service"
 systemctl --user restart "$NAME.service"
@@ -103,5 +116,6 @@ echo "alias:     $ALIAS -> $PWD/$NAME"
 echo "unit:      $UNIT"
 echo "dbus:      $DBUS"
 echo "desktop:   $DESKTOP (menu/rofi entry -> 35 run)"
+echo "portal:    $PORTAL_DEST"
 echo
 echo "next: mp35n init   (or 35 init) to create the vault"
