@@ -385,6 +385,161 @@ def cookie_report():
     return report
 
 
+CHROME_POLICY_DIRS = (Path("/etc/opt/chrome/policies/managed"),
+                      Path("/etc/opt/chrome/policies/recommended"))
+# Extension install locations Chrome ships itself (component / external
+# component); not interesting in a status listing.
+BUILTIN_EXT_LOCATIONS = {5, 10}
+
+
+def chrome_policies():
+    """[(path, trust_problem_or_None, dict_or_error_str)] for every policy
+    file, plus the merged managed policy dict."""
+    files, managed = [], {}
+    for d in CHROME_POLICY_DIRS:
+        if not d.is_dir():
+            continue
+        for f in sorted(d.glob("*.json")):
+            try:
+                data = json.loads(f.read_text())
+                if not isinstance(data, dict):
+                    raise ValueError("not a JSON object")
+            except (OSError, ValueError) as e:
+                data = f"unreadable: {e}"
+            files.append((f, trusted_path(f), data))
+            if d.name == "managed" and isinstance(data, dict):
+                managed.update(data)
+    return files, managed
+
+
+def extension_policy(ext_id, pol):
+    """'allowed' / 'blocked' / 'forced' for ext_id under the managed policy."""
+    es = pol.get("ExtensionSettings") or {}
+    mode = (es.get(ext_id) or {}).get("installation_mode")
+    if mode in ("blocked", "removed") or ext_id in (pol.get("ExtensionInstallBlocklist") or []):
+        return "blocked"
+    if mode in ("force_installed", "normal_installed") \
+            or ext_id in (pol.get("ExtensionInstallForcelist") or []):
+        return "forced"
+    if mode == "allowed" or ext_id in (pol.get("ExtensionInstallAllowlist") or []):
+        return "allowed"
+    if default_extensions_blocked(pol):
+        return "blocked"
+    return "allowed"
+
+
+def default_extensions_blocked(pol):
+    es = pol.get("ExtensionSettings") or {}
+    return ((es.get("*") or {}).get("installation_mode") in ("blocked", "removed")
+            or "*" in (pol.get("ExtensionInstallBlocklist") or []))
+
+
+def _strip_json_comments(text):
+    """Drop // and /* */ comments outside strings (Chrome's manifest parser
+    accepts them, json does not)."""
+    out, i, n, in_str = [], 0, len(text), False
+    while i < n:
+        c = text[i]
+        if in_str:
+            out.append(c)
+            if c == "\\" and i + 1 < n:
+                out.append(text[i + 1])
+                i += 1
+            elif c == '"':
+                in_str = False
+        elif c == '"':
+            in_str = True
+            out.append(c)
+        elif text.startswith("//", i):
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+            continue
+        elif text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+            continue
+        else:
+            out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _manifest_name(ext_dir):
+    try:
+        m = json.loads(_strip_json_comments(
+            (ext_dir / "manifest.json").read_text(encoding="utf-8-sig")))
+    except (OSError, ValueError):
+        return None
+    name = m.get("name") or ""
+    if name.startswith("__MSG_") and name.endswith("__"):
+        key = name[6:-2].lower()
+        loc = m.get("default_locale") or "en"
+        try:
+            msgs = json.loads((ext_dir / "_locales" / loc / "messages.json")
+                              .read_text(encoding="utf-8-sig"))
+            name = next((v.get("message") for k, v in msgs.items()
+                         if k.lower() == key), name)
+        except (OSError, ValueError):
+            pass
+    return name or None
+
+
+def extension_report():
+    """[(profile, [(id, name, enabled, source)])] for user-visible
+    extensions in every Chrome profile."""
+    root = CHROME_PROFILE_ROOTS[0]
+    out = []
+    if not root.is_dir():
+        return out
+    for prefs in sorted(root.glob("*/Preferences")):
+        prof = prefs.parent
+        settings = {}
+        for f in (prefs, prof / "Secure Preferences"):
+            try:
+                d = json.loads(f.read_text())
+                settings.update(d.get("extensions", {}).get("settings", {}) or {})
+            except (OSError, ValueError, AttributeError):
+                pass
+        exts = []
+        for ext_id, s in sorted(settings.items()):
+            loc = s.get("location")
+            if loc is None or loc in BUILTIN_EXT_LOCATIONS:
+                continue
+            path = s.get("path") or ""
+            if loc == 4:  # unpacked: path is the source folder
+                ext_dir, source = Path(path), f"unpacked {path.replace(str(Path.home()), '~')}"
+            else:
+                ext_dir = prof / "Extensions" / path
+                source = "web store" if s.get("from_webstore") else f"location {loc}"
+            name = (s.get("manifest") or {}).get("name") or _manifest_name(ext_dir) or "?"
+            reasons = s.get("disable_reasons")
+            enabled = s.get("state", 1) != 0 and not reasons
+            exts.append((ext_id, name, enabled, source))
+        out.append((prof.name, exts))
+    return out
+
+
+def print_chrome_policy_status():
+    files, pol = chrome_policies()
+    for f, trust, data in files:
+        if trust or not isinstance(data, dict):
+            print(f"  WARNING: policy {f}: {trust or data}")
+    locked = default_extensions_blocked(pol)
+    print("  extensions: " + ("locked (policy blocks everything else)" if locked
+                              else "NOT locked (any extension can be installed)"))
+    reports = extension_report()
+    for prof, exts in reports:
+        if len(reports) > 1:
+            print(f"    [{prof}]")
+        for ext_id, name, enabled, source in exts:
+            if extension_policy(ext_id, pol) == "blocked":
+                state = "blocked"
+            else:
+                state = "on" if enabled else "off"
+            where = source[len("unpacked "):] if source.startswith("unpacked ") else ""
+            print(f"    {state:<7} {name}" + (f"  {where}" if where else ""))
+
+
 def b64e(b):
     return base64.b64encode(b).decode("ascii")
 
@@ -1098,6 +1253,7 @@ def cmd_status(args):
             print("    WARNING: v10/plain cookies are readable with the public"
                   " 'peanuts' key. Launch Chrome via '35 run', then log out/in"
                   " (or clear cookies) so they are rewritten as v12.")
+    print_chrome_policy_status()
     return 0 if not r["locked"] else 1
 
 
