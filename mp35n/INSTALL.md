@@ -30,8 +30,9 @@ units into `/usr/local/lib/systemd/system/`, and copy `mp35n.portal` into
 1. **Checks dependencies.** `python3`, `cryptography`, and GTK4 +
    libadwaita must import.
 
-2. **Creates directories.** `~/.local/bin` and `~/.config/mp35n` (mode
-   700, holds only `vault.json`).
+2. **Creates `~/.local/bin`.** The vault is `~/.config/35vault.json`,
+   created by `35 init`. An empty `~/.config/mp35n` left from an old
+   install is removed, as are the units of the removed vault service.
 
 3. **Installs the binary and links the CLI.** It copies the repo's `mp35n`
    to `/usr/local/lib/mp35n/mp35n` (root:root, 0755) and creates:
@@ -146,7 +147,7 @@ units into `/usr/local/lib/systemd/system/`, and copy `mp35n.portal` into
     ~/.local/share/applications/google-chrome.desktop   Chrome -> 35 run
     ~/.config/xdg-desktop-portal/portals.conf   Secret=mp35n
     /usr/share/xdg-desktop-portal/portals/mp35n.portal  (root)
-    ~/.config/mp35n/                            directory, mode 700
+    ~/.config/35vault.json                      the vault (0600, made by 35 init)
 
 `install.sh` does **not** create the vault. That is `35 init`.
 
@@ -157,7 +158,7 @@ units into `/usr/local/lib/systemd/system/`, and copy `mp35n.portal` into
     35 run           # normal Chrome launch
 
 `35 init` prompts for a master password, generates a random 32-byte secret,
-and writes `vault.json`. `35 run` unlocks, launches and authorizes Chrome,
+and writes `~/.config/35vault.json`. `35 run` unlocks, launches and authorizes Chrome,
 waits for the portal delivery, and the vault locks itself after it.
 
 Check it:
@@ -186,7 +187,7 @@ This:
 - restarts `xdg-desktop-portal`
 - runs `daemon-reload` and `update-desktop-database`
 
-The vault in `~/.config/mp35n/` is kept. Delete it manually to wipe the key.
+The vault `~/.config/35vault.json` is kept. Delete it to wipe the key.
 `portals.conf` is also kept; if it still says `Secret=mp35n;` after
 uninstall, point it at another backend or remove the line.
 

@@ -13,6 +13,9 @@ ALIAS="$HOME/.local/bin/35"
 SYSUNITDIR="/usr/local/lib/systemd/system"
 SYSUNIT="$SYSUNITDIR/$NAME.service"
 SYSSOCK="$SYSUNITDIR/$NAME.socket"
+# left over from the removed vault service; removed on install
+VAULTUNIT="$SYSUNITDIR/$NAME-vault.service"
+VAULTSOCK="$SYSUNITDIR/$NAME-vault.socket"
 # left over from the old user-unit install; removed on install
 OLD_UNIT="$HOME/.config/systemd/user/$NAME.service"
 OLD_DBUS="$HOME/.local/share/dbus-1/services/org.freedesktop.secrets.service"
@@ -28,8 +31,9 @@ LIBDIR="/usr/local/lib/mp35n"
 LIB="$LIBDIR/mp35n"
 
 if [[ "${1:-}" == "uninstall" ]]; then
-  sudo systemctl disable --now "$NAME.service" "$NAME.socket" 2>/dev/null || true
-  sudo rm -f "$SYSUNIT" "$SYSSOCK"
+  sudo systemctl disable --now "$NAME.service" "$NAME.socket" \
+    "$NAME-vault.service" "$NAME-vault.socket" 2>/dev/null || true
+  sudo rm -f "$SYSUNIT" "$SYSSOCK" "$VAULTUNIT" "$VAULTSOCK"
   sudo systemctl daemon-reload
   systemctl --user disable --now "$NAME.service" 2>/dev/null || true
   rm -f "$OLD_UNIT" "$OLD_DBUS" "$OLD_SOCK" "$ALIAS" "$BIN" "$DESKTOP" "$OLD_DESKTOP"
@@ -40,7 +44,7 @@ if [[ "${1:-}" == "uninstall" ]]; then
   systemctl --user daemon-reload 2>/dev/null || true
   update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
   echo "uninstalled: code, system units, $ALIAS, $BIN, $DESKTOP, portal descriptor removed"
-  echo "note: vault kept in ~/.config/mp35n/ — delete it manually to wipe the key"
+  echo "note: vault kept at ~/.config/35vault.json — delete it to wipe the key"
   exit 0
 fi
 
@@ -52,8 +56,7 @@ PYTHON="$(command -v python3)" || { echo "python3 is required"; exit 1; }
 
 sudo install -D -m 0755 -o root -g root "$PWD/$NAME" "$LIB"
 
-mkdir -p "$HOME/.local/bin" "$HOME/.config/mp35n"
-chmod 700 "$HOME/.config/mp35n"
+mkdir -p "$HOME/.local/bin"
 
 # the running copy is root-owned; ~/.local/bin holds symlinks to it
 ln -sfn "$LIB" "$BIN"
@@ -63,6 +66,7 @@ ln -sfn "$LIB" "$ALIAS"
 # environment (and unit file) any process running as you can change
 systemctl --user disable --now "$NAME.service" 2>/dev/null || true
 rm -f "$OLD_UNIT" "$OLD_DBUS" "$OLD_SOCK"
+rmdir "$HOME/.config/mp35n" 2>/dev/null || true   # only if empty (old vault kept)
 systemctl --user daemon-reload 2>/dev/null || true
 
 TMPD="$(mktemp -d)"
@@ -123,6 +127,10 @@ LimitCORE=0
 WantedBy=user@$USER_UID.service
 EOF
 
+# remove the vault service from an earlier install
+sudo systemctl disable --now "$NAME-vault.service" "$NAME-vault.socket" 2>/dev/null || true
+sudo rm -f "$VAULTUNIT" "$VAULTSOCK"
+
 sudo install -D -m 0644 -o root -g root "$TMPD/$NAME.socket" "$SYSSOCK"
 sudo install -D -m 0644 -o root -g root "$TMPD/$NAME.service" "$SYSUNIT"
 
@@ -175,8 +183,9 @@ echo "installed: $BIN -> $LIB"
 echo "alias:     $ALIAS -> $LIB"
 echo "binary:    $LIB (root-owned)"
 echo "units:     $SYSSOCK, $SYSUNIT (root-owned, runs as $USER_NAME)"
+echo "vault:     ~/.config/35vault.json"
 echo "socket:    /run/mp35n/control.sock"
 echo "desktop:   $DESKTOP (menu/rofi entry -> 35 run)"
 echo "portal:    $PORTAL_DEST"
 echo
-echo "next: mp35n init   (or 35 init) to create the vault"
+echo "next: 35 init   to create the vault"

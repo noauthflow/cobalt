@@ -18,18 +18,7 @@ exactly the Chrome process `mp35n run` just launched and authorized with
 the one-time token from the unlock, and that process is the root-owned
 Chrome binary with an allowed command line and a clean environment.
 
-Commands:
-    mp35n            show status
-    mp35n unlock     unlock only (authorizes nothing; mostly for testing)
-    mp35n lock       forget the key immediately (no password needed)
-    mp35n status     show state + cookie encryption per profile
-    mp35n init       create the vault
-    mp35n run ARGS   unlock, launch + authorize Chrome, deliver once, lock
-                     (terminal or desktop; prompts with GTK4/libadwaita
-                     when there is no TTY)
-    mp35n daemon     internal: run the daemon
-
-Install/uninstall is handled by ./install.sh in this folder.
+Run `35 help` for commands. Install/uninstall is handled by ./install.sh in this folder.
 """
 
 import base64
@@ -47,8 +36,7 @@ import time
 from pathlib import Path
 
 APP = "mp35n"
-CONFIG_DIR = Path(os.environ.get("MP35N_CONFIG_DIR", str(Path.home() / ".config" / "mp35n")))
-VAULT_PATH = CONFIG_DIR / "vault.json"
+VAULT_PATH = Path.home() / ".config" / "35vault.json"
 # The control socket is created by systemd (mp35n.socket) in a root-owned
 # directory, so no process running as the user can unlink it and plant a
 # fake daemon that collects the master password. Never derived from env.
@@ -96,7 +84,17 @@ CHROME_ENV_BLOCK = (
     "__EGL_VENDOR_LIBRARY", "VK_ICD_FILENAMES", "VK_DRIVER_FILES",
     "VK_ADD_DRIVER_FILES", "VK_LAYER_PATH", "VK_ADD_LAYER_PATH",
     "VK_INSTANCE_LAYERS",
+    # proxies: route Chrome through a reader (see NETWORK_POLICY)
+    "http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY",
+    "all_proxy", "ALL_PROXY", "auto_proxy", "AUTO_PROXY",
+    "no_proxy", "NO_PROXY", "SOCKS_SERVER", "SOCKS_VERSION",
 )
+
+# Managed policy that stops traffic interception: no proxy, no user-added
+# CAs, no profile-set DNS server. Installed by chrome-policy/apply-policy.sh.
+NETWORK_POLICY = {"ProxyMode": "direct",
+                  "CAPlatformIntegrationEnabled": False,
+                  "DnsOverHttpsMode": "off"}
 CHROME_APP_IDS = {"com.google.chrome", "google-chrome",
                   "google-chrome-stable", "chrome"}
 
@@ -112,7 +110,7 @@ VAULT_AAD = b"mp35n-vault-v1"
 SCRYPT_N = 2 ** 15
 SCRYPT_R = 8
 SCRYPT_P = 1
-SCRYPT_MAXMEM = 128 * 1024 * 1024
+SCRYPT_MAXMEM = 256 * 1024 * 1024
 SECRET_LEN = 32
 
 STDIN_PASSWORD = False
@@ -130,11 +128,6 @@ def die(msg, code=1):
         # failure as a desktop notification
         notify(msg)
     sys.exit(code)
-
-
-def ensure_dir():
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    os.chmod(CONFIG_DIR, 0o700)
 
 
 def write_private(path: Path, data: bytes):
@@ -522,25 +515,60 @@ def extension_report():
     return out
 
 
+def _color_on():
+    return sys.stdout.isatty() and not os.environ.get("NO_COLOR") \
+        and os.environ.get("TERM") != "dumb"
+
+
+def paint(text, color):
+    codes = {"green": "32", "red": "31", "yellow": "33", "dim": "2", "bold": "1"}
+    return f"\033[{codes[color]}m{text}\033[0m" if _color_on() else str(text)
+
+
+def status_row(label, value, note=None):
+    print(f"  {label:<11} {value}" + (f"  {paint(note, 'dim')}" if note else ""))
+
+
+def status_warn(text, color="red"):
+    print(f"  {'':<11} {paint(text, color)}")
+
+
 def print_chrome_policy_status():
     files, pol = chrome_policies()
     for f, trust, data in files:
         if trust or not isinstance(data, dict):
-            print(f"  WARNING: policy {f}: {trust or data}")
+            status_row("policy", paint(f"{f}: {trust or data}", "red"))
+
+    print()
     locked = default_extensions_blocked(pol)
-    print("  extensions: " + ("locked (policy blocks everything else)" if locked
-                              else "NOT locked (any extension can be installed)"))
+    status_row("extensions", paint("locked", "green") if locked
+               else paint("not locked", "red"),
+               None if locked else "any extension can be installed")
     reports = extension_report()
+    width = max((len(e[1]) for _, exts in reports for e in exts), default=0)
     for prof, exts in reports:
         if len(reports) > 1:
-            print(f"    [{prof}]")
+            print(f"    {paint(prof, 'dim')}")
         for ext_id, name, enabled, source in exts:
             if extension_policy(ext_id, pol) == "blocked":
-                state = "blocked"
+                mark, tag = paint("\u2717", "red"), "blocked"
+            elif enabled:
+                mark, tag = paint("\u25cf", "green"), ""
             else:
-                state = "on" if enabled else "off"
+                mark, tag = paint("\u25cb", "dim"), "off"
             where = source[len("unpacked "):] if source.startswith("unpacked ") else ""
-            print(f"    {state:<7} {name}" + (f"  {where}" if where else ""))
+            extra = "  ".join(x for x in (tag, where) if x)
+            print(f"    {mark} {name:<{width}}" + (f"  {paint(extra, 'dim')}" if extra else ""))
+
+    print()
+    ok = all(pol.get(k) == v for k, v in NETWORK_POLICY.items())
+    status_row("network", paint("locked", "green") if ok else paint("not locked", "red"),
+               None if ok else "run ~/cobalt/mp35n/chrome-policy/apply-policy.sh")
+    width = max(len(k) for k in NETWORK_POLICY)
+    for k, v in NETWORK_POLICY.items():
+        good = pol.get(k) == v
+        mark = paint("\u2713", "green") if good else paint("\u2717", "red")
+        print(f"    {mark} {k:<{width}}  {paint(json.dumps(v), 'dim')}")
 
 
 def b64e(b):
@@ -570,13 +598,15 @@ def scrypt_key(password: str, salt: bytes, n, r, p) -> bytes:
 # vault
 # --------------------------------------------------------------------------
 
-def vault_encrypt(password: str, secret: bytes) -> dict:
+def seal(password: str, secret: bytes) -> dict:
+    """Encrypt the key under password: scrypt KEK + AES-256-GCM."""
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     salt = os.urandom(16)
     key = scrypt_key(password, salt, SCRYPT_N, SCRYPT_R, SCRYPT_P)
     nonce = os.urandom(12)
     ct = AESGCM(key).encrypt(nonce, secret, VAULT_AAD)
     return {
+        "kind": "mp35n-vault",
         "version": 1,
         "kdf": {"name": "scrypt", "n": SCRYPT_N, "r": SCRYPT_R, "p": SCRYPT_P,
                 "salt": b64e(salt)},
@@ -585,14 +615,19 @@ def vault_encrypt(password: str, secret: bytes) -> dict:
     }
 
 
-def vault_decrypt(password: str) -> bytes:
+def unseal(doc: dict, password: str) -> bytes:
+    """Inverse of seal(). Raises on a wrong password or a bad document."""
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-    d = json.loads(VAULT_PATH.read_text())
-    kdf = d["kdf"]
+    if doc.get("kind", "mp35n-vault") != "mp35n-vault":
+        raise ValueError("not an mp35n vault")
+    kdf, c = doc["kdf"], doc["cipher"]
+    if kdf.get("name") != "scrypt" or c.get("name") != "aes-256-gcm":
+        raise ValueError("unsupported kdf/cipher")
     key = scrypt_key(password, b64d(kdf["salt"]), kdf["n"], kdf["r"], kdf["p"])
-    c = d["cipher"]
-    # Raises InvalidTag on a wrong password.
-    return AESGCM(key).decrypt(b64d(c["nonce"]), b64d(c["ct"]), VAULT_AAD)
+    secret = AESGCM(key).decrypt(b64d(c["nonce"]), b64d(c["ct"]), VAULT_AAD)
+    if len(secret) != SECRET_LEN:
+        raise ValueError("secret has the wrong length")
+    return secret
 
 
 # --------------------------------------------------------------------------
@@ -659,6 +694,7 @@ class State:
         self.fail_count = 0
         self.fail_until = 0.0
         self.name_owned = False
+        self.name_owner = None      # "pid:exe" of a squatter holding the name
         self.started = time.time()
         self.srv = None
         # One launch authorization per unlock: {"token": str, "pid": int|None}.
@@ -711,23 +747,25 @@ class State:
                 "ok": True,
                 "locked": self.locked,
                 "name_owned": self.name_owned,
+                "name_owner": self.name_owner,
                 "denied": self.denied,
                 "last_denied": self.last_denied,
                 "last_portal": self.last_portal,
                 "uptime": int(time.time() - self.started),
                 "chrome_path": find_chrome(),
                 "authorized_pid": (self.grant or {}).get("pid"),
-                "vault_exists": VAULT_PATH.exists(),
+                "vault": "ok" if VAULT_PATH.exists() else "missing",
             }
         if cmd == "unlock":
+            if not self.name_owned:
+                return {"ok": False, "error": name_squat_message(self.name_owner)}
             if not VAULT_PATH.exists():
-                return {"ok": False, "error": "vault not initialized; run 'mp35n init'"}
-            now = time.time()
-            if now < self.fail_until:
+                return {"ok": False, "error": "no vault yet; run '35 init'"}
+            if time.time() < self.fail_until:
                 return {"ok": False, "error": "too many attempts; wait a moment"}
-            password = req.get("password", "")
             try:
-                secret = vault_decrypt(password)
+                secret = unseal(json.loads(VAULT_PATH.read_text()),
+                                req.get("password", ""))
             except Exception:
                 self.fail_count += 1
                 # No delay for the first two typos; then back off.
@@ -735,10 +773,9 @@ class State:
                     2 ** (self.fail_count - 2), 15)
                 self.fail_until = time.time() + delay
                 return {"ok": False, "error": "wrong master password"}
+            self.fail_count, self.fail_until = 0, 0.0
             self.wipe()
             self.secret = bytearray(secret)
-            self.fail_count = 0
-            self.fail_until = 0.0
             import secrets
             self.grant = {"token": secrets.token_hex(32), "pid": None}
             return {"ok": True, "token": self.grant["token"]}
@@ -1093,18 +1130,38 @@ def cmd_daemon(args):
     state = State()
     verifier = Verifier()
 
+    # Whoever owns the name answers Chrome's portal request and can hand it
+    # a key of its choosing. If someone else holds it, stay up in the queue
+    # (we take over when they let go), refuse unlocks, and alert.
     try:
         bus = dbus.SessionBus()
         name = dbus.service.BusName(
             SERVICE_NAME, bus=bus,
-            do_not_queue=True, replace_existing=True, allow_replacement=False)
-    except dbus.exceptions.NameExistsException:
-        # Another instance already serves the name; not an error.
-        return 0
+            do_not_queue=False, replace_existing=True, allow_replacement=False)
     except Exception as e:
         die(f"cannot connect to the session bus: {e}")
+    me = bus.get_unique_name()
 
-    state.name_owned = True
+    def on_owner(owner):
+        owner = str(owner or "")
+        if owner == me:
+            if not state.name_owned:
+                print(f"{APP}: own {SERVICE_NAME}", flush=True)
+            state.name_owned, state.name_owner = True, None
+            return
+        pid = verifier._pid_for_sender(owner) if owner else None
+        who = describe_pid(pid) if pid else (owner or "nobody")
+        was = state.name_owned or state.name_owner != who
+        state.name_owned, state.name_owner = False, who
+        state.wipe()
+        if was:
+            notify(name_squat_message(who))
+
+    try:
+        on_owner(bus.get_name_owner(SERVICE_NAME))
+    except dbus.exceptions.DBusException:
+        on_owner("")
+    bus.watch_name_owner(SERVICE_NAME, on_owner)
     objects = build_dbus_objects(bus, state, verifier)
 
     # --- control socket (from mp35n.socket) -------------------------------
@@ -1171,16 +1228,22 @@ def cmd_daemon(args):
     return 0
 
 
-def systemd_listen_socket():
-    """The control socket passed by mp35n.socket (fd 3), or None."""
+def name_squat_message(owner):
+    return (f"{SERVICE_NAME} is held by {owner or 'nobody'}, not mp35n. It "
+            "would answer Chrome's key request; refusing to unlock. Do not "
+            "start Chrome until this is resolved.")
+
+
+def systemd_listen_socket(path=SOCK_PATH):
+    """The listening socket systemd passed as fd 3 for path, or None."""
     if (os.environ.get("LISTEN_PID") != str(os.getpid())
             or os.environ.get("LISTEN_FDS") != "1"):
         return None
     for k in ("LISTEN_PID", "LISTEN_FDS", "LISTEN_FDNAMES"):
         os.environ.pop(k, None)
     srv = socket.socket(fileno=3)
-    if srv.family != socket.AF_UNIX or srv.getsockname() != str(SOCK_PATH):
-        die(f"fd 3 is not {SOCK_PATH}")
+    if srv.family != socket.AF_UNIX or srv.getsockname() != str(path):
+        die(f"fd 3 is not {path}")
     return srv
 
 
@@ -1228,39 +1291,76 @@ def require_daemon():
     return r
 
 
+def _fmt_uptime(sec):
+    sec = int(sec)
+    d, h, m = sec // 86400, sec % 86400 // 3600, sec % 3600 // 60
+    if d:
+        return f"{d}d {h}h"
+    if h:
+        return f"{h}h {m}m"
+    return f"{m}m {sec % 60}s" if m else f"{sec}s"
+
+
 def cmd_status(args):
     r = daemon_call({"cmd": "status"})
     if r is None:
         if try_start_daemon():
             r = daemon_call({"cmd": "status"})
     if r is None:
-        print(f"{APP}: daemon not running")
+        print(f"{paint(APP, 'bold')}  {paint('daemon not running', 'red')}")
         return 2
     if not r.get("ok"):
-        print(f"{APP}: {r.get('error')}")
+        print(f"{paint(APP, 'bold')}  {paint(r.get('error'), 'red')}")
         return 2
-    state = "UNLOCKED" if not r["locked"] else "locked"
-    print(f"{APP}: {state}")
+
+    if not VAULT_PATH.exists():
+        state = paint("no vault", "red")
+    elif r["locked"]:
+        state = paint("locked", "green")
+    else:
+        state = paint("unlocked", "yellow")
+    print(f"{paint(APP, 'bold')}  {state}")
+    print()
+
+    status_row("daemon", f"up {_fmt_uptime(r['uptime'])}")
+    if VAULT_PATH.exists():
+        status_row("vault", paint("present", "green"), "~/.config/35vault.json")
+    else:
+        status_row("vault", paint("missing", "red"), "run '35 init'")
+    if r.get("name_owned"):
+        status_row("bus name", paint("owned", "green"), SERVICE_NAME)
+    else:
+        status_row("bus name", paint(f"held by {r.get('name_owner') or 'nobody'}", "red"))
+        status_warn("unlock refused; do not start Chrome until this is resolved")
+
     chrome = r.get("chrome_path")
     trust = trusted_path(chrome) if chrome else "not installed"
-    print(f"  chrome: {chrome or '-'} ({'root-owned path OK' if not trust else trust})")
+    status_row("chrome", paint(chrome, "green") if chrome and not trust
+               else paint(chrome or "not installed", "red"),
+               "root-owned" if not trust else trust)
     if r.get("authorized_pid"):
-        print(f"  authorized: Chrome pid {r['authorized_pid']}")
-    print(f"  daemon: up {r['uptime']}s, dbus name={'yes' if r['name_owned'] else 'no'}")
+        status_row("authorized", f"pid {r['authorized_pid']}")
     if r.get("last_portal"):
         lp = r["last_portal"]
-        when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(lp.get("at", 0)))
-        print(f"  portal: delivered to Chrome pid {lp.get('pid')} at {when}")
+        when = time.strftime("%H:%M:%S", time.localtime(lp.get("at", 0)))
+        status_row("delivered", f"pid {lp.get('pid')}", when)
     if r.get("denied"):
         ld = r.get("last_denied") or {}
-        print(f"  denied: {r['denied']} call(s), last {ld.get('where')} from {ld.get('sender')}")
+        status_row("denied", paint(f"{r['denied']} request(s)", "yellow"),
+                   f"last: {ld.get('where')}")
+
     for db, counts in cookie_report():
-        desc = ", ".join(f"{k}={n}" for k, n in sorted(counts.items())) or "empty"
-        print(f"  cookies: ~/{db}: {desc}")
+        parts = Path(db).parts
+        prof = parts[-2] if parts[-3] == "google-chrome" else f"{parts[-3]}/{parts[-2]}"
+        tags = []
+        for k, n in sorted(counts.items()):
+            color = "green" if k == "v12" else "red" if k in ("v10", "plain", "error") else "yellow"
+            tags.append(paint(f"{k} {n}", color))
+        status_row("cookies", "  ".join(tags) or paint("empty", "dim"), prof)
         if counts.get("v10") or counts.get("plain"):
-            print("    WARNING: v10/plain cookies are readable with the public"
-                  " 'peanuts' key. Launch Chrome via '35 run', then log out/in"
-                  " (or clear cookies) so they are rewritten as v12.")
+            status_warn("v10/plain cookies use the public 'peanuts' key; launch via "
+                        "'35 run' and log in again to rewrite them as v12")
+
     print_chrome_policy_status()
     return 0 if not r["locked"] else 1
 
@@ -1268,7 +1368,7 @@ def cmd_status(args):
 def cmd_unlock(args):
     require_daemon()
     if not VAULT_PATH.exists():
-        die("no vault yet; run 'mp35n init' first")
+        die("no vault yet; run '35 init'")
 
     def verify(password):
         r = daemon_call({"cmd": "unlock", "password": password})
@@ -1774,6 +1874,9 @@ def cmd_run(args):
         os.execve(chrome, argv, env)
 
     require_daemon()
+    st = daemon_call({"cmd": "status"}) or {}
+    if not st.get("name_owned"):
+        die(name_squat_message(st.get("name_owner")) + " Not starting chrome.")
     # Always start from a fresh unlock: the launch token is only returned
     # to the client that supplied the password.
     daemon_call({"cmd": "lock"})
@@ -1847,38 +1950,41 @@ def cmd_run(args):
 
 
 def cmd_init(args):
-    ensure_dir()
     if VAULT_PATH.exists() and "--force" not in args:
-        die("vault already exists (use --force to wipe it)")
-
-    chrome = find_chrome()
-    if not chrome:
-        print(f"{APP}: warning: no Chrome at {', '.join(CHROME_BINARIES)}",
-              file=sys.stderr)
-
-    pw1, why = prompt_new_password()
-    if pw1 is None:
+        die("vault already exists (--force replaces it and loses every v12 cookie)")
+    pw, why = prompt_new_password()
+    if pw is None:
         die(why or "no password entered")
-    if len(pw1) < 8:
+    if len(pw) < 8:
         print(f"{APP}: warning: password shorter than 8 characters", file=sys.stderr)
-
-    secret = os.urandom(SECRET_LEN)
-    vault = vault_encrypt(pw1, secret)
-    write_private(VAULT_PATH, json.dumps(vault, indent=2).encode("utf-8") + b"\n")
-
+    VAULT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    write_private(VAULT_PATH, json.dumps(seal(pw, os.urandom(SECRET_LEN)), indent=2)
+                  .encode("utf-8") + b"\n")
     print(f"{APP}: vault created at {VAULT_PATH}")
-    print(f"{APP}: codeword: {vault_phrase()}")
     print(f"{APP}: next: '35 run' to start Chrome")
     return 0
 
 
-def cmd_trust(args):
-    print(f"{APP}: 'trust' is gone: Chrome is verified as the root-owned "
-          f"{', '.join(CHROME_BINARIES)} on every request; nothing to re-pin.")
+HELP = """\
+{b}{prog}{r} \u2014 Chrome's cookie key behind a master password
+
+{b}usage{r}  {prog} [command]
+
+  status                 show state (default)
+  run [url...]           unlock, start Chrome, hand it the key, lock
+  lock                   forget the key now
+  unlock                 unlock without starting Chrome (testing)
+  init [--force]         create a new vault
+
+  help, -h               show this
+"""
+
+
+def cmd_help(prog):
+    on = _color_on()
+    print(HELP.format(prog=prog, b="\033[1m" if on else "",
+                      d="\033[2m" if on else "", r="\033[0m" if on else ""), end="")
     return 0
-
-
-USAGE = __doc__.strip()
 
 
 def main(argv):
@@ -1889,23 +1995,22 @@ def main(argv):
     if not argv:
         return cmd_status([])
 
+    prog = os.path.basename(sys.argv[0]) or APP
     cmd, args = argv[0], argv[1:]
     if cmd in ("-h", "--help", "help"):
-        print(USAGE)
-        return 0
+        return cmd_help(prog)
     table = {
         "unlock": cmd_unlock,
         "lock": cmd_lock,
         "run": cmd_run,
         "status": cmd_status,
         "init": cmd_init,
-        "trust": cmd_trust,
         "daemon": cmd_daemon,
     }
     fn = table.get(cmd)
     if not fn:
-        print(USAGE)
-        return 2
+        print(f"{prog}: {cmd}: command not found (try '{prog} help')", file=sys.stderr)
+        return 127
     return fn(args)
 
 

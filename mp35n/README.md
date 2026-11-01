@@ -49,11 +49,11 @@ and drops `v12` cookies it cannot decrypt. If Chrome is already running,
 `35 run` just hands the URL to it without asking for the password.
 
 The vault is a matched pair with the cookie DB: restoring `Cookies` from git
-only works with the same `vault.json`.
+only works with the same key.
 
 ## how it works
 
-    password --scrypt--> KEK --AES-256-GCM--> 32-byte secret   (~/.config/mp35n/vault.json)
+    password --scrypt--> KEK --AES-256-GCM--> 32-byte secret   (~/.config/35vault.json)
     secret --portal fd--> Chrome (needs SecretPortalKeyProviderUseForEncryption) --> AES-256-GCM --> v12 cookies
 
 The daemon runs as a root-owned systemd system service under your uid and writes the secret into the pipe
@@ -72,7 +72,7 @@ are no zenity/rofi/askpass fallbacks. The dialog shows the fixed codeword
 
 ## files
 
-    ~/.config/mp35n/vault.json    scrypt salt/nonce + AES-GCM secret (0600)
+    ~/.config/35vault.json        scrypt salt/nonce + AES-GCM secret (0600)
     /usr/local/lib/mp35n/mp35n    root-owned installed binary
     ~/.local/bin/mp35n, 35        symlinks to the installed binary
     /usr/local/lib/systemd/system/mp35n.{socket,service}   root-owned units
