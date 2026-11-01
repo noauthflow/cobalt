@@ -1,7 +1,9 @@
 # mp35n security notes
 
 mp35n keeps Chrome's cookie key in a master-password vault (scrypt +
-AES-256-GCM) and writes it once per unlock into the portal pipe of the one
+AES-256-GCM). The daemon is a root-owned system service running as you
+with a fixed environment; its control socket sits in root-owned
+`/run/mp35n/`, and it is non-dumpable. It writes the key once per unlock into the portal pipe of the one
 Chrome process `35 run` launched and authorized. Before writing, the daemon
 checks that the caller is the root-owned portal, that the pipe's read end is
 held only by the authorized PID, and that this PID is the root-owned
@@ -27,10 +29,11 @@ the same namespaces. The key never crosses D-Bus.
    plus a confined login (`staff_u`). As `unconfined_t`, nothing can be
    denied.
 
-2. **Password capture.** `~/.local/bin/35`, the `.desktop` override,
-   `environment.d`, shell rc files and the user unit are all user-writable.
-   Malware can show a fake prompt (`KANEKI` is public) or preload code into
-   the `35` client, then decrypt `vault.json` itself.
+2. **Client injection.** The `35` client runs in your session: the
+   `.desktop` override, `environment.d` and shell rc files are
+   user-writable, so malware can `LD_PRELOAD` into the real client and log
+   the password typed into the real prompt, then decrypt `vault.json`.
+   Fix: the daemon shows the prompt and launches Chrome itself.
 
 3. **Offline guessing.** Any same-uid process can copy `vault.json`. scrypt
    `N=2^15, r=8, p=1` only slows guessing; a weak master password falls.

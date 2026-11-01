@@ -9,9 +9,9 @@ desktop integration, and the xdg-desktop-portal Secret backend.
 - `dbus-python` (the `dbus` Python module)
 - `PyGObject` with GTK4 and libadwaita (`gir1.2-gtk-4.0`, `gir1.2-adw-1`)
 - `cryptography`
-- a systemd user session
+- systemd (system manager + your user session)
 - `xdg-desktop-portal`
-- sudo for the binary and portal descriptor
+- sudo for the binary, the system units and the portal descriptor
 
 `install.sh` checks the Python dependencies and exits if one is missing.
 
@@ -21,18 +21,17 @@ desktop integration, and the xdg-desktop-portal Secret backend.
     ./install.sh
     ./install.sh uninstall    # optional
 
-Root steps: copy the binary to `/usr/local/lib/mp35n/` and copy
-`mp35n.portal` into `/usr/share/xdg-desktop-portal/portals/`. The rest is
-user-level.
+Root steps: copy the binary to `/usr/local/lib/mp35n/`, install the system
+units into `/usr/local/lib/systemd/system/`, and copy `mp35n.portal` into
+`/usr/share/xdg-desktop-portal/portals/`. The rest is user-level.
 
 ## what `install.sh` does
 
 1. **Checks dependencies.** `python3`, `cryptography`, and GTK4 +
    libadwaita must import.
 
-2. **Creates directories.** `~/.local/bin`, the systemd user unit
-   directory, the D-Bus activation directory, and `~/.config/mp35n`
-   (mode 700).
+2. **Creates directories.** `~/.local/bin` and `~/.config/mp35n` (mode
+   700, holds only `vault.json`).
 
 3. **Installs the binary and links the CLI.** It copies the repo's `mp35n`
    to `/usr/local/lib/mp35n/mp35n` (root:root, 0755) and creates:
@@ -43,37 +42,34 @@ user-level.
    The installed copy is what runs. It is root-owned so the user cannot
    edit the daemon or client on disk. Update it by rerunning `install.sh`.
 
-4. **Writes the systemd user unit** at
-   `~/.config/systemd/user/mp35n.service`. It runs:
+4. **Removes the old user-level install**: disables the user unit and
+   deletes `~/.config/systemd/user/mp35n.service`,
+   `~/.local/share/dbus-1/services/org.freedesktop.secrets.service` and
+   `~/.config/mp35n/control.sock`. Anything running as you could edit
+   those, or the user manager's environment, and inject into the daemon.
 
-       ExecStart=/usr/bin/python3 -I /usr/local/lib/mp35n/mp35n daemon
-       Environment=PATH=/usr/bin:/bin
-       Restart=on-failure
-       RestartSec=2
+5. **Installs root-owned system units** into
+   `/usr/local/lib/systemd/system/`, generated for your user:
 
-   The unit is hardened without namespaces: `UMask=0077`,
-   `NoNewPrivileges=yes`, `RestrictNamespaces=yes`,
-   `SystemCallFilter=@system-service ~@privileged`,
-   `SystemCallArchitectures=native`, `RestrictAddressFamilies=AF_UNIX`,
-   `RestrictSUIDSGID=yes`, `RestrictRealtime=yes`, `LockPersonality=yes`,
-   `LimitCORE=0`. No `PrivateTmp`/`ProtectSystem`/`ProtectHome`/... : in a
-   user unit those imply a private user namespace, and the daemon could no
-   longer inspect Chrome or the portal through `/proc` (see SECURITY.md).
+   - `mp35n.socket`: PID 1 creates `/run/mp35n/control.sock` (socket owned
+     by you, mode 600) inside root-owned `/run/mp35n/`. A process running as
+     you cannot unlink it and plant a fake daemon to collect the password.
+   - `mp35n.service`: runs `/usr/bin/python3 -I
+     /usr/local/lib/mp35n/mp35n daemon` as `User=<you>` with a fixed
+     environment (`PATH`, `XDG_RUNTIME_DIR`, `DBUS_SESSION_BUS_ADDRESS` of
+     your session bus). Nothing from your session or user manager
+     (`environment.d`, `systemctl --user set-environment`) reaches it.
+     `BindsTo=user@<uid>.service`: it starts and stops with your user
+     manager, `Restart=always`.
 
-   It uses the absolute Python interpreter with `-I` (isolated mode) and a
-   fixed `PATH`, so a `python3` or module in `~/.local/bin` / user site is
-   not picked up by the daemon.
-
-5. **Writes the D-Bus activation file** at
-   `~/.local/share/dbus-1/services/org.freedesktop.secrets.service`:
-
-       [D-BUS Service]
-       Name=org.freedesktop.secrets
-       Exec=/usr/bin/python3 -I /usr/local/lib/mp35n/mp35n daemon
-
-   This lets the session bus start the daemon on demand. The daemon still
-   owns the name `org.freedesktop.secrets`, which is also the bus name the
-   portal backend descriptor points at.
+   Hardening: `UMask=0077`, `NoNewPrivileges`, empty capability sets,
+   `RestrictNamespaces`, `SystemCallFilter=@system-service ~@privileged`,
+   `RestrictAddressFamilies=AF_UNIX`, `RestrictSUIDSGID`,
+   `RestrictRealtime`, `LockPersonality`, `LimitCORE=0`. No
+   `PrivateTmp`/`ProtectSystem`/`ProtectHome`/...: those give the daemon
+   its own mount namespace, and it must share Chrome's to verify it. The
+   daemon makes itself non-dumpable at start, and refuses to run unless
+   it got its socket from systemd.
 
 6. **Overrides the Chrome desktop entry.** If the upstream file
    `/usr/share/applications/google-chrome.desktop` exists, `install.sh`
@@ -132,8 +128,9 @@ user-level.
 9. **Restarts `xdg-desktop-portal`.** The portal rereads the descriptor and
    `portals.conf`. Without this, Chrome can still get the old/no backend.
 
-10. **Starts the daemon.** It runs `systemctl --user daemon-reload`,
-    enables `mp35n.service`, and restarts it.
+10. **Starts the daemon.** `sudo systemctl daemon-reload`, enables and
+    restarts `mp35n.socket` and `mp35n.service`, waits for the daemon, then
+    restarts `xdg-desktop-portal` so it sees the backend on the bus.
 
 11. **Prints the installed paths** and tells you to run `35 init` (or
     `mp35n init`).
@@ -143,8 +140,9 @@ user-level.
     /usr/local/lib/mp35n/mp35n                  root-owned installed binary
     ~/.local/bin/mp35n                          symlink to the installed binary
     ~/.local/bin/35                             symlink to the installed binary
-    ~/.config/systemd/user/mp35n.service        user unit
-    ~/.local/share/dbus-1/services/org.freedesktop.secrets.service
+    /usr/local/lib/systemd/system/mp35n.socket  (root) control socket unit
+    /usr/local/lib/systemd/system/mp35n.service (root) daemon, runs as you
+    /run/mp35n/control.sock                     created by systemd at runtime
     ~/.local/share/applications/google-chrome.desktop   Chrome -> 35 run
     ~/.config/xdg-desktop-portal/portals.conf   Secret=mp35n
     /usr/share/xdg-desktop-portal/portals/mp35n.portal  (root)
@@ -164,7 +162,7 @@ waits for the portal delivery, and the vault locks itself after it.
 
 Check it:
 
-    journalctl --user -u mp35n -n 20 --no-pager
+    journalctl -u mp35n -n 20 --no-pager
     35 status
 
 Look for:
@@ -181,9 +179,8 @@ when Chrome asked.
 
 This:
 
-- stops and disables `mp35n.service`
-- removes the installed binary, unit, D-Bus activation file, `mp35n` and
-  `35` symlinks
+- stops and disables `mp35n.service` and `mp35n.socket`
+- removes the installed binary, system units, `mp35n` and `35` symlinks
 - removes the user-level `google-chrome.desktop` override
 - removes `/usr/share/.../mp35n.portal` with sudo
 - restarts `xdg-desktop-portal`
@@ -204,8 +201,8 @@ uninstall, point it at another backend or remove the line.
 - The desktop override is a copy of the upstream file at install time. It
   does not update itself when Chrome's package updates the system file;
   rerun `install.sh` to refresh it.
-- The unit and D-Bus activation file embed the interpreter and
-  `/usr/local/lib/mp35n/mp35n`. Moving the repo does not break the installed
+- The units embed the interpreter, `/usr/local/lib/mp35n/mp35n`, your user
+  name and uid. Moving the repo does not break the installed
   copy; rerun `install.sh` to update it from the repo.
 - `35 run` is the normal launch path. A terminal `google-chrome`, a direct
   `/opt/google/chrome/chrome`, or Chrome's own relaunch can bypass it.

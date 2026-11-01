@@ -49,7 +49,10 @@ from pathlib import Path
 APP = "mp35n"
 CONFIG_DIR = Path(os.environ.get("MP35N_CONFIG_DIR", str(Path.home() / ".config" / "mp35n")))
 VAULT_PATH = CONFIG_DIR / "vault.json"
-SOCK_PATH = CONFIG_DIR / "control.sock"
+# The control socket is created by systemd (mp35n.socket) in a root-owned
+# directory, so no process running as the user can unlink it and plant a
+# fake daemon that collects the master password. Never derived from env.
+SOCK_PATH = Path("/run/mp35n/control.sock")
 
 SERVICE_NAME = "org.freedesktop.secrets"
 SERVICE_PATH = "/org/freedesktop/secrets"
@@ -62,7 +65,7 @@ IF_PROPS = "org.freedesktop.DBus.Properties"
 
 PORTAL_PATH = "/org/freedesktop/portal/desktop"
 IF_PORTAL_SECRET = "org.freedesktop.impl.portal.Secret"
-# The portal frontend: must own org.freedesktop.portal.Desktop, run as this
+# The portal frontend: must own org.freedesktop.portal.Desktop, run in this
 # systemd user unit, and be one of these root-owned binaries.
 PORTAL_UNIT = "xdg-desktop-portal.service"
 PORTAL_BINARIES = ("/usr/libexec/xdg-desktop-portal",
@@ -1071,6 +1074,20 @@ def cmd_daemon(args):
     except Exception as e:
         die(f"daemon needs dbus-python and pygobject: {e}")
 
+    # Take the listening socket from systemd before anything else, so a copy
+    # started any other way (D-Bus activation, by hand) exits before it can
+    # grab the bus name.
+    srv = systemd_listen_socket()
+    if srv is None:
+        die("the daemon must be started by systemd "
+            "(sudo systemctl enable --now mp35n.socket mp35n.service)")
+
+    # Non-dumpable: same-uid processes cannot open /proc/<daemon>/fd/* or
+    # read its environ/maps. The daemon still reads its own /proc/self.
+    import ctypes
+    if ctypes.CDLL(None, use_errno=True).prctl(4, 0, 0, 0, 0) != 0:  # PR_SET_DUMPABLE
+        die("prctl(PR_SET_DUMPABLE, 0) failed")
+
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
 
     state = State()
@@ -1090,18 +1107,7 @@ def cmd_daemon(args):
     state.name_owned = True
     objects = build_dbus_objects(bus, state, verifier)
 
-    # --- control socket ---------------------------------------------------
-    ensure_dir()
-    try:
-        if SOCK_PATH.exists() or SOCK_PATH.is_socket():
-            SOCK_PATH.unlink()
-    except OSError:
-        pass
-
-    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    srv.bind(str(SOCK_PATH))
-    os.chmod(SOCK_PATH, 0o600)
-    srv.listen(16)
+    # --- control socket (from mp35n.socket) -------------------------------
     srv.setblocking(False)
     state.srv = srv
 
@@ -1162,11 +1168,20 @@ def cmd_daemon(args):
         loop.run()
     finally:
         state.wipe()
-        try:
-            SOCK_PATH.unlink()
-        except OSError:
-            pass
     return 0
+
+
+def systemd_listen_socket():
+    """The control socket passed by mp35n.socket (fd 3), or None."""
+    if (os.environ.get("LISTEN_PID") != str(os.getpid())
+            or os.environ.get("LISTEN_FDS") != "1"):
+        return None
+    for k in ("LISTEN_PID", "LISTEN_FDS", "LISTEN_FDNAMES"):
+        os.environ.pop(k, None)
+    srv = socket.socket(fileno=3)
+    if srv.family != socket.AF_UNIX or srv.getsockname() != str(SOCK_PATH):
+        die(f"fd 3 is not {SOCK_PATH}")
+    return srv
 
 
 # --------------------------------------------------------------------------
@@ -1194,19 +1209,12 @@ def daemon_call(req, timeout=10.0):
 
 
 def try_start_daemon():
-    """Best-effort: start the systemd user unit and wait for the socket."""
-    if daemon_call({"cmd": "ping"}, timeout=0.5) is not None:
-        return True
-    try:
-        subprocess.run(["systemctl", "--user", "start", "mp35n.service"],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                       timeout=5)
-    except Exception:
-        pass
-    for _ in range(50):
-        if SOCK_PATH.exists() and daemon_call({"cmd": "ping"}, timeout=0.5) is not None:
+    """The daemon is socket-activated by systemd: connecting starts it.
+    Retry briefly in case it is (re)starting."""
+    for _ in range(30):
+        if daemon_call({"cmd": "ping"}, timeout=2) is not None:
             return True
-        time.sleep(0.1)
+        time.sleep(0.2)
     return False
 
 
@@ -1216,7 +1224,7 @@ def require_daemon():
         try_start_daemon()
         r = daemon_call({"cmd": "ping"})
     if r is None:
-        die("daemon is not running (try: systemctl --user start mp35n)")
+        die("daemon is not running (try: sudo systemctl start mp35n.socket mp35n.service)")
     return r
 
 
@@ -1827,7 +1835,7 @@ def cmd_run(args):
     elif refused:
         daemon_call({"cmd": "lock"})
         notify(f"PORTAL REFUSED ({refused}). Chrome is writing UNPROTECTED v10 "
-               "cookies. Quit Chrome and check 'journalctl --user -u mp35n'.")
+               "cookies. Quit Chrome and check 'journalctl -u mp35n'.")
     elif proc.poll() is not None:
         daemon_call({"cmd": "lock"})  # exited without asking for the key
     else:

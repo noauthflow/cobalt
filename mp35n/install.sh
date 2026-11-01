@@ -1,15 +1,25 @@
 #!/bin/bash
-# mp35n — install the Chrome cookie keyring CLI + systemd user unit
-#   ./install.sh            install root-owned binary + symlinks + unit + dbus activation + portal descriptor, start
-#   ./install.sh uninstall  stop/disable service, remove binary + unit + symlinks + portal descriptor
+# mp35n — install the Chrome cookie keyring CLI + root-owned systemd system units
+#   ./install.sh            install root-owned binary + units + portal descriptor, user symlinks + desktop entry, start
+#   ./install.sh uninstall  stop/disable units, remove binary + units + symlinks + portal descriptor
 set -euo pipefail
 cd "$(dirname "$0")"
 
 NAME="mp35n"
 BIN="$HOME/.local/bin/$NAME"
 ALIAS="$HOME/.local/bin/35"
-UNIT="$HOME/.config/systemd/user/$NAME.service"
-DBUS="$HOME/.local/share/dbus-1/services/org.freedesktop.secrets.service"
+# root-owned system units: PID 1 runs the daemon as you with a fixed
+# environment, and creates the control socket in root-owned /run/mp35n/
+SYSUNITDIR="/usr/local/lib/systemd/system"
+SYSUNIT="$SYSUNITDIR/$NAME.service"
+SYSSOCK="$SYSUNITDIR/$NAME.socket"
+# left over from the old user-unit install; removed on install
+OLD_UNIT="$HOME/.config/systemd/user/$NAME.service"
+OLD_DBUS="$HOME/.local/share/dbus-1/services/org.freedesktop.secrets.service"
+OLD_SOCK="$HOME/.config/mp35n/control.sock"
+USER_NAME="$(id -un)"
+USER_GROUP="$(id -gn)"
+USER_UID="$(id -u)"
 DESKTOP="$HOME/.local/share/applications/google-chrome.desktop"
 OLD_DESKTOP="$HOME/.local/share/applications/mp35n-chrome.desktop"
 PORTAL_DEST="/usr/share/xdg-desktop-portal/portals/mp35n.portal"
@@ -18,15 +28,18 @@ LIBDIR="/usr/local/lib/mp35n"
 LIB="$LIBDIR/mp35n"
 
 if [[ "${1:-}" == "uninstall" ]]; then
+  sudo systemctl disable --now "$NAME.service" "$NAME.socket" 2>/dev/null || true
+  sudo rm -f "$SYSUNIT" "$SYSSOCK"
+  sudo systemctl daemon-reload
   systemctl --user disable --now "$NAME.service" 2>/dev/null || true
-  rm -f "$UNIT" "$DBUS" "$ALIAS" "$BIN" "$DESKTOP" "$OLD_DESKTOP"
+  rm -f "$OLD_UNIT" "$OLD_DBUS" "$OLD_SOCK" "$ALIAS" "$BIN" "$DESKTOP" "$OLD_DESKTOP"
   sudo rm -f "$LIB"
   sudo rmdir "$LIBDIR" 2>/dev/null || true
   sudo rm -f "$PORTAL_DEST"
   systemctl --user restart xdg-desktop-portal.service 2>/dev/null || true
   systemctl --user daemon-reload 2>/dev/null || true
   update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
-  echo "uninstalled: code, unit, dbus activation, $ALIAS, $BIN, $DESKTOP, portal descriptor removed"
+  echo "uninstalled: code, system units, $ALIAS, $BIN, $DESKTOP, portal descriptor removed"
   echo "note: vault kept in ~/.config/mp35n/ — delete it manually to wipe the key"
   exit 0
 fi
@@ -39,31 +52,63 @@ PYTHON="$(command -v python3)" || { echo "python3 is required"; exit 1; }
 
 sudo install -D -m 0755 -o root -g root "$PWD/$NAME" "$LIB"
 
-mkdir -p "$HOME/.local/bin" "$(dirname "$UNIT")" "$(dirname "$DBUS")" \
-         "$HOME/.config/mp35n"
+mkdir -p "$HOME/.local/bin" "$HOME/.config/mp35n"
 chmod 700 "$HOME/.config/mp35n"
 
 # the running copy is root-owned; ~/.local/bin holds symlinks to it
 ln -sfn "$LIB" "$BIN"
 ln -sfn "$LIB" "$ALIAS"
 
-cat > "$UNIT" <<EOF
+# migrate off the old user unit: it ran under your user manager, whose
+# environment (and unit file) any process running as you can change
+systemctl --user disable --now "$NAME.service" 2>/dev/null || true
+rm -f "$OLD_UNIT" "$OLD_DBUS" "$OLD_SOCK"
+systemctl --user daemon-reload 2>/dev/null || true
+
+TMPD="$(mktemp -d)"
+trap 'rm -rf "$TMPD"' EXIT
+
+cat > "$TMPD/$NAME.socket" <<EOF
 [Unit]
-Description=mp35n master-password keyring
-After=dbus-broker.service dbus.service
+Description=mp35n control socket for $USER_NAME
+
+[Socket]
+ListenStream=/run/mp35n/control.sock
+SocketUser=$USER_NAME
+SocketGroup=$USER_GROUP
+SocketMode=0600
+DirectoryMode=0755
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target
+EOF
+
+cat > "$TMPD/$NAME.service" <<EOF
+[Unit]
+Description=mp35n master-password keyring for $USER_NAME
+Requires=$NAME.socket
+After=$NAME.socket user@$USER_UID.service
+BindsTo=user@$USER_UID.service
+StartLimitIntervalSec=0
 
 [Service]
+User=$USER_NAME
+Group=$USER_GROUP
 ExecStart=$PYTHON -I $LIB daemon
+# fixed environment: nothing from your session or user manager leaks in
 Environment=PATH=/usr/bin:/bin
-Restart=on-failure
+Environment=XDG_RUNTIME_DIR=/run/user/$USER_UID
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$USER_UID/bus
+Restart=always
 RestartSec=2
-# No PrivateTmp/ProtectSystem/ProtectHome/PrivateDevices/ProtectKernel*/
-# ProtectControlGroups: in a *user* unit each of those implies a private
-# user namespace, and from inside it the kernel denies /proc/<pid>/exe,
-# fd/, environ of Chrome and the portal -- which the daemon must inspect
-# before handing out the key. Only seccomp/no-namespace hardening here.
+# No PrivateTmp/ProtectSystem/ProtectHome/PrivateDevices/ProtectKernel*:
+# each gives the daemon its own mount namespace, and it must share Chrome's
+# to verify it (verify_chrome_process compares namespaces).
 UMask=0077
 NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
 RestrictAddressFamilies=AF_UNIX
 RestrictSUIDSGID=yes
 LockPersonality=yes
@@ -75,14 +120,11 @@ SystemCallFilter=~@privileged
 LimitCORE=0
 
 [Install]
-WantedBy=default.target
+WantedBy=user@$USER_UID.service
 EOF
 
-cat > "$DBUS" <<EOF
-[D-BUS Service]
-Name=org.freedesktop.secrets
-Exec=$PYTHON -I $LIB daemon
-EOF
+sudo install -D -m 0644 -o root -g root "$TMPD/$NAME.socket" "$SYSSOCK"
+sudo install -D -m 0644 -o root -g root "$TMPD/$NAME.service" "$SYSUNIT"
 
 # desktop entry: overrides the upstream google-chrome.desktop (same file
 # name, higher priority dir), so every launch path — rofi, menus, xdg-open,
@@ -116,17 +158,24 @@ elif grep -q '^org\.freedesktop\.impl\.portal\.Secret=' "$PORTAL_CONF"; then
 else
   echo "warning: set 'org.freedesktop.impl.portal.Secret=mp35n;' in $PORTAL_CONF"
 fi
-systemctl --user restart xdg-desktop-portal.service 2>/dev/null || true
 
-systemctl --user daemon-reload
-systemctl --user enable --now "$NAME.service"
-systemctl --user restart "$NAME.service"
+sudo systemctl daemon-reload
+sudo systemctl enable "$NAME.socket" "$NAME.service"
+sudo systemctl restart "$NAME.socket"
+sudo systemctl restart "$NAME.service"
+for _ in $(seq 1 50); do
+  rc=0; "$LIB" status >/dev/null 2>&1 || rc=$?
+  [[ $rc -le 1 ]] && break   # 0 unlocked, 1 locked, 2 no daemon yet
+  sleep 0.2
+done
+# the portal must see the daemon on the bus
+systemctl --user restart xdg-desktop-portal.service 2>/dev/null || true
 
 echo "installed: $BIN -> $LIB"
 echo "alias:     $ALIAS -> $LIB"
 echo "binary:    $LIB (root-owned)"
-echo "unit:      $UNIT"
-echo "dbus:      $DBUS"
+echo "units:     $SYSSOCK, $SYSUNIT (root-owned, runs as $USER_NAME)"
+echo "socket:    /run/mp35n/control.sock"
 echo "desktop:   $DESKTOP (menu/rofi entry -> 35 run)"
 echo "portal:    $PORTAL_DEST"
 echo

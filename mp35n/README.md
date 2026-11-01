@@ -29,7 +29,7 @@ See [INSTALL.md](INSTALL.md) for exactly what `install.sh` creates, and
 
 Needs python 3.8+, `dbus-python`, `PyGObject` with GTK4 + libadwaita
 (`gir1.2-gtk-4.0`, `gir1.2-adw-1`), `cryptography`, `xdg-desktop-portal`, and
-a systemd user session. sudo is used for the root-owned binary and the
+systemd. sudo is used for the root-owned binary, the system units and the
 portal descriptor.
 
 ## commands
@@ -56,7 +56,7 @@ only works with the same `vault.json`.
     password --scrypt--> KEK --AES-256-GCM--> 32-byte secret   (~/.config/mp35n/vault.json)
     secret --portal fd--> Chrome (needs SecretPortalKeyProviderUseForEncryption) --> AES-256-GCM --> v12 cookies
 
-The daemon runs as a systemd user unit and writes the secret into the pipe
+The daemon runs as a root-owned systemd system service under your uid and writes the secret into the pipe
 the portal hands it, but only if the read end of that pipe is held by
 exactly the Chrome process `35 run` launched and authorized with the
 one-time token from the unlock, and that process is the root-owned
@@ -65,7 +65,7 @@ environment. See [SECURITY.md](SECURITY.md) for every check. The legacy
 `org.freedesktop.secrets` name never returns the secret.
 
 `35` talks to the daemon over a private unix socket
-(`~/.config/mp35n/control.sock`, mode 600): status, unlock (password), lock.
+(`/run/mp35n/control.sock`, created by systemd in a root-owned directory): status, unlock (password), lock.
 Without a TTY the password prompt is a native GTK4 + libadwaita dialog; there
 are no zenity/rofi/askpass fallbacks. The dialog shows the fixed codeword
 `KANEKI` above the password field. It is a label, not a trust boundary.
@@ -75,8 +75,8 @@ are no zenity/rofi/askpass fallbacks. The dialog shows the fixed codeword
     ~/.config/mp35n/vault.json    scrypt salt/nonce + AES-GCM secret (0600)
     /usr/local/lib/mp35n/mp35n    root-owned installed binary
     ~/.local/bin/mp35n, 35        symlinks to the installed binary
-    ~/.config/systemd/user/mp35n.service
-    ~/.local/share/dbus-1/services/org.freedesktop.secrets.service
+    /usr/local/lib/systemd/system/mp35n.{socket,service}   root-owned units
+    /run/mp35n/control.sock       control socket (systemd-created)
     ~/.local/share/applications/google-chrome.desktop   -> 35 run
     /usr/share/xdg-desktop-portal/portals/mp35n.portal
     ~/.config/xdg-desktop-portal/portals.conf
