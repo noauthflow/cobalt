@@ -1,91 +1,120 @@
 # mp35n security notes
 
-The real weakness is not the crypto, it is the trust boundary: mp35n is a
-user-level keyring, so anything running as your user can beat it. I
-demonstrated one concrete path — `~/.config/mp35n/config.json` (the Chrome
-pin) is user-writable, so a same-user process can repoint it at any
-root-owned binary (e.g. `/usr/bin/python3`), call the daemon while the vault
-is unlocked, and receive the 32-byte secret; every `v11` cookie then
-decrypts. The same ownership problem applies to `~/.local/bin/mp35n`, the
-systemd user unit, and the D-Bus activation file: malware can rewrite the
-client, capture the master password at unlock, or replace the control
-socket. Root is worse — root can read the daemon's memory, ptrace it, or
-keylog the password, so no user-level design survives root. The vault is
-also only as strong as scrypt + your password (~0.1 s per guess at the
-current parameters), so weak or dictionary passwords are offline-crackable.
-Finally, `v10` cookies are still readable with the public "peanuts" key, and
-Chrome caches the key for its own lifetime: locking does not revoke it from
-a running browser, and a browser started while locked drops all `v11`
-cookies. Bottom line: mp35n protects against other keyring clients and
-at-rest theft while locked. It is not a boundary against same-user code
-execution or root.
+mp35n is a user-level vault for Chrome's cookie key. It protects the key at
+rest and keeps it away from ordinary D-Bus traffic. It is not a boundary
+against code running as you, root, or a kernel that lets another process
+read your memory.
 
-## convenience
+## what it protects
 
-Unlocking is a manual step, and the failure is silent and destructive: if
-Chrome starts while the vault is locked it cannot decrypt `v11` cookies, so
-it drops them and starts writing new ones as `v10`. The only recovery is to
-restore `google-chrome/Default/Cookies` from the git repo and relaunch with
-the vault unlocked — and that only works if the vault is the same one those
-cookies were encrypted with. Keeping the cookie snapshot in git current is
-also manual and annoying: you have to quit Chrome, copy/commit the DB, and
-remember that `Cookies` and `vault.json` are a pair.
+- The 32-byte key is encrypted at rest under your master password
+  (`scrypt` + AES-256-GCM). Stealing `vault.json` alone does not reveal it.
+- Other users cannot read the vault or the daemon's memory.
+- Non-Chrome clients cannot get the key through mp35n's bus interfaces.
+  The portal backend verifies that the caller owns
+  `org.freedesktop.portal.Desktop`, that its executable is the root-owned
+  `xdg-desktop-portal`, and that the portal passed a Chrome app ID
+  (`com.google.Chrome`, `google-chrome`, `google-chrome-stable`, or
+  `chrome`).
+- The legacy `org.freedesktop.secrets` interface is present but
+  `OpenSession` always fails and `GetSecret`/`GetSecrets` are gone. No D-Bus
+  method returns the key.
+- The portal path writes the key into Chrome's file descriptor, so the
+  secret is not in a D-Bus message body. A bus monitor sees the
+  `RetrieveSecret` call, the app ID, and a FIFO fd; it does not see
+  plaintext or ciphertext.
 
-Chrome updates add a second, sneakier path to the same failure. The daemon
-pins Chrome by sha256; after an update the hash no longer matches and every
-call is denied — even when the vault is unlocked and everything was done
-right. Chrome then falls back to `v10`, and every `v11` cookie is lost
-again, this time without any locked-launch mistake to blame. `35 trust`
-prevents it, but only if it runs before the first launch after the update,
-and nobody remembers that. A launch wrapper therefore has to close this
-case itself: check the pinned hash against the binary about to run, and
-re-pin if it changed, *before* unlocking — otherwise the unlock is wasted
-on a launch that is going to be denied anyway. Auto-repin is safe here
-because the hash being pinned is the exact root-owned binary the user just
-chose to launch: it is the same trust decision `35 trust` makes, just one
-that cannot be forgotten. One residual hole is not worth engineering
-around: if Chrome restarts itself mid-session after an in-place update,
-the binary changed under a running browser. The `v11` key is already
-delivered at that point and this does not drop cookies; the next launch
-simply goes through the wrapper and re-pins.
+## what it does not protect
 
-A launch guard would fix both failures — e.g. a wrapper that checks the
-pinned hash, refuses to start Chrome while the vault is locked (or
-re-pins and unlocks as above), and only then execs Chrome. The trade-off
-is friction: it has to intercept whatever
-launches Chrome (desktop entry, keybind, `google-chrome` in a terminal) and
-a hardcoded wrapper is easy to bypass, or to find annoying on the day you
-just want a browser. Middle ground: set Chrome's startup to **New Tab**
-rather than restoring tabs (a restored tab can show a cached logged-out
-page even when the cookies are fine), and make `35 unlock` the first thing
-you run after login. A `35 run`-style guard is worth it only if the wrapper
-is the normal way Chrome is launched, not a thing you fight with `pkill`
-and a terminal.
+Same-user code can beat a user-level keyring. In particular:
 
-The bigger reason for a real run command is not the locked-launch or
-stale-pin bugs, it is the unlocked window: while the vault is open, any process can start the
-pinned Chrome with a copied profile and ask *Chrome* to decrypt. So the
-unlock should exist only for the few seconds Chrome needs to fetch the key.
-The right shape is a `35 run` that re-pins Chrome if the binary hash
-changed, unlocks (prompting if needed), starts Chrome, waits until the
-daemon confirms the key was delivered to the verified Chrome PID, and
-locks immediately — then exits, leaving Chrome running with its cached key.
-The re-pin has to come before the unlock so a post-update launch can never
-spend an unlock on a denied secret; with it, `35 run` also fixes the
-update-loses-cookies failure for free, which is a bigger everyday win than
-the lock-tightening itself. The guard must be launchable from anywhere,
-not just a terminal — a .desktop entry, rofi, or a niri spawn bind — so
-the password prompt is native GTK when there is no TTY (no zenity, rofi,
-or askpass fallbacks) and messages go out as desktop notifications. The
-prompt shows the fixed codeword `KANEKI`, which is a label, not a
-same-user boundary. Same command, same behavior,
-whatever launches it. If delivery is never confirmed but Chrome is still
-running, the vault stays unlocked and says so: that beats silently
-pushing Chrome to `v10`, which is the exact disaster this exists to
-prevent. A daemon-side note records every successful delivery, so the
-confirmation is real, not assumed. That turns a session-long exposure into a
-sub-second one. It needs to be the normal launch path (desktop entry and
-keybind, not just a terminal), and it is still only a guard: calling the
-binary directly bypasses it. But it is the difference between "unlocked all
-day" and "unlocked for one second per browser launch", which is the part
-that actually matters against a generic Chrome-aware stealer.
+- **The pin is user-writable.** `~/.config/mp35n/config.json` can be
+  repointed at another root-owned binary; `35 run` will silently re-pin it
+  and launch it. The daemon's legacy D-Bus methods then trust that binary.
+- **The client and unit are user-writable.** `~/.local/bin/35`, this source
+  tree, the systemd user unit, and the D-Bus activation file can be
+  rewritten. Malware can capture the master password at unlock or replace
+  the control socket.
+- **The control socket trusts the uid.** `~/.config/mp35n/control.sock` is
+  mode 600, but it only checks `SO_PEERCRED` uid. Any process as you can
+  lock the vault, spam unlock attempts, or read status.
+- **The portal config is user-writable.** `portals.conf` decides which
+  backend handles `org.freedesktop.impl.portal.Secret`. Malware can point it
+  at another backend, remove mp35n, or cause a downgrade. That does not
+  decrypt old `v11` cookies without the old key, but new cookies could be
+  written under a key the attacker knows.
+- **`install.sh` is user-writable and uses sudo** for the portal
+  descriptor. If it or `mp35n.portal` is modified before you run it, you
+  install the modified file as root. Run the install from a trusted
+  checkout.
+- **The installed portal descriptor is root-owned, but the source is not.**
+  The `.portal` file in `/usr/share` is the trusted copy; the repo copy is
+  what `install.sh` installs.
+- **Memory and at-rest copies.** The daemon holds the key in Python
+  memory while unlocked. Core dumps, swap/hibernation, and Chrome's cached
+  key are outside the vault. `ptrace_scope=2` and encrypted swap help, but
+  are not part of mp35n.
+- **A fake Chrome while unlocked.** Anything running as you can launch the
+  real Chrome binary with a copied profile and ask for the key. The portal
+  app ID is the only gate; `35 run` narrows the window but cannot stop a
+  direct launch.
+- **A direct launch bypasses the wrapper.** The desktop entry points at
+  `35 run`, but a terminal, `pkill`/relaunch, or Chrome's own restart can
+  bypass it. A locked launch makes Chrome fall back to `v10`.
+- **Chrome caches the key for its lifetime.** Locking the vault does not
+  revoke it from a running browser.
+- **`v10` cookies are public.** They are readable with the `"peanuts"`
+  key. mp35n only helps when Chrome is writing `v11`.
+- **Offline guessing.** `scrypt` is `N=2^15, r=8, p=1` (about 80 ms and
+  32 MiB per guess here). A weak or dictionary master password is
+  crackable from `vault.json`. There is no key stretching beyond that and
+  no password-change command; reinit generates a new secret and loses the
+  old cookies.
+- **Root.** Root can read the daemon's memory, ptrace it, keylog the
+  password, replace the binary, or edit any of the above. Root wins.
+
+## portal-specific notes
+
+The portal frontend is the identity authority. It passes an app ID to the
+backend; mp35n accepts only Chrome IDs. For an un-sandboxed Chrome the
+portal reported `com.google.Chrome`. If a Chrome update changes the app ID,
+the backend returns failure and Chrome falls back to `v10`; check
+`journalctl --user -u mp35n` for `portal deny app_id=...`.
+
+`35 status` shows the last portal delivery time, not proof that the current
+Chrome launch succeeded. The reliable signals are:
+
+    journalctl --user -u mp35n -n 20 --no-pager
+    journalctl --user -u xdg-desktop-portal -n 20 --no-pager
+    35 status
+
+Look for `portal secret delivered app_id='com.google.Chrome'`. If you see
+`portal request while locked` or `portal deny app_id=...`, Chrome did not
+get the key from mp35n.
+
+The portal fd is a FIFO write end. A D-Bus monitor sees the fd number and
+inode, not the secret. A same-user process with ptrace or `/proc/<pid>/fd`
+access is a different boundary; `kernel.yama.ptrace_scope=2` blocks
+non-root ptrace and is recommended.
+
+## the run guard
+
+`35 run` re-pins Chrome if the binary hash changed, unlocks if needed,
+launches Chrome, waits up to 20 seconds for a portal delivery, then locks.
+The re-pin happens before the unlock so a post-update launch does not waste
+an unlock. If delivery is not confirmed and Chrome is still running, the
+vault stays unlocked and says so; locking would silently push Chrome to
+`v10`. That trade-off is deliberate.
+
+The guard only works if it is the normal launch path. The desktop entry
+override points at it; terminal launches and direct binary launches do not.
+The desktop override is a copy of the upstream file with the `Exec=` paths
+rewritten; if upstream changes its `Exec=` form, the copy may not match and
+the wrapper can be bypassed.
+
+## bottom line
+
+mp35n is at-rest protection, plus a short unlocked window, plus an fd-based
+delivery that keeps the key off the bus. It is not a sandbox. If you need a
+real boundary, run Chrome under a different uid, a VM, or a sandbox with its
+own portal identity.
