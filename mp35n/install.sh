@@ -29,6 +29,9 @@ PORTAL_DEST="/usr/share/xdg-desktop-portal/portals/mp35n.portal"
 PORTAL_CONF="$HOME/.config/xdg-desktop-portal/portals.conf"
 LIBDIR="/usr/local/lib/mp35n"
 LIB="$LIBDIR/mp35n"
+# lets the daemon (running as you) freeze/thaw your login session scopes
+# during a key delivery; your user@ cgroups it freezes directly
+POLKIT_RULE="/etc/polkit-1/rules.d/50-mp35n.rules"
 
 if [[ "${1:-}" == "uninstall" ]]; then
   sudo systemctl disable --now "$NAME.service" "$NAME.socket" \
@@ -39,7 +42,7 @@ if [[ "${1:-}" == "uninstall" ]]; then
   rm -f "$OLD_UNIT" "$OLD_DBUS" "$OLD_SOCK" "$ALIAS" "$BIN" "$DESKTOP" "$OLD_DESKTOP"
   sudo rm -f "$LIB"
   sudo rmdir "$LIBDIR" 2>/dev/null || true
-  sudo rm -f "$PORTAL_DEST"
+  sudo rm -f "$PORTAL_DEST" "$POLKIT_RULE"
   systemctl --user restart xdg-desktop-portal.service 2>/dev/null || true
   systemctl --user daemon-reload 2>/dev/null || true
   update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
@@ -131,6 +134,22 @@ EOF
 sudo systemctl disable --now "$NAME-vault.service" "$NAME-vault.socket" 2>/dev/null || true
 sudo rm -f "$VAULTUNIT" "$VAULTSOCK"
 
+# Login session scopes (TTY/ssh: session-N.scope) are root-owned cgroups, so
+# the daemon freezes them through systemd. Only session scopes, only for
+# $USER_NAME. Not limited by verb: you can already end your own sessions
+# (loginctl terminate-session), so stop/kill here gives nothing new.
+cat > "$TMPD/50-mp35n.rules" <<EOF
+// mp35n: freeze/thaw login session scopes during a cookie-key delivery
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.systemd1.manage-units" &&
+        subject.user == "$USER_NAME" &&
+        /^session-[0-9]+\\.scope\$/.test(action.lookup("unit") || "")) {
+        return polkit.Result.YES;
+    }
+});
+EOF
+sudo install -D -m 0644 -o root -g root "$TMPD/50-mp35n.rules" "$POLKIT_RULE"
+
 sudo install -D -m 0644 -o root -g root "$TMPD/$NAME.socket" "$SYSSOCK"
 sudo install -D -m 0644 -o root -g root "$TMPD/$NAME.service" "$SYSUNIT"
 
@@ -187,5 +206,6 @@ echo "vault:     ~/.config/35vault.json"
 echo "socket:    /run/mp35n/control.sock"
 echo "desktop:   $DESKTOP (menu/rofi entry -> 35 run)"
 echo "portal:    $PORTAL_DEST"
+echo "polkit:    $POLKIT_RULE (freeze/thaw session scopes during delivery)"
 echo
 echo "next: 35 init   to create the vault"

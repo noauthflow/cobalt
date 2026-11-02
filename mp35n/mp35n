@@ -339,6 +339,359 @@ def pipe_readers(fd):
     return readers, hidden
 
 
+# --------------------------------------------------------------------------
+# delivery freeze
+#
+# Any process running as you can open /proc/<chrome>/fd/N (or the portal's
+# or bus's copy of the pipe) and read the key while it sits in the pipe.
+# So for the few milliseconds of a delivery every other process of yours is
+# frozen (cgroup v2 freezer): a frozen process cannot run, so it cannot open
+# or read anything. Only Chrome's own scope, the portal frontend and the
+# session bus keep running (the key has to pass through them), and each of
+# their processes is checked. The key is written, the daemon waits until
+# Chrome has read every byte, then thaws. A frozen process that opened the
+# pipe earlier finds it empty when it wakes up.
+# --------------------------------------------------------------------------
+
+CG_ROOT = "/sys/fs/cgroup"
+BUSCTL = "/usr/bin/busctl"
+SYSTEMD_RUN = "/usr/bin/systemd-run"
+CHROME_SCOPE_PREFIX = "mp35n-chrome-"
+# Chrome moves its browser process into a scope of its own (the portal reads
+# the app ID from that name); its children stay in the mp35n-chrome scope.
+CHROME_OWN_SCOPE = "app-com.google.Chrome-{pid}.scope"
+# Chrome's crash reporter double-forks, so it is not Chrome's descendant.
+CHROME_HELPERS = ("/opt/google/chrome/chrome_crashpad_handler",)
+BUS_UNITS = {"dbus-broker.service": ("/usr/bin/dbus-broker-launch",
+                                      "/usr/bin/dbus-broker"),
+             "dbus.service": ("/usr/bin/dbus-daemon",)}
+# Variables that load foreign code into the portal or the bus daemon.
+INJECT_ENV_BLOCK = ("LD_", "GLIBC_TUNABLES", "MALLOC_", "GCONV_PATH",
+                    "GIO_EXTRA_MODULES", "GIO_MODULE_DIR", "GTK_MODULES",
+                    "GTK3_MODULES", "GTK_PATH", "GDK_PIXBUF_MODULE",
+                    "G_SLICE", "G_DEBUG")
+FREEZE_TIMEOUT = 2.0    # s until every frozen cgroup reports frozen
+DRAIN_TIMEOUT = 5.0     # s for Chrome to read the key before we thaw anyway
+WATCHDOG = 10.0         # s hard limit: thaw from a thread no matter what
+
+
+def user_cg_root():
+    uid = os.getuid()
+    return f"/user.slice/user-{uid}.slice"
+
+
+def user_manager_cg():
+    uid = os.getuid()
+    return f"{user_cg_root()}/user@{uid}.service"
+
+
+def proc_cgroup(pid):
+    with open(f"/proc/{pid}/cgroup") as f:
+        for line in f:
+            if line.startswith("0::"):
+                return line[3:].rstrip("\n")
+    raise OSError(f"pid {pid} has no cgroup v2 entry")
+
+
+def proc_ppid(pid):
+    with open(f"/proc/{pid}/stat") as f:
+        return int(f.read().rsplit(")", 1)[1].split()[1])
+
+
+def is_descendant(pid, root):
+    for _ in range(128):
+        if pid == root:
+            return True
+        if pid <= 1:
+            return False
+        pid = proc_ppid(pid)
+    return False
+
+
+def cg_procs(cg):
+    try:
+        with open(f"{CG_ROOT}{cg}/cgroup.procs") as f:
+            return [int(x) for x in f.read().split()]
+    except FileNotFoundError:
+        return []
+
+
+def cg_frozen(cg):
+    try:
+        with open(f"{CG_ROOT}{cg}/cgroup.events") as f:
+            return any(l.split() == ["frozen", "1"] for l in f)
+    except OSError:
+        return False
+
+
+def cg_freeze_flag(cg):
+    try:
+        with open(f"{CG_ROOT}{cg}/cgroup.freeze") as f:
+            return f.read().strip() == "1"
+    except OSError:
+        return False
+
+
+def cg_children(cg):
+    try:
+        return sorted(f"{cg}/{e.name}" for e in os.scandir(f"{CG_ROOT}{cg}")
+                      if e.is_dir(follow_symlinks=False))
+    except OSError:
+        return []
+
+
+def cg_walk(cg):
+    yield cg
+    for c in cg_children(cg):
+        yield from cg_walk(c)
+
+
+def cg_write_freeze(cg, value):
+    with open(f"{CG_ROOT}{cg}/cgroup.freeze", "w") as f:
+        f.write("1" if value else "0")
+
+
+def session_scopes():
+    """Login session scopes (root-owned; frozen via systemd + polkit)."""
+    return [c for c in cg_children(user_cg_root())
+            if c.rsplit("/", 1)[-1].startswith("session-")
+            and c.endswith(".scope")]
+
+
+def systemctl_freezer(verb, unit):
+    """FreezeUnit/ThawUnit on the system manager (polkit: 50-mp35n.rules).
+    Not `systemctl freeze`: that also takes a unit reference (Ref), which
+    needs a second authorization. The reply comes once the unit is frozen."""
+    method = {"freeze": "FreezeUnit", "thaw": "ThawUnit"}[verb]
+    r = subprocess.run([BUSCTL, "--system", "--timeout=5", "call",
+                        "org.freedesktop.systemd1", "/org/freedesktop/systemd1",
+                        "org.freedesktop.systemd1.Manager", method, "s", unit],
+                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.PIPE, timeout=FREEZE_TIMEOUT + 3,
+                       env={"PATH": "/usr/bin:/bin", "LANG": "C"})
+    if r.returncode != 0:
+        raise OSError(r.stderr.decode(errors="replace").strip()
+                      or f"{method} {unit} failed")
+
+
+def proc_uid_match(pid, uid):
+    try:
+        return str(uid) in read_proc_status(pid).get("Uid", [])
+    except OSError:
+        return False
+
+
+def read_environ_names(pid):
+    with open(f"/proc/{pid}/environ", "rb") as f:
+        return [item.partition(b"=")[0].decode("utf-8", "surrogateescape")
+                for item in f.read().split(b"\0") if item]
+
+
+def verify_helper_process(pid, binaries):
+    """None if pid runs one of the root-owned binaries with no code-loading
+    environment and is not traced. Else a reason."""
+    try:
+        exe = os.readlink(f"/proc/{pid}/exe")
+    except OSError as e:
+        return f"cannot inspect pid {pid}: {e}"
+    if exe not in binaries:
+        return f"pid {pid} runs {exe!r}"
+    why = trusted_path(exe)
+    if why:
+        return f"pid {pid}: {why}"
+    try:
+        if read_proc_status(pid).get("TracerPid", ["0"])[0] != "0":
+            return f"pid {pid} is being traced"
+        bad = sorted(k for k in read_environ_names(pid)
+                     if k.startswith(INJECT_ENV_BLOCK))
+    except OSError as e:
+        return f"cannot inspect pid {pid}: {e}"
+    if bad:
+        return f"pid {pid} ({exe}) has {', '.join(bad)} in its environment"
+    return None
+
+
+class DeliveryFreeze:
+    """Freeze every process of this uid except Chrome's scope, the portal
+    frontend and the session bus; audit what is left running; thaw."""
+
+    def __init__(self, chrome_pid, portal_pid, launch_scope):
+        self.uid = os.getuid()
+        self.chrome_pid = chrome_pid
+        self.launch_scope = launch_scope   # cgroup `35 run` started Chrome in
+        self.portal_pid = portal_pid
+        self.frozen_cgs = []       # we wrote cgroup.freeze=1 here
+        self.frozen_units = []     # we ran `systemctl freeze` on these
+        self.exempt = {}           # cgroup -> "chrome" | binaries tuple
+        self.started = None
+        self._thawed = False
+        import threading
+        self._lock = threading.Lock()
+
+    # -- exempt set ---------------------------------------------------------
+
+    def _find_exempt(self):
+        mgr = user_manager_cg()
+        apps = f"{mgr}/app.slice"
+        own = f"{apps}/{CHROME_OWN_SCOPE.format(pid=self.chrome_pid)}"
+        launch = self.launch_scope
+        if (not launch or launch.rsplit("/", 1)[0] != apps
+                or not launch.rsplit("/", 1)[-1].startswith(CHROME_SCOPE_PREFIX)
+                or not launch.endswith(".scope")):
+            return (f"Chrome was not started in its own {CHROME_SCOPE_PREFIX}*"
+                    f".scope (got {launch!r}); start it with '35 run'")
+        chrome_cg = proc_cgroup(self.chrome_pid)
+        if chrome_cg not in (launch, own):
+            return f"Chrome runs in {chrome_cg}, not {launch} or {own}"
+        portal_cg = proc_cgroup(self.portal_pid)
+        if (not portal_cg.startswith(mgr + "/")
+                or not portal_cg.endswith("/" + PORTAL_UNIT)):
+            return f"portal runs in {portal_cg}"
+        bus = [(cg, BUS_UNITS[cg.rsplit("/", 1)[-1]]) for cg in cg_walk(mgr)
+               if cg.rsplit("/", 1)[-1] in BUS_UNITS and cg_procs(cg)]
+        if len(bus) != 1:
+            return f"cannot identify the session bus cgroup: {bus!r}"
+        self.exempt = {launch: "chrome", own: "chrome",
+                       portal_cg: PORTAL_BINARIES, bus[0][0]: bus[0][1]}
+        return None
+
+    # -- freeze / thaw ------------------------------------------------------
+
+    def _freeze_tree(self, cg):
+        for c in cg_children(cg):
+            if c in self.exempt:
+                continue
+            if any(e.startswith(c + "/") for e in self.exempt):
+                self._freeze_tree(c)
+                continue
+            if cg_freeze_flag(c):
+                continue  # already frozen by someone else; leave it
+            cg_write_freeze(c, True)
+            self.frozen_cgs.append(c)
+
+    def freeze(self):
+        """None once everything else is frozen and audited; else a reason
+        (the caller must still call thaw())."""
+        self.started = time.monotonic()
+        try:
+            why = self._find_exempt()
+            if why:
+                return why
+            self._freeze_tree(user_manager_cg())
+            for sc in session_scopes():
+                if not any(proc_uid_match(p, self.uid) for p in cg_procs(sc)):
+                    continue
+                if cg_freeze_flag(sc):
+                    continue
+                unit = sc.rsplit("/", 1)[-1]
+                try:
+                    systemctl_freezer("freeze", unit)
+                except Exception as e:
+                    return (f"cannot freeze {unit}: {e} (is "
+                            "/etc/polkit-1/rules.d/50-mp35n.rules installed?)")
+                self.frozen_units.append(sc)
+        except OSError as e:
+            return f"freeze failed: {e}"
+        deadline = time.monotonic() + FREEZE_TIMEOUT
+        pending = list(self.frozen_cgs) + list(self.frozen_units)
+        while pending:
+            pending = [c for c in pending if cg_procs_any(c) and not cg_frozen(c)]
+            if not pending:
+                break
+            if time.monotonic() > deadline:
+                return f"did not freeze in time: {', '.join(pending)}"
+            time.sleep(0.002)
+        return self.audit()
+
+    def thaw(self):
+        with self._lock:
+            if self._thawed:
+                return []
+            self._thawed = True
+        errors = []
+        for c in reversed(self.frozen_cgs):
+            try:
+                cg_write_freeze(c, False)
+            except OSError as e:
+                if os.path.isdir(f"{CG_ROOT}{c}"):
+                    errors.append(f"{c}: {e}")
+        for sc in self.frozen_units:
+            try:
+                systemctl_freezer("thaw", sc.rsplit("/", 1)[-1])
+            except Exception as e:
+                errors.append(f"{sc}: {e}")
+        for e in errors:
+            print(f"{APP}: THAW FAILED {e}", flush=True)
+        return errors
+
+    def elapsed_ms(self):
+        return int((time.monotonic() - self.started) * 1000) if self.started else 0
+
+    # -- audit --------------------------------------------------------------
+
+    def audit(self):
+        """None if every running process of this uid is the daemon itself,
+        Chrome or its children in Chrome's scope, the verified portal, or
+        the verified session bus. Everything else must be frozen."""
+        me = os.getpid()
+        for name in os.listdir("/proc"):
+            if not name.isdigit():
+                continue
+            pid = int(name)
+            if pid == me or not proc_uid_match(pid, self.uid):
+                continue
+            try:
+                cg = proc_cgroup(pid)
+                kind = self.exempt.get(cg)
+                if kind == "chrome":
+                    if (not is_descendant(pid, self.chrome_pid)
+                            and verify_helper_process(pid, CHROME_HELPERS)):
+                        return (f"{describe_pid(pid)} sits in Chrome's scope "
+                                "but is not Chrome's child")
+                    continue
+                if kind is not None:
+                    why = verify_helper_process(pid, kind)
+                    if why:
+                        return f"unexpected process in {cg}: {why}"
+                    continue
+                if not cg_frozen(cg):
+                    return f"{describe_pid(pid)} in {cg} is not frozen"
+            except FileNotFoundError:
+                continue  # exited
+            except OSError as e:
+                if os.path.exists(f"/proc/{pid}"):
+                    return f"cannot audit pid {pid}: {e}"
+        return None
+
+
+def cg_procs_any(cg):
+    """True if cg or a descendant has processes (an empty cgroup never
+    reports frozen on some kernels, so it is not waited for)."""
+    try:
+        with open(f"{CG_ROOT}{cg}/cgroup.events") as f:
+            return any(l.split() == ["populated", "1"] for l in f)
+    except OSError:
+        return False
+
+
+def thaw_leftovers():
+    """After a crash mid-delivery: thaw what a delivery may have frozen."""
+    for cg in cg_walk(user_manager_cg()):
+        if cg != user_manager_cg() and cg_freeze_flag(cg):
+            try:
+                cg_write_freeze(cg, False)
+                print(f"{APP}: thawed leftover {cg}", flush=True)
+            except OSError:
+                pass
+    for sc in session_scopes():
+        if cg_freeze_flag(sc):
+            try:
+                systemctl_freezer("thaw", sc.rsplit("/", 1)[-1])
+                print(f"{APP}: thawed leftover {sc}", flush=True)
+            except Exception as e:
+                print(f"{APP}: cannot thaw {sc}: {e}", flush=True)
+
+
 def chrome_args(args):
     """Return Chrome argv with CHROME_FEATURE enabled. Chrome only honours
     the last --enable-features, so merge into an existing one."""
@@ -701,6 +1054,7 @@ class State:
         # The token goes only to the client that typed the password; it
         # binds that unlock to the one Chrome process `35 run` started.
         self.grant = None
+        self.delivering = False     # a DeliveryFreeze is active
 
     @property
     def locked(self):
@@ -793,8 +1147,22 @@ class State:
             why = verify_chrome_process(pid)
             if why:
                 return {"ok": False, "error": why}
+            scope = str(req.get("scope", ""))
+            launch = f"{user_manager_cg()}/app.slice/{scope}"
+            own = (f"{user_manager_cg()}/app.slice/"
+                   f"{CHROME_OWN_SCOPE.format(pid=pid)}")
+            if (not scope.startswith(CHROME_SCOPE_PREFIX)
+                    or not scope.endswith(".scope") or "/" in scope):
+                return {"ok": False, "error": f"bad launch scope {scope!r}"}
+            try:
+                cg = proc_cgroup(pid)
+            except OSError as e:
+                return {"ok": False, "error": f"cannot read Chrome's cgroup: {e}"}
+            if cg not in (launch, own):
+                return {"ok": False, "error": f"Chrome runs in {cg}, not {launch}"}
+            g["scope"] = launch
             g["pid"] = pid
-            print(f"{APP}: authorized Chrome pid {pid}", flush=True)
+            print(f"{APP}: authorized Chrome pid {pid} in {g['scope']}", flush=True)
             return {"ok": True}
         if cmd == "lock":
             self.wipe()
@@ -1016,41 +1384,82 @@ def build_dbus_objects(bus, state, verifier):
 
     class PortalSecret(dbus.service.Object):
         @dbus.service.method(IF_PORTAL_SECRET, in_signature="osha{sv}",
-                             out_signature="ua{sv}", sender_keyword="sender")
-        def RetrieveSecret(self, _handle, app_id, fd, _options, sender=None):
+                             out_signature="ua{sv}", sender_keyword="sender",
+                             async_callbacks=("reply", "_error"))
+        def RetrieveSecret(self, _handle, app_id, fd, _options, sender=None,
+                           reply=None, _error=None):
             guard_portal(sender)
             app = str(app_id)
+
+            def refuse(why, ours):
+                print(f"{APP}: portal call refused: {why}", flush=True)
+                state.denied += 1
+                state.last_denied = {"sender": "portal", "at": time.time(),
+                                     "where": f"RetrieveSecret: {why}",
+                                     "ours": ours}
+                if ours:
+                    state.wipe()  # Chrome itself was refused: lock
+                reply(*portal_result(2))
+
             if app.lower() not in CHROME_APP_IDS:
                 print(f"{APP}: portal deny app_id={app!r}", flush=True)
                 state.denied += 1
                 state.last_denied = {"sender": "portal", "at": time.time(),
                                      "where": f"RetrieveSecret: app_id {app!r}"}
-                return portal_result(2)
+                return reply(*portal_result(2))
             if state.secret is None:
                 print(f"{APP}: portal request while locked", flush=True)
                 state.denied += 1
                 state.last_denied = {"sender": "portal", "at": time.time(),
                                      "where": "RetrieveSecret: vault locked"}
-                return portal_result(2)
+                return reply(*portal_result(2))
 
-            raw = None
-            pid = None
-            try:
-                raw = fd.take() if hasattr(fd, "take") else int(fd)
+            raw = fd.take() if hasattr(fd, "take") else int(fd)
+            if state.delivering:
+                os.close(raw)
+                return refuse("another delivery is in progress", False)
+            g = state.grant
+            if not g or not g.get("pid"):
+                os.close(raw)
+                return refuse("no Chrome launch authorized "
+                              "(start Chrome with '35 run')", False)
+
+            # Freeze everything else of ours before the key exists anywhere
+            # outside this process.
+            freezer = DeliveryFreeze(g["pid"], verifier._pid_for_sender(sender),
+                                     g.get("scope"))
+            import threading
+            watchdog = threading.Timer(WATCHDOG, freezer.thaw)
+            watchdog.daemon = True
+            watchdog.start()
+            state.delivering = True
+
+            def finish(note=None):
+                watchdog.cancel()
                 try:
+                    os.close(raw)
+                except OSError:
+                    pass
+                errors = freezer.thaw()
+                state.delivering = False
+                if errors:
+                    notify("mp35n could not thaw: " + "; ".join(errors))
+                return note
+
+            try:
+                why = freezer.freeze()
+                ours = True
+                if not why:
                     why, ours = state.check_request(raw)
-                except Exception as e:
-                    why, ours = f"verification error: {e}", True
-                if why:
-                    print(f"{APP}: portal call refused: {why}", flush=True)
-                    state.denied += 1
-                    state.last_denied = {"sender": "portal", "at": time.time(),
-                                         "where": f"RetrieveSecret: {why}",
-                                         "ours": ours}
-                    if ours:
-                        state.wipe()  # Chrome itself was refused: lock
-                    return portal_result(2)
-                pid = state.grant["pid"]
+            except Exception as e:
+                why, ours = f"verification error: {e}", True
+            if why:
+                finish()
+                return refuse(why, ours)
+
+            pid = g["pid"]
+            frozen_ms = freezer.elapsed_ms()
+            try:
                 secret = bytes(state.secret)
                 off = 0
                 while off < len(secret):
@@ -1060,19 +1469,50 @@ def build_dbus_objects(bus, state, verifier):
                     off += n
             except Exception as e:
                 print(f"{APP}: portal write failed: {e}", flush=True)
-                return portal_result(2)
-            finally:
-                if raw is not None:
-                    try:
-                        os.close(raw)
-                    except OSError:
-                        pass
-
-            state.last_portal = {"app_id": app, "pid": pid, "at": time.time()}
+                finish()
+                return reply(*portal_result(2))
             state.wipe()  # one key per unlock: lock immediately
-            print(f"{APP}: portal secret delivered to verified Chrome pid {pid} "
-                  f"(app_id={app!r}); vault locked", flush=True)
-            return portal_result(0)
+            # Chrome reads the pipe once the portal relays this reply, so
+            # answer now and keep everything else frozen until it has.
+            reply(*portal_result(0))
+
+            import fcntl
+            import termios
+            from gi.repository import GLib
+            drain_deadline = time.monotonic() + DRAIN_TIMEOUT
+
+            def poll_drain():
+                buf = bytearray(4)
+                try:
+                    fcntl.ioctl(raw, termios.FIONREAD, buf)
+                    left = struct.unpack("i", bytes(buf))[0]
+                except OSError:
+                    left = 0
+                timed_out = time.monotonic() > drain_deadline
+                if left and not timed_out:
+                    return True  # poll again
+                late = freezer.audit() if not left else None
+                total = freezer.elapsed_ms()
+                finish()
+                warning = None
+                if left:
+                    warning = (f"Chrome did not read the key within "
+                               f"{DRAIN_TIMEOUT:.0f}s; it was still in the pipe "
+                               "when everything was thawed")
+                elif late:
+                    warning = f"process appeared during delivery: {late}"
+                state.last_portal = {"app_id": app, "pid": pid, "at": time.time(),
+                                     "frozen_ms": total, "warning": warning}
+                if warning:
+                    print(f"{APP}: WARNING {warning}", flush=True)
+                    notify(f"mp35n: {warning}. Consider '35 init --force'.")
+                print(f"{APP}: portal secret delivered to verified Chrome pid "
+                      f"{pid} (app_id={app!r}); everything else frozen for "
+                      f"{total} ms (audit took {frozen_ms} ms); vault locked",
+                      flush=True)
+                return False
+
+            GLib.timeout_add(2, poll_drain)
 
         @dbus.service.method(IF_PROPS, in_signature="ss", out_signature="v",
                              sender_keyword="sender")
@@ -1126,6 +1566,13 @@ def cmd_daemon(args):
         die("prctl(PR_SET_DUMPABLE, 0) failed")
 
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+
+    # A crash mid-delivery leaves your processes frozen; systemd restarts
+    # us, and the first thing we do is thaw them.
+    try:
+        thaw_leftovers()
+    except Exception as e:
+        print(f"{APP}: thaw_leftovers: {e}", flush=True)
 
     state = State()
     verifier = Verifier()
@@ -1343,7 +1790,11 @@ def cmd_status(args):
     if r.get("last_portal"):
         lp = r["last_portal"]
         when = time.strftime("%H:%M:%S", time.localtime(lp.get("at", 0)))
-        status_row("delivered", f"pid {lp.get('pid')}", when)
+        note = when + (f", others frozen {lp['frozen_ms']} ms"
+                       if lp.get("frozen_ms") is not None else "")
+        status_row("delivered", f"pid {lp.get('pid')}", note)
+        if lp.get("warning"):
+            status_warn(f"{lp['warning']}; rekey with '35 init --force' if unsure")
     if r.get("denied"):
         ld = r.get("last_denied") or {}
         status_row("denied", paint(f"{r['denied']} request(s)", "yellow"),
@@ -1895,11 +2346,34 @@ def cmd_run(args):
         die(f"{why or 'unlock failed'}; not starting chrome")
 
     started = time.time()
+    # Chrome gets its own scope: during the key delivery the daemon freezes
+    # every other cgroup of yours, so nothing else can open the pipe.
+    why = trusted_path(SYSTEMD_RUN)
+    if why:
+        daemon_call({"cmd": "lock"})
+        die(f"refusing to use {SYSTEMD_RUN}: {why}")
+    scope = f"{CHROME_SCOPE_PREFIX}{os.urandom(8).hex()}.scope"
     proc = subprocess.Popen(
-        argv, env=env, close_fds=True,
+        [SYSTEMD_RUN, "--user", "--scope", "--quiet", "--collect",
+         "--slice=app.slice", f"--unit={scope}", "--"] + argv,
+        env=env, close_fds=True,
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL, start_new_session=True)
-    ar = daemon_call({"cmd": "authorize", "token": token["t"], "pid": proc.pid})
+    # systemd-run creates the scope, then execs Chrome in the same pid.
+    exec_deadline = time.time() + 10
+    while True:
+        try:
+            if os.readlink(f"/proc/{proc.pid}/exe") == chrome:
+                break
+        except OSError:
+            pass
+        if proc.poll() is not None or time.time() > exec_deadline:
+            proc.kill()
+            daemon_call({"cmd": "lock"})
+            die("systemd-run could not start Chrome in its own scope; vault locked")
+        time.sleep(0.01)
+    ar = daemon_call({"cmd": "authorize", "token": token["t"], "pid": proc.pid,
+                      "scope": scope})
     if not ar or not ar.get("ok"):
         # Kill it before it asks for the key and falls back to v10.
         proc.kill()

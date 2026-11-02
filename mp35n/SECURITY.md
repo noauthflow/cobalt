@@ -10,16 +10,33 @@ the Chrome that `35 run` launched. It never crosses D-Bus.
    environment.d, a `.desktop` override or shell rc) hooks it and records the
    master password. Tested. Password + `35vault.json` = key. The password
    is also replayable: malware can run `35 run --password-stdin` whenever it
-   wants and retry the pipe read (2) until it wins.
+   wants.
    Fix: make unlock non-replayable, e.g. a hardware key touch (FIDO2
    hmac-secret) per launch, so a capture gives nothing to reuse.
 
-2. **Pipe read.** Any same-uid process can open `/proc/<chrome>/fd/N` (or the
-   portal's end) and read the key, then write it back unnoticed. It evades
-   the reader scan by going non-dumpable or opening after the scan.
-   Fix: refuse when an unknown non-dumpable process with your uid exists
-   (exempt `(sd-pam)` by pid/parent, not name); rescan after the write.
-   Real fix: SELinux `chrome_t` + `staff_u` login.
+## closed
+
+- **Pipe read.** Any same-uid process can open `/proc/<chrome>/fd/N` (or
+  the portal's or bus's copy of the pipe) and read the key while it sits
+  there. This needs no knowledge of mp35n. Now every delivery freezes all
+  your other processes (cgroup v2 freezer) before the key is written:
+  every cgroup under `user@UID.service` directly, login session scopes
+  through systemd (`FreezeUnit`, allowed by
+  `/etc/polkit-1/rules.d/50-mp35n.rules`). Only Chrome's two scopes
+  (`mp35n-chrome-*.scope` from `35 run`, `app-com.google.Chrome-<pid>.scope`
+  Chrome moves itself into), the portal frontend and the session bus keep
+  running. Then every running process of your uid is audited: it must be
+  Chrome or its descendant (or Chrome's crashpad handler), or the root-owned
+  portal / bus binary with no code-loading environment; anything else that
+  is not frozen refuses the delivery. The key is written, and only after
+  Chrome has read every byte (`FIONREAD` = 0) is everything thawed. A
+  frozen process that opened the pipe earlier finds it empty. `35 status`
+  shows how long others were frozen and warns if Chrome did not read within
+  5 s or a process appeared mid-delivery. A crash thaws on restart; a
+  watchdog thread thaws after 10 s regardless.
+  Left: the portal and bus are trusted while running (their binaries and
+  environment are checked, not their memory). Root is out of scope.
+  SELinux `chrome_t` + `staff_u` would close it without the freeze.
 
 ## nice to keep in mind
 

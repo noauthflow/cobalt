@@ -79,6 +79,7 @@ are no zenity/rofi/askpass fallbacks. The dialog shows the fixed codeword
     /run/mp35n/control.sock       control socket (systemd-created)
     ~/.local/share/applications/google-chrome.desktop   -> 35 run
     /usr/share/xdg-desktop-portal/portals/mp35n.portal
+    /etc/polkit-1/rules.d/50-mp35n.rules   lets the daemon freeze/thaw your session scopes
     ~/.config/xdg-desktop-portal/portals.conf
     mp35n.portal                  portal descriptor (this folder)
 
