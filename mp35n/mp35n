@@ -68,9 +68,15 @@ CHROME_BINARIES = ("/opt/google/chrome/chrome",)
 # ...) is refused: those let another process read decrypted cookies.
 ALLOWED_CHROME_FLAGS = {"--incognito", "--new-window", "--restore-last-session",
                         "--start-maximized", "--enable-wayland-ime"}
-ALLOWED_CHROME_FLAG_PREFIXES = ("--profile-directory=", "--ozone-platform=",
-                                "--ozone-platform-hint=", "--app=",
+ALLOWED_CHROME_FLAG_PREFIXES = ("--profile-directory=", "--app=",
                                 "--wayland-text-input-version=")
+
+# Always native Wayland: under X11 (Xwayland) any process can type into
+# Chrome (xdotool) and drive it into DevTools. A command-line platform
+# overrides chrome://flags (Local State), which anything running as you can
+# edit. Other --ozone-platform* values are dropped by `35 run` and refused
+# by the daemon.
+CHROME_OZONE = "--ozone-platform=wayland"
 
 # Environment variables that load foreign code into Chrome, move its
 # profile, or leak its TLS keys. Matched by prefix.
@@ -194,11 +200,13 @@ def chrome_argv_problems(argv, exe):
     for a in argv[1:]:
         if not a.startswith("-"):
             continue  # URL or file to open
-        if a == f"--enable-features={CHROME_FEATURE}":
+        if a in (f"--enable-features={CHROME_FEATURE}", CHROME_OZONE):
             continue
         if a in ALLOWED_CHROME_FLAGS or a.startswith(ALLOWED_CHROME_FLAG_PREFIXES):
             continue
         return f"Chrome flag {a!r} is not allowed"
+    if CHROME_OZONE not in argv[1:]:
+        return f"Chrome was started without {CHROME_OZONE} (X11 is refused)"
     return None
 
 
@@ -697,6 +705,8 @@ def chrome_args(args):
     the last --enable-features, so merge into an existing one."""
     out, merged = [], False
     for a in args:
+        if a.startswith("--ozone-platform"):
+            continue  # replaced by CHROME_OZONE
         if a.startswith("--enable-features="):
             feats = [f for f in a.split("=", 1)[1].split(",") if f]
             if CHROME_FEATURE not in feats:
@@ -706,7 +716,7 @@ def chrome_args(args):
         out.append(a)
     if not merged:
         out.insert(0, f"--enable-features={CHROME_FEATURE}")
-    return out
+    return [CHROME_OZONE] + out
 
 
 def cookie_report():

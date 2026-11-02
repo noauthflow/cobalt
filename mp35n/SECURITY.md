@@ -50,8 +50,14 @@ the Chrome that `35 run` launched. It never crosses D-Bus.
   `Local State` are not covered.
 - **Forced v10.** A `lock` during launch, or starting Chrome directly, makes
   Chrome drop v12 cookies (you're logged out) and write unprotected v10.
-- **Window control.** Anything running as you can drive Chrome's UI into
-  DevTools and read cookies.
+- **Window control.** Under X11 (incl. Xwayland) anything running as you
+  can type into Chrome (`xdotool`) and drive it into DevTools. `35 run`
+  always passes `--ozone-platform=wayland` (overrides `chrome://flags` in
+  `Local State`), drops any other `--ozone-platform*`, and the daemon
+  refuses a Chrome started without it. Wayland gives other clients no
+  input injection; `/dev/uinput` is root-only. Left: the accessibility bus
+  (AT-SPI) can read page text and trigger UI actions, and the
+  RemoteDesktop portal can inject input but asks you first.
 - **Bus-name squatting.** Whoever holds `org.freedesktop.secrets` answers
   Chrome's key request. The daemon then refuses unlocks, alerts, shows the
   holder in `35 status`, and takes the name back when it is freed. A Chrome
