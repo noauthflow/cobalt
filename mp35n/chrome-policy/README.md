@@ -69,16 +69,25 @@ The file is parsed, not executed by a shell; only `~` and `$HOME` expand.
 
 ## Where it lands
 
-| OS | path | owner |
+| OS | what | where |
 |---|---|---|
-| Linux | `/etc/opt/chrome/policies/managed/mp35n-extensions.json` | `root:root 0644` |
-| macOS | `/Library/Managed Preferences/com.google.Chrome.plist` | `root:wheel 0644` |
-| macOS | `/Library/Preferences/com.google.Chrome.plist` (legacy domain, still read) | `root:wheel 0644` |
+| Linux | managed policy JSON | `/etc/opt/chrome/policies/managed/mp35n-extensions.json` (`root:root 0644`) |
+| macOS | profile you approve | `com.google.Chrome.mobileconfig` (next to this README) |
+| macOS | profile store | `/var/db/ConfigurationProfiles/Store` (SIP-protected) |
+| macOS | what Chrome reads | `/Library/Managed Preferences/com.google.Chrome.plist`, written by macOS |
 
-On macOS, user-domain prefs (`defaults write com.google.Chrome …` without
-sudo) are not read as policy. If you ever enroll in MDM, remove these and
-let the profile own the policy. Optional extra on macOS:
-`sudo chflags schg` on the managed copy (`chflags noschg` before updating).
+On macOS the script writes a configuration profile and opens it; approve it
+in **System Settings → General → Device Management → mp35n Chrome policy**.
+macOS 27 removed `profiles install`, so there is no CLI path.
+
+Do not hand-place the plist in `/Library/Managed Preferences`. That file is
+generated from the profile store; a copy without a record behind it has
+nothing keeping it alive, and it does not survive. The profile installs to
+the same path, which is why Chrome reads it either way — the difference is
+who owns the file.
+
+To undo: `System Settings → General → Device Management → Remove`, or
+`./apply-policy.sh --remove` for the reminder text.
 
 ## What the policy contains
 

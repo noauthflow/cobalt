@@ -4,11 +4,11 @@
 # generated from extensions.env. Everything not listed is blocked.
 # Also locks the network: no proxy, no user-added CAs, no custom DNS.
 #
-#   apply-policy.sh                       generate, show, install (sudo)
-#   apply-policy.sh --dev                 open briefly to "Load unpacked", then lock
+#   apply-policy.sh                       generate and install
 #   apply-policy.sh --dry-run             generate and show, install nothing
 #   apply-policy.sh --dry-run --os macos  preview the other OS's policy
-#   apply-policy.sh --remove              uninstall the policy (sudo)
+#   apply-policy.sh --remove              uninstall (Linux via sudo)
+#   apply-policy.sh --dev                 Linux: open, load unpacked, then lock
 #
 # Chrome disables "Load unpacked" entirely while everything is blocked by
 # default (the "*" rule), allowlist or not. --dev installs the policy
@@ -17,8 +17,12 @@
 # allowlist keep working under the locked policy.
 #
 # Linux: /etc/opt/chrome/policies/managed/mp35n-extensions.json (root 0644)
-# macOS: /Library/Managed Preferences/com.google.Chrome.plist and
-#        /Library/Preferences/com.google.Chrome.plist (root:wheel 0644)
+# macOS: a configuration profile. Generated to com.google.Chrome.mobileconfig
+#        and opened, because macOS 27 removed `profiles install`; approve it
+#        in System Settings -> General -> Device Management. macOS then writes
+#        /Library/Managed Preferences/com.google.Chrome.plist itself, which is
+#        the only way that file survives (a hand-placed copy has no profile
+#        record behind it and gets pruned).
 #
 # Only the final copy runs as root; parsing and generation run as you.
 # Portable: bash 3.2 (macOS) and python3 >= 3.8.
@@ -54,17 +58,14 @@ case "$OS" in linux|macos) ;; *) echo "--os must be linux or macos" >&2; exit 2 
 
 LINUX_DIR="/etc/opt/chrome/policies/managed"
 LINUX_DEST="$LINUX_DIR/mp35n-extensions.json"
-MAC_MANAGED="/Library/Managed Preferences/com.google.Chrome.plist"
-MAC_LEGACY="/Library/Preferences/com.google.Chrome.plist"
 
 if [ "$MODE" = remove ]; then
 	if [ "$OS" = linux ]; then
 		sudo rm -f "$LINUX_DEST"
 		echo "removed $LINUX_DEST"
 	else
-		sudo rm -f "$MAC_MANAGED" "$MAC_LEGACY"
-		sudo killall cfprefsd 2>/dev/null || true
-		echo "removed $MAC_MANAGED and $MAC_LEGACY"
+		echo "macOS: remove the profile in System Settings"
+		echo "  General -> Device Management -> mp35n Chrome policy -> Remove"
 	fi
 	echo "Restart Chrome (or chrome://policy -> Reload policies)."
 	exit 0
@@ -206,13 +207,36 @@ def build(locked):
     policy["DnsOverHttpsMode"] = "off"
     return policy
 
-for name, locked in (("policy", True), ("policy-open", False)):
-    if target_os == "linux":
+def mobileconfig(policy, ident, display):
+    """A profile with a com.google.Chrome payload. macOS materializes it into
+    /Library/Managed Preferences and keeps it there because the profile store
+    references it -- a hand-placed plist has no such record and gets dropped
+    (that is why the boot guard keeps losing)."""
+    import uuid
+    inner = {"PayloadType": "com.google.Chrome",
+             "PayloadIdentifier": ident + ".chrome",
+             "PayloadUUID": str(uuid.uuid5(uuid.NAMESPACE_URL, ident + ".chrome")),
+             "PayloadVersion": 1,
+             "PayloadDisplayName": display}
+    inner.update(policy)
+    return {"PayloadContent": [inner],
+            "PayloadType": "Configuration",
+            "PayloadIdentifier": ident,
+            "PayloadUUID": str(uuid.uuid5(uuid.NAMESPACE_URL, ident)),
+            "PayloadVersion": 1,
+            "PayloadDisplayName": display,
+            "PayloadOrganization": "mp35n",
+            "PayloadDescription": "Chrome extension allowlist and network lock.",
+            "PayloadRemovalDisallowed": False}
+
+if target_os == "linux":
+    for name, locked in (("policy", True), ("policy-open", False)):
         with open(os.path.join(out_dir, name + ".json"), "w") as f:
             json.dump(build(locked), f, indent=2); f.write("\n")
-    else:
-        with open(os.path.join(out_dir, name + ".plist"), "wb") as f:
-            plistlib.dump(build(locked), f)
+else:
+    with open(os.path.join(out_dir, "policy.mobileconfig"), "wb") as f:
+        plistlib.dump(mobileconfig(build(True), "dev.cobalt.mp35n.chrome",
+                                   "mp35n Chrome policy"), f)
 
 # Compare against what this machine's Chrome has installed.
 if (target_os == "linux") == sys.platform.startswith("linux"):
@@ -243,28 +267,40 @@ PY
 
 if [ "$MODE" = dry ]; then
 	echo "--- generated policy (not installed)"
-	if [ "$OS" = linux ]; then cat "$TMP/policy.json"; else cat "$TMP/policy.plist"; fi
+	if [ "$OS" = linux ]; then
+		cat "$TMP/policy.json"
+	else
+		plutil -lint "$TMP/policy.mobileconfig"
+		cat "$TMP/policy.mobileconfig"
+	fi
 	exit 0
 fi
 
-# install_policy <name>: copy $TMP/<name>.{json,plist} into place as root
+# install_policy <name>: copy $TMP/<name>.json into place as root (Linux)
 install_policy() {
-	if [ "$OS" = linux ]; then
-		sudo install -d -m 0755 -o root -g root "$LINUX_DIR"
-		sudo install -m 0644 -o root -g root "$TMP/$1.json" "$LINUX_DEST"
-		ls -l "$LINUX_DEST"
-	else
-		plutil -lint "$TMP/$1.plist" >/dev/null
-		sudo mkdir -p "/Library/Managed Preferences"
-		sudo install -m 0644 -o root -g wheel "$TMP/$1.plist" "$MAC_MANAGED"
-		sudo install -m 0644 -o root -g wheel "$TMP/$1.plist" "$MAC_LEGACY"
-		# flush the preferences cache, else Chrome may read stale values
-		sudo killall cfprefsd 2>/dev/null || true
-		ls -l "$MAC_MANAGED" "$MAC_LEGACY"
-	fi
+	sudo install -d -m 0755 -o root -g root "$LINUX_DIR"
+	sudo install -m 0644 -o root -g root "$TMP/$1.json" "$LINUX_DEST"
+	ls -l "$LINUX_DEST"
+}
+
+# macOS: write the configuration profile and open it. macOS 27 dropped
+# `profiles install`, so approval has to happen in System Settings.
+PROFILE_FILE="$HERE/com.google.Chrome.mobileconfig"
+
+install_profile() {
+	plutil -lint "$TMP/policy.mobileconfig" >/dev/null
+	cp "$TMP/policy.mobileconfig" "$PROFILE_FILE"
+	echo "--- profile written: $PROFILE_FILE"
+	echo "    approve it: System Settings -> General -> Device Management"
+	echo "                -> mp35n Chrome policy -> Install"
+	open "$PROFILE_FILE" 2>/dev/null || true
 }
 
 if [ "$MODE" = dev ]; then
+	if [ "$OS" = macos ]; then
+		echo "--dev is Linux-only: a macOS profile needs GUI approval on each change" >&2
+		exit 2
+	fi
 	# Whatever happens (Enter, Ctrl-C, error), end in the locked state.
 	lock_again() {
 		echo
@@ -282,6 +318,14 @@ if [ "$MODE" = dev ]; then
 	echo "1. chrome://policy -> Reload policies"
 	echo "2. chrome://extensions -> Load unpacked -> pick the folders listed above"
 	read -r -p "3. press Enter to lock again " _ || true
+	exit 0
+fi
+
+if [ "$OS" = macos ]; then
+	install_profile
+	echo
+	echo "After approving: chrome://policy lists the same rules as Platform"
+	echo "policy, with no errors. Undo: $0 --remove"
 	exit 0
 fi
 
