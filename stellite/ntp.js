@@ -230,6 +230,7 @@ const scanFolder = async (dir) => {
       next.set(f.name, prev);
       urls.push(prev.url);
     } else {
+      if (prev) URL.revokeObjectURL(prev.url);
       const url = URL.createObjectURL(f);
       next.set(f.name, { url, lastModified: f.lastModified });
       urls.push(url);
@@ -238,6 +239,8 @@ const scanFolder = async (dir) => {
   for (const [name, v] of blobUrls) if (!next.has(name)) URL.revokeObjectURL(v.url);
   blobUrls = next;
   S.photos = urls;
+  // keep a permission-free copy for the next launch (see loadCachedPhotos)
+  idb.set('photoFiles', files).catch(() => {});
 
   renderPreview();
   const n = urls.length;
@@ -251,6 +254,24 @@ const scanFolder = async (dir) => {
   // only (re)pick a background when photos just appeared or the current one vanished
   const vanished = currentBg && !urls.includes(currentBg);
   if ((hadPhotos === 0 && n > 0) || vanished) showMode();
+};
+
+// Chrome drops the folder's FSA read permission on every relaunch (quit,
+// update, reboot) and only re-grants it on a user gesture, so the real files
+// aren't readable until you click. The cached File objects in IndexedDB are:
+// read them first, paint a wallpaper immediately, and let the scan refresh the
+// set later once a gesture restores permission. No click needed to see a photo.
+const loadCachedPhotos = async () => {
+  const files = await idb.get('photoFiles').catch(() => null);
+  if (!Array.isArray(files) || !files.length) return;
+  for (const f of files) {
+    // reuse the same map the folder scan uses, so unchanged files keep their url
+    blobUrls.set(f.name, { url: URL.createObjectURL(f), lastModified: f.lastModified });
+  }
+  S.photos = files.map((f) => blobUrls.get(f.name).url);
+  renderPreview();
+  setFolderBadge(S.photos.length);
+  showMode();
 };
 
 const connectFolder = async (dir) => {
@@ -324,6 +345,7 @@ $('folderdisconnect').addEventListener('click', async () => {
   dirHandle = null;
   stopPolling();
   await idb.set('dirHandle', undefined);
+  await idb.set('photoFiles', undefined).catch(() => {});
   for (const [, v] of blobUrls) URL.revokeObjectURL(v.url);
   blobUrls = new Map();
   lastSig = null;
@@ -413,7 +435,8 @@ store.get(S, (vals) => {
   paintSlider($('brightness'));
   $('brightval').textContent = S.brightness + '%';
   setFolderState('empty'); // until a saved folder proves otherwise
-  initFolder();
+  // paint the last-known set first, then check whether the folder is readable
+  loadCachedPhotos().finally(initFolder);
   if (S.menu) {
     // fade the fab in with the bg layers (animation carries the 200ms delay)
     requestAnimationFrame(() => requestAnimationFrame(() => $('menubtn').classList.add('on')));

@@ -17,15 +17,20 @@ hand-rolled material design 3 tokens/components — no libraries, no build)
   persists via chrome.storage. reset restores the default lavender.
 - **photos**: one local folder picked once (File System Access API — the
   picker starts on the Desktop; the handle persists in IndexedDB. Chrome
-  resets the read permission on every browser relaunch (reboot, update, quit);
-  the page then re-grants it on your first click or keypress on the new tab,
-  with a Reconnect button in the panel as fallback).
-  the folder is rescanned every 2s (plus on tab focus), so images added or
-  removed on disk show up live: each new tab shows a random photo from the
+  resets the read permission on every browser relaunch (reboot, update, quit)
+  and only re-grants it on a user gesture, with a Reconnect button in the
+  panel as fallback).
+  the last-scanned files are also cached as File blobs in their own IndexedDB
+  database (`stellite`) and loaded before the permission check, so a new tab
+  paints a wallpaper instantly on launch — no click required. the first
+  click/keypress on the page then silently re-grants read access and the 2s
+  poller resumes live watching (plus on tab focus), so images added or removed
+  on disk show up without a reload. each new tab shows a random photo from the
   folder, fading in over the grey (200ms delay, 500ms fade — tunable in the
-  #bg transition). no images are copied or stored — nothing bloats
-  chrome.storage. panel shows folder name, count, a thumbnail strip and a
-  pulsing "watching for changes" indicator.
+  #bg transition). the cache is permission-free and costs disk in the profile
+  (hence `unlimitedStorage`), not chrome.storage; Disconnect clears it. panel
+  shows folder name, count, a thumbnail strip and a pulsing "watching for
+  changes" indicator.
 - **adjust**: brightness (25-150%) slider. photo mode applies live via css
   filter; ascii re-samples on slider release.
 - **ascii art mode**: m3 switch. port of aeolian's DotImage.tsx
